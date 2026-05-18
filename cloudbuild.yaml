@@ -1,0 +1,78 @@
+# ============================================================================
+# Satori v2 — Cloud Build pipeline
+# ============================================================================
+# Triggered on every push to main. Builds the multi-stage Docker image,
+# pushes to Artifact Registry tagged with $SHORT_SHA + :latest, and deploys
+# to Cloud Run service `satori-v2` in us-central1.
+# ============================================================================
+
+substitutions:
+  _REGION:       'us-central1'
+  _AR_REPO:      'satori'
+  _SERVICE_NAME: 'satori-v2'
+  _TAG:          'manual-build'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
+  dynamic_substitutions: true
+
+images:
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${_TAG}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:latest'
+
+steps:
+  - id: 'syntax-check'
+    name: 'python:3.11-slim'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        set -e
+        python -m compileall -q backend/main.py backend/bigquery_client.py backend/database.py backend/auth.py backend/audit.py backend/totp.py backend/redact.py backend/report_generator.py
+        echo "Syntax check passed."
+
+  - id: 'docker-build'
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${_TAG}'
+      - '--tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:latest'
+      - '--cache-from=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:latest'
+      - '.'
+    waitFor: ['syntax-check']
+
+  - id: 'docker-push-sha'
+    name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${_TAG}']
+    waitFor: ['docker-build']
+
+  - id: 'docker-push-latest'
+    name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:latest']
+    waitFor: ['docker-build']
+
+  - id: 'cloud-run-deploy'
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - '${_SERVICE_NAME}'
+      - '--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${_TAG}'
+      - '--region=${_REGION}'
+      - '--platform=managed'
+      - '--service-account=satori-runtime@${PROJECT_ID}.iam.gserviceaccount.com'
+      - '--set-env-vars=VERTEX_PROJECT=${PROJECT_ID},VERTEX_DATASET=Satori_Project,GEMINI_API_KEY=projects/${PROJECT_ID}/secrets/satori-gemini-api-key/versions/latest,JWT_SECRET=projects/${PROJECT_ID}/secrets/satori-v2-jwt-secret/versions/latest'
+      - '--add-cloudsql-instances=${PROJECT_ID}:${_REGION}:satori-v2-db'
+      - '--min-instances=0'
+      - '--max-instances=10'
+      - '--concurrency=80'
+      - '--cpu=1'
+      - '--memory=1Gi'
+      - '--timeout=120s'
+      - '--allow-unauthenticated'
+      - '--quiet'
+    waitFor: ['docker-push-sha']
+
+timeout: '1500s'

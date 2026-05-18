@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+venv/
+.venv/
+*.db
+*.sqlite
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.local
+
+# Secrets / env
+.env
+.env.*
+*.pem
+*.key
+service-account/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Logs
+*.log
+
+# Cloud-side artefacts
+gcloud-*.log
