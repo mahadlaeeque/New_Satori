@@ -2632,3 +2632,40 @@ def health_check():
         "project": _TMC_PROJECT,
         "dataset": _TMC_DATASET_NAME,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SPA STATIC MOUNT — serve the React build at "/"
+#  Must come AFTER every @app.get/@app.post route is registered. FastAPI checks
+#  routes in registration order, so API endpoints are matched first; the mount
+#  catches everything else and returns index.html for client-side routes.
+# ═══════════════════════════════════════════════════════════════════════════════
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+_FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
+
+
+class SPAStaticFiles(StaticFiles):
+    """StaticFiles that falls back to index.html for any unknown path so React
+    Router's client-side routing works on direct visits / refresh."""
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except (HTTPException, StarletteHTTPException) as exc:
+            if exc.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
+
+
+if os.path.isdir(_FRONTEND_DIST):
+    app.mount("/", SPAStaticFiles(directory=_FRONTEND_DIST, html=True), name="react_app")
+else:
+    @app.get("/")
+    def _no_frontend_yet():
+        return {
+            "ok": True,
+            "message": "Satori v2 backend is up. React frontend not yet built into this container "
+                       "(frontend/dist missing). Run `npm run build` in the frontend folder, or wait "
+                       "for the next Cloud Build to bundle it in.",
+        }
