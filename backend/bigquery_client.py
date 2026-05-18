@@ -628,12 +628,3 @@ def find_relevant_data(user_message: str, dataset: str = None) -> str:
     if scope_notice:
         return scope_notice
     return ""
-            "The following is real data from the TMC Satori warehouse. Use it to answer "
-            "the user's question. If a more specific cut is needed, call run_sql.\n\n"
-            + "\n\n".join(matched_data)
-        )
-
-    # Nothing matched — return just the scope notice (if any). The LLM still
-    # has the run_sql tool and the schema in the system prompt, so it can
-    # ask for exactly what it needs.
-    return scope_notice
