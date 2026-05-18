@@ -1392,10 +1392,10 @@ const AgentPage = () => {
               {/* Inline quick prompts */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, maxWidth: 600, margin: "0 auto" }}>
                 {[
-                  { title: "Stock Snapshot", prompt: "What's the current on-hand stock value and quantity across active plants?", icon: Warehouse },
-                  { title: "Goods Movements", prompt: "Break down goods movements by type in the last 90 days and compare receipts vs issues by plant", icon: Truck },
-                  { title: "Procurement Activity", prompt: "Show me top purchase order types by count and recent POs in the last 30 days", icon: ShoppingCart },
-                  { title: "Top Materials", prompt: "Top 10 materials by on-hand stock value with their descriptions and plant", icon: Package },
+                  { title: "Attendance Today", prompt: "What's the overall attendance rate today and how many people were marked late?", icon: Calendar },
+                  { title: "Top Absentees",    prompt: "Who are the top 10 absentees in the last 30 days with their department?",          icon: AlertTriangle },
+                  { title: "Q1 AM Ranking",    prompt: "Rank AMs by Q1 USD achievement. Who's leading and who's at risk?",                  icon: TrendingUp },
+                  { title: "Bench List",       prompt: "List all employees currently on the bench with their position and competencies.",  icon: Users },
                 ].map((item, i) => (
                   <button key={i} onClick={() => { setInput(item.prompt); }} style={{
                     padding: "16px 18px", background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 14,
@@ -1649,34 +1649,27 @@ const AgentPage = () => {
 };
 
 
-// ─── Mirror-scope notice ──────────────────────────────────────────────
+// ─── Scope notice ─────────────────────────────────────────────────────
 //
-// The SAP mirror we connect to is procurement + manufacturing + finance only —
-// no customer-facing sales / dealer / billing / revenue tables. The backend
-// agent already injects a MIRROR SCOPE NOTICE into Gemini's prompt context
-// when the user asks revenue-style questions in chat, but the Dashboard and
-// Report Builders don't have an equivalent user-visible warning — so people
-// build a "Monthly Sales Revenue" dashboard and discover the issue only after
-// the charts render with one data point.
-//
-// This helper detects revenue-style prompts and produces a yellow inline
-// notice that gets pushed into the chat ONCE, before the API call goes out,
-// so the user sees the scope limitation before they invest time in refinement.
-const _MIRROR_SCOPE_PATTERN = /\b(revenue|sales|dealer|dealers|customer|customers|accounts?\s+receivable|\bAR\b|billing|turnover|invoice|invoicing)\b/i;
+// The TMC dataset covers workforce (employees, attendance, allocation,
+// timesheets) AND sales operations (AM scorecards, pipeline, accounts,
+// hunting gap). The legacy SAP mirror notice no longer applies — every
+// term it used to warn about ("sales", "revenue", "customer") is now
+// natively supported. We keep these helpers as no-ops so existing call
+// sites don't break.
+const _MIRROR_SCOPE_PATTERN = /^.{0}$/;  // never matches
 
-const _isOutOfScopeRevenuePrompt = (text) => _MIRROR_SCOPE_PATTERN.test(text || "");
+const _isOutOfScopeRevenuePrompt = (_text) => false;
 
 const _buildMirrorScopeNotice = (kind) => {
   const noun = kind === "report" ? "report" : "dashboard";
   return (
-    `**Heads-up — about this ${noun}'s data:**\n\n` +
-    `The SAP mirror we're connected to covers **procurement, manufacturing, and finance** only. It doesn't include customer sales orders, dealers, customer master, accounts-receivable, or true revenue tables.\n\n` +
-    `I'll do my best — usually by pointing at billing-related accounting postings as a proxy — but those rows are sparse, so charts may render with a single value. If you'd rather build something with rich, multi-dimensional data, try:\n\n` +
-    `- "Stock value by plant for the last 6 months"\n` +
-    `- "Receipts and issues by plant last 90 days"\n` +
-    `- "Top 50 materials by stock value with descriptions"\n` +
-    `- "Purchase orders by type this year"\n\n` +
-    `Or continue — and I'll proxy with whatever the mirror has.`
+    `**Quick orientation — what this ${noun} can pull from:**\n\n` +
+    `I'm connected to TMC's workforce + sales warehouse. That covers attendance, allocation, bench, timesheets, AM scorecards, pipeline coverage, account visits, and the hunting gap. Try things like:\n\n` +
+    `- "Monthly attendance summary by department"\n` +
+    `- "Q1 AM scorecard: target vs achievement vs open pipeline"\n` +
+    `- "Bench list with competencies"\n` +
+    `- "Pipeline coverage and win rate by AM"\n`
   );
 };
 
@@ -1815,9 +1808,9 @@ const ReportChatPanel = ({
       setIsTyping(false);
 
       let newConfig = null;
-      let truncatedJson = false;
+      let truncatedJson = !!data.truncated;
       if (data.ready && data.config) newConfig = data.config;
-      else if (data.reply && data.reply.includes('"ready"') && data.reply.includes('"config"')) {
+      else if (!truncatedJson && data.reply && data.reply.includes('"ready"') && data.reply.includes('"config"')) {
         truncatedJson = true;
       }
 
@@ -1834,7 +1827,7 @@ const ReportChatPanel = ({
       } else if (truncatedJson) {
         pendingHistory = [...pendingHistory, {
           role: "assistant",
-          text: "My response was cut off while writing the report config. Try saying **\"generate\"** again, or ask me to simplify it (fewer columns / shorter filters).",
+          text: data.reply || "My response was cut off while writing the report config. Try saying **\"generate\"** again, or ask me to simplify it (fewer sections / shorter SQL).",
         }];
         setMessages(pendingHistory);
       } else {
@@ -1849,10 +1842,10 @@ const ReportChatPanel = ({
   };
 
   const suggestedPrompts = [
-    "Current stock value by plant and storage location",
-    "Receipts and issues by plant for last 90 days",
-    "Top 50 materials by stock value with descriptions",
-    "Purchase orders created in the last 30 days",
+    "Monthly attendance summary by department for the last 30 days",
+    "Top 10 absentees in the last 30 days with department and position",
+    "Q1 AM scorecard: target vs achievement vs open pipeline by AM",
+    "Bench report: every employee currently at 0% allocation with competency",
   ];
 
   const showEmptyState = messages.length === 0 && !existingConfig;
@@ -4706,9 +4699,9 @@ const DashboardChatPanel = ({
       // Detect a fresh config — either via the structured `ready` flag or
       // by extracting JSON from the reply (older Gemini turns sometimes leak it).
       let newConfig = null;
-      let truncatedJson = false;
+      let truncatedJson = !!data.truncated;
       if (data.ready && data.config) newConfig = data.config;
-      else if (data.reply && data.reply.includes('"ready"') && data.reply.includes('"config"')) {
+      else if (!truncatedJson && data.reply && data.reply.includes('"ready"') && data.reply.includes('"config"')) {
         try {
           const m = data.reply.match(/\{[\s\S]*\}/);
           if (m) {
@@ -4716,12 +4709,9 @@ const DashboardChatPanel = ({
             if (parsed.ready && parsed.config) newConfig = parsed.config;
             else if (parsed.version && parsed.title && parsed.kpis) newConfig = parsed;
           } else {
-            // No closing brace at all → response cut off mid-JSON.
             truncatedJson = true;
           }
         } catch {
-          // JSON.parse failed — almost always because the model hit the token
-          // cap mid-SQL. Don't dump the broken JSON in the chat.
           truncatedJson = true;
         }
       }
@@ -4733,7 +4723,7 @@ const DashboardChatPanel = ({
       } else if (truncatedJson) {
         pendingHistory = [...pendingHistory, {
           role: "assistant",
-          text: "My response was cut off while writing the dashboard config. Try saying **\"generate\"** again, or ask me to simplify the dashboard (fewer charts / shorter SQL).",
+          text: data.reply || "My response was cut off while writing the dashboard config. Try saying **\"generate\"** again, or ask me to simplify the dashboard (fewer charts / shorter SQL).",
         }];
         setMessages(pendingHistory);
       } else {
@@ -4748,10 +4738,10 @@ const DashboardChatPanel = ({
   };
 
   const suggestedPrompts = [
-    "Stock value by plant for the last 6 months",
-    "Receipts vs issues by plant for last 90 days",
-    "Top 10 materials by current stock value",
-    "Purchase order count by type this year",
+    "Attendance rate by department over the last 30 days",
+    "Bench vs allocated headcount split with top competencies on the bench",
+    "Q1 AM scorecard: target vs achievement vs open pipeline by AM",
+    "Pipeline coverage and historical win rate by AM",
   ];
 
   const showEmptyState = messages.length === 0 && !existingConfig;

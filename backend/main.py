@@ -2489,8 +2489,12 @@ def refine_dashboard(user_message: str, history: list, existing_config=None) -> 
             contents=contents,
             config=genai.types.GenerateContentConfig(
                 system_instruction=system,
-                temperature=0.5,
-                max_output_tokens=2048,
+                temperature=0.4,
+                # Dashboard configs include several charts each with their own
+                # SQL block — 2048 tokens was clipping them mid-statement.
+                # 8192 gives plenty of headroom; raise again if the model
+                # complains.
+                max_output_tokens=8192,
             ),
         )
         return response.text or "I wasn't able to generate a response. Please try again."
@@ -2693,9 +2697,20 @@ def dashboard_refine(body: dict, user: dict = Depends(get_current_user)):
     existing = body.get("existing_config")
     safe_msg = _redact_pii(msg)
     text = refine_dashboard(safe_msg, history, existing)
-    cfg, _truncated = _extract_ready_config(text)
+    cfg, truncated = _extract_ready_config(text)
     if cfg is not None:
-        return {"ready": True, "config": cfg, "reply": text}
+        # Strip the JSON blob from the reply the user sees so they don't get
+        # 200 lines of {...} dumped in chat.
+        clean_reply = _strip_ready_json_from_reply(text)
+        if not clean_reply.strip():
+            clean_reply = "All set — building your dashboard now." if not truncated \
+                else "Got the dashboard config (had to trim a few details — try \"generate\" again if anything's missing)."
+        return {"ready": True, "config": cfg, "reply": clean_reply, "truncated": truncated}
+    if truncated:
+        return {
+            "reply": "My response was cut off while writing the dashboard config. Try saying **\"generate\"** again, or ask me to simplify the dashboard (fewer charts / shorter SQL).",
+            "truncated": True,
+        }
     return {"reply": text}
 
 
@@ -2845,39 +2860,168 @@ A report is a structured document of SECTIONS. Each section has:
   - sql: (only if kind='table') a BigQuery SELECT against ai-vertex-mahad.Satori_Project.<table>
   - text: (only if kind='narrative') the paragraph text
 
-Schema (use exactly these table + column names):
-- Employee_Data: Employee_Code, Resource_Name, Employee_Position, Employee_Hierarchy (department), Employee_Location, Employee_Type. Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
-- Attendance_Data: attendance_date DATE, employee_id, employee_name, attendance_status_text, is_present/is_absent/is_on_leave/is_remote (0/1). 'Late' = LOWER(attendance_status_text)='late'.
-- Allocation_data: project_id, employee_id, allocation_percent (STRING — SAFE_CAST), emp_competency, Flag.
-- Timesheet_Data: TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST), DATE_KEY.
-- Sales_AM_Scorecard: VP, AM, Role, City, col_2026_Target/Q1_ACH/Open_Pipeline (STRING USD — SAFE_CAST), Hist_Win_Rate (decimal 0-1).
-- Sales_Pipeline_Health, Sales_Plan_vs_Pipeline, Sales_Accounts, Sales_Hunting_Gap.
+═══ TMC SCHEMA (these are the ONLY tables / columns that exist — do not invent others) ═══
 
-CONVERSATION FLOW:
+WORKFORCE TABLES:
+- `ai-vertex-mahad.Satori_Project.Employee_Data`
+    Employee_Code, Resource_Name, Employee_Position, Employee_Hierarchy (= department),
+    Employee_Location, Employee_Type, Joining_Date, Gender.
+    "Active employees" filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
+
+- `ai-vertex-mahad.Satori_Project.Attendance_Data`
+    attendance_date (DATE), employee_id, employee_name,
+    attendance_status_text (e.g. 'Present', 'Absent', 'Late', 'On Leave'),
+    is_present, is_absent, is_on_leave, is_remote  (each 0/1 INTEGER).
+    'Late' = LOWER(attendance_status_text) = 'late'.
+    Attendance rate = ROUND(100.0 * SUM(is_present) / NULLIF(COUNT(*),0), 1).
+
+- `ai-vertex-mahad.Satori_Project.Allocation_data`
+    project_id, employee_id, allocation_percent (STRING — SAFE_CAST AS FLOAT64),
+    emp_competency, Flag, Start_Date, End_Date.
+    Bench = employees whose MAX(allocation_percent) per project is 0 or NULL.
+
+- `ai-vertex-mahad.Satori_Project.Timesheet_Data`
+    TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64),
+    TICKET_STATUS, DATE_KEY (DATE).
+
+SALES TABLES (USD/visit columns are STRING → SAFE_CAST AS FLOAT64; ratios already decimal):
+- `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard`
+    VP, AM, Role, City,
+    col_2026_Target, Q1_ACH, Open_Pipeline, Hist_Win_Rate.
+- `ai-vertex-mahad.Satori_Project.Sales_Pipeline_Health`
+    AM, City, Open_Pipeline, Q1_ACH, Hist_Win_Rate.
+- `ai-vertex-mahad.Satori_Project.Sales_Plan_vs_Pipeline`
+    AM, City, col_2026_Target, Open_Pipeline, Coverage_Ratio.
+- `ai-vertex-mahad.Satori_Project.Sales_Accounts`
+    AM, City, Account_Name, Account_Tier (A/B/C), Visits_Q1, Last_Visit_Date.
+- `ai-vertex-mahad.Satori_Project.Sales_Hunting_Gap`
+    AM, City, Hunting_Target, Hunting_Achieved, Hunting_Gap.
+
+⚠️ Forbidden: anything with 'plant', 'storage_location', 'material', 'purchase_order',
+'receipts', 'issues', or other SAP/MRP terms. This is workforce + sales data only.
+
+═══ CONVERSATION FLOW ═══
 1. User describes the report they want.
-2. You ask 1-2 clarifying questions if scope is unclear (timeframe, scope of departments/AMs).
-3. Once clear, present the PROPOSED outline in plain language: list each section's title + what it shows. Ask the user to confirm with "generate".
-4. When the user says "generate", return ONLY this JSON (no surrounding text):
+2. Ask 1-2 clarifying questions if scope is unclear (timeframe, departments, AMs).
+3. Once clear, present the PROPOSED outline in plain language: list each
+   section's title + what it shows. Ask the user to confirm with "generate".
+4. When the user says "generate", return ONLY this JSON (no prose around it):
    {"ready": true, "config": {"title": "...", "subtitle": "...", "sections": [
-     {"id": "kpis", "title": "Headline metrics", "kind": "table", "sql": "SELECT ..."},
-     {"id": "intro", "title": "Overview", "kind": "narrative", "text": "..."}
+     {"id": "kpis", "title": "Headline metrics", "kind": "table",
+      "sql": "SELECT department, ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1) AS attendance_pct FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` a JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` e ON e.Employee_Code = a.employee_id WHERE attendance_date BETWEEN DATE_SUB(CURRENT_DATE(),INTERVAL 30 DAY) AND CURRENT_DATE() GROUP BY department ORDER BY attendance_pct DESC LIMIT 50"},
+     {"id": "intro", "title": "Overview", "kind": "narrative",
+      "text": "This report covers the last 30 days of attendance ..."}
    ]}}
 
-SQL RULES (CRITICAL):
-- Fully qualify: ai-vertex-mahad.Satori_Project.<table>.
-- SAFE_CAST all STRING-typed numerics (allocation_percent, TICKET_HOURS, USD/visit fields).
+═══ SQL RULES (CRITICAL — every section's SQL is executed verbatim) ═══
+- Fully qualify every table with backticks: `ai-vertex-mahad.Satori_Project.<table>`.
+- Use ONLY the columns listed above. If a column you want doesn't exist, pick a
+  different angle — never invent column names.
+- SAFE_CAST all STRING-typed numerics (allocation_percent, TICKET_HOURS,
+  col_2026_Target, Q1_ACH, Open_Pipeline) → FLOAT64 / INT64 before doing math.
 - LIMIT every query to 50 rows max.
 - Use ROUND() for percentages and currency.
+- Department grouping: COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified').
+- Always include at least one TABLE section that actually returns rows — a
+  narrative-only report is useless.
 
-STYLE: short clean section titles. Plain English narrative (no markdown headers).
-NEVER expose technical details (table names, column names, SQL) to the user.
-NEVER output the JSON until the user explicitly says "generate".
-Be concise — max 3-4 sentences per chat turn."""
+═══ STYLE ═══
+- Short clean section titles.
+- Plain English narrative (no markdown headers).
+- NEVER show table names, column names, or SQL to the user in chat.
+- NEVER emit the JSON until the user explicitly says "generate".
+- Be concise — max 3-4 sentences per chat turn.
+"""
+
+
+def _strip_ready_json_from_reply(text: str) -> str:
+    """Remove any `{"ready": true, ...}` JSON blob from a model reply so the
+    user-facing chat doesn't show 200 lines of config."""
+    if not text:
+        return ""
+    import re as _re
+    # Remove fenced ```json ... ``` blocks containing "ready".
+    text = _re.sub(r'```(?:json)?\s*\{[\s\S]*?"ready"[\s\S]*?\}\s*```', '', text)
+    # Remove bare `{...}` blocks that contain a "ready":true marker.
+    text = _re.sub(r'\{[\s\S]*?"ready"\s*:\s*true[\s\S]*?\}\s*$', '', text)
+    return text.strip()
+
+
+def _try_repair_json(s: str):
+    """Best-effort fixer for JSON that was truncated mid-output by max_output_tokens.
+
+    Strategy:
+    1. Drop everything after the last balanced position where a value could end.
+    2. Close any open string by appending `"`.
+    3. Walk the string tracking [, {, ", and close them in reverse order.
+    Returns a Python object on success, None on failure."""
+    if not s:
+        return None
+    # If the model wrapped the JSON in a ```json fenced block, strip the fence.
+    s = s.strip()
+    if s.startswith("```"):
+        s = s.split("```", 2)[1] if s.count("```") >= 2 else s[3:]
+        if s.startswith("json"):
+            s = s[4:]
+        s = s.strip()
+        if s.endswith("```"):
+            s = s[:-3].strip()
+
+    # Walk the string and balance braces/brackets/strings.
+    stack = []
+    in_string = False
+    escape = False
+    last_complete = -1
+    for i, ch in enumerate(s):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+            if not stack:
+                last_complete = i  # full document closes here
+
+    # Already balanced — try it raw.
+    if not stack and not in_string and last_complete >= 0:
+        candidate = s[:last_complete + 1]
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+
+    # Truncated. Close out what's open.
+    repaired = s
+    if in_string:
+        repaired += '"'
+    # If the last meaningful token is a comma or colon, the partial value/key
+    # is unusable — strip trailing junk that looks like a half-written token.
+    repaired = repaired.rstrip()
+    while repaired and repaired[-1] in ",:":
+        repaired = repaired[:-1].rstrip()
+    # Close every open container in reverse order.
+    for opener in reversed(stack):
+        repaired += "}" if opener == "{" else "]"
+    try:
+        return json.loads(repaired)
+    except Exception:
+        return None
 
 
 def _extract_ready_config(reply_text: str):
     """The refine AIs are instructed to emit `{"ready": true, "config": {...}}` JSON
-    when the user has confirmed the design. Parse it out if present.
+    when the user has confirmed the design. Parse it out if present, repairing
+    truncation when possible.
     Returns (config_dict, was_truncated)."""
     if not reply_text:
         return None, False
@@ -2889,17 +3033,45 @@ def _extract_ready_config(reply_text: str):
             return obj["config"], False
     except Exception:
         pass
-    # Try to find an embedded JSON object
+    # Try to find an embedded JSON object containing "ready": true.
     import re as _re
-    m = _re.search(r'\{[\s\S]*"ready"\s*:\s*true[\s\S]*\}', text)
-    if m:
+    # Find every "{" position that could start a ready-blob and try parsing from
+    # each. The model sometimes prefixes the JSON with a sentence.
+    starts = [m.start() for m in _re.finditer(r'\{[\s]*"ready"', text)]
+    if not starts:
+        # Fall back to anything that mentions ready+config.
+        if '"ready"' in text and '"config"' in text:
+            starts = [text.find("{")]
+    for start in starts:
+        if start < 0:
+            continue
+        candidate = text[start:]
+        # First try strict parse.
         try:
-            obj = json.loads(m.group(0))
+            obj = json.loads(candidate)
             if isinstance(obj, dict) and obj.get("ready") and isinstance(obj.get("config"), dict):
                 return obj["config"], False
         except Exception:
-            # JSON looked truncated — flag it so the frontend can offer a retry
-            return None, True
+            pass
+        # Then try repair.
+        repaired = _try_repair_json(candidate)
+        if isinstance(repaired, dict) and repaired.get("ready") and isinstance(repaired.get("config"), dict):
+            cfg = repaired["config"]
+            # Drop any sections/charts/kpis that look obviously broken (no sql
+            # or empty title) so the runtime doesn't blow up on them.
+            if isinstance(cfg.get("sections"), list):
+                cfg["sections"] = [s for s in cfg["sections"]
+                                   if isinstance(s, dict)
+                                   and s.get("title")
+                                   and (s.get("kind") != "table" or s.get("sql"))]
+            for key in ("kpis", "charts"):
+                if isinstance(cfg.get(key), list):
+                    cfg[key] = [x for x in cfg[key] if isinstance(x, dict) and x.get("sql")]
+            return cfg, True
+    # If we saw a `"ready"` marker but couldn't parse anything at all, signal
+    # truncation so the frontend can show a retry hint.
+    if '"ready"' in text and '"config"' in text:
+        return None, True
     return None, False
 
 
@@ -2928,14 +3100,26 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
             contents=contents,
             config=genai.types.GenerateContentConfig(
                 system_instruction=_REPORT_SYSTEM_PROMPT,
-                temperature=0.5,
-                max_output_tokens=2048,
+                temperature=0.4,
+                # Reports often span 3-6 sections each with a SQL block;
+                # 2048 tokens reliably clipped the last section's sql mid-
+                # statement. 8192 gives plenty of headroom.
+                max_output_tokens=8192,
             ),
         )
         reply_text = resp.text or "I wasn't able to generate a response. Please try again."
-        cfg, _truncated = _extract_ready_config(reply_text)
+        cfg, truncated = _extract_ready_config(reply_text)
         if cfg is not None:
-            return {"ready": True, "config": cfg, "reply": reply_text}
+            clean_reply = _strip_ready_json_from_reply(reply_text)
+            if not clean_reply.strip():
+                clean_reply = "All set — building your report now." if not truncated \
+                    else "Got the report outline (had to trim a few details — try \"generate\" again if anything looks off)."
+            return {"ready": True, "config": cfg, "reply": clean_reply, "truncated": truncated}
+        if truncated:
+            return {
+                "reply": "My response was cut off while writing the report config. Try saying **\"generate\"** again, or ask me to simplify it (fewer sections / shorter SQL).",
+                "truncated": True,
+            }
         return {"reply": reply_text}
     except Exception as e:
         print(f"[/api/report/refine] error: {e}")
@@ -2943,20 +3127,50 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
 
 
 def _run_report_config(config: dict) -> dict:
-    """Execute every table section's SQL. Returns rendered sections."""
+    """Execute every table section's SQL. Returns rendered sections.
+
+    Failures (BQ errors, empty results, missing SQL) are surfaced explicitly so
+    the rendered report shows a clear placeholder instead of looking silently
+    empty.
+    """
     out_sections = []
     for s in (config.get("sections") or [])[:20]:
         sec = {"id": s.get("id"), "title": s.get("title", ""), "kind": s.get("kind", "narrative")}
         if sec["kind"] == "narrative":
-            sec["text"] = s.get("text", "")
+            sec["text"] = s.get("text", "") or "(no narrative provided)"
+            out_sections.append(sec)
+            continue
+
+        sql = (s.get("sql") or "").strip()
+        if not sql:
+            print(f"[report] section {sec['id']} has no sql — skipping")
+            sec["error"] = "No SQL was generated for this section."
+            sec["columns"] = []
+            sec["rows"] = []
+            out_sections.append(sec)
+            continue
+
+        # Strip BigQuery code fences / leading 'sql' tokens the model sometimes
+        # leaves behind.
+        if sql.startswith("```"):
+            sql = sql.strip("`").lstrip("sql").strip()
+
+        print(f"[report] running section '{sec['id']}': {sql[:160]}{'...' if len(sql) > 160 else ''}")
+        r = bq_run_query(sql, max_rows=50)
+        if "error" in r:
+            print(f"[report]   ERROR: {r['error']}")
+            sec["error"] = r["error"]
+            sec["columns"] = []
+            sec["rows"] = []
         else:
-            r = bq_run_query(s.get("sql", ""), max_rows=50)
-            if "error" in r:
-                sec["error"] = r["error"]
-                sec["rows"] = []
-            else:
-                sec["columns"] = r.get("columns", [])
-                sec["rows"] = r.get("rows", [])
+            sec["columns"] = r.get("columns", [])
+            sec["rows"] = r.get("rows", [])
+            print(f"[report]   ok — {len(sec['rows'])} rows, cols={sec['columns']}")
+            if not sec["rows"]:
+                # Mark zero-row sections so the PDF/Excel/preview render a
+                # clear placeholder ("no data for the chosen filters") instead
+                # of an empty space.
+                sec["note"] = "No matching data for the chosen scope."
         out_sections.append(sec)
     return {
         "title":    config.get("title", "Satori Report"),
@@ -2993,10 +3207,16 @@ def report_generate(body: dict, user: dict = Depends(get_current_user)):
                 if sec.get("kind") == "narrative":
                     ws0.append([sec.get("text", "")])
                 else:
-                    cols = sec.get("columns", [])
-                    ws0.append(cols)
-                    for row in sec.get("rows", []):
-                        ws0.append([row.get(c, "") for c in cols])
+                    cols = sec.get("columns") or []
+                    rows = sec.get("rows") or []
+                    if sec.get("error"):
+                        ws0.append([f"(query error: {sec['error']})"])
+                    elif not rows:
+                        ws0.append([sec.get("note") or "(no data)"])
+                    else:
+                        ws0.append(cols)
+                        for row in rows:
+                            ws0.append([row.get(c, "") for c in cols])
                 ws0.append([])
             buf = BytesIO()
             wb.save(buf)
@@ -3030,8 +3250,12 @@ def report_generate(body: dict, user: dict = Depends(get_current_user)):
             else:
                 cols = sec.get("columns") or []
                 rows = sec.get("rows") or []
-                data = [cols] + [[str(row.get(c, "")) for c in cols] for row in rows[:30]]
-                if len(data) > 1:
+                if sec.get("error"):
+                    elements.append(Paragraph(f"<i>Query error: {sec['error']}</i>", styles["BodyText"]))
+                elif not rows or not cols:
+                    elements.append(Paragraph(sec.get("note") or "(no data for the chosen scope)", styles["BodyText"]))
+                else:
+                    data = [cols] + [[str(row.get(c, "")) for c in cols] for row in rows[:30]]
                     t = Table(data, repeatRows=1)
                     t.setStyle(TableStyle([
                         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1F2D3D')),
@@ -3042,8 +3266,231 @@ def report_generate(body: dict, user: dict = Depends(get_current_user)):
                         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F4F6F8')]),
                     ]))
                     elements.append(t)
+            elements.append(Spacer(1, 12))
+        doc.build(elements)
+        buf.seek(0)
+        return Response(
+            content=buf.read(),
+            media_type="application/pdf",
+            headers={"Content-Disposition": 'attachment; filename="satori-report.pdf"'},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF export failed: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HEALTH CHECK + SPA STATIC MOUNT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/health")
+def health_check():
+    """Cloud Run liveness probe target."""
+    return {
+        "ok": True,
+        "service": "Satori v2",
+        "project": _TMC_PROJECT,
+        "dataset": _TMC_DATASET_NAME,
+    }
+
+
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+_FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
+
+
+class SPAStaticFiles(StaticFiles):
+    """StaticFiles that falls back to index.html for any unknown path so React
+    Router's client-side routing works on direct visits / refresh."""
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except (HTTPException, StarletteHTTPException) as exc:
+            if exc.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
+
+
+if os.path.isdir(_FRONTEND_DIST):
+    app.mount("/", SPAStaticFiles(directory=_FRONTEND_DIST, html=True), name="react_app")
+else:
+    @app.get("/")
+    def _no_frontend_yet():
+        return {
+            "ok": True,
+            "message": "Satori v2 backend up. React frontend not built into this container.",
+        }
+    contents.append(genai.types.Content(role="user", parts=[genai.types.Part(text=msg)]))
+
+    try:
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=contents,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=_REPORT_SYSTEM_PROMPT,
+                temperature=0.4,
+                # Reports often span 3-6 sections each with a SQL block;
+                # 2048 tokens reliably clipped the last section's sql mid-
+                # statement. 8192 gives plenty of headroom.
+                max_output_tokens=8192,
+            ),
+        )
+        reply_text = resp.text or "I wasn't able to generate a response. Please try again."
+        cfg, truncated = _extract_ready_config(reply_text)
+        if cfg is not None:
+            clean_reply = _strip_ready_json_from_reply(reply_text)
+            if not clean_reply.strip():
+                clean_reply = "All set — building your report now." if not truncated \
+                    else "Got the report outline (had to trim a few details — try \"generate\" again if anything looks off)."
+            return {"ready": True, "config": cfg, "reply": clean_reply, "truncated": truncated}
+        if truncated:
+            return {
+                "reply": "My response was cut off while writing the report config. Try saying **\"generate\"** again, or ask me to simplify it (fewer sections / shorter SQL).",
+                "truncated": True,
+            }
+        return {"reply": reply_text}
+    except Exception as e:
+        print(f"[/api/report/refine] error: {e}")
+        return {"reply": f"Sorry, I ran into an error: {e}"}
+
+
+def _run_report_config(config: dict) -> dict:
+    """Execute every table section's SQL. Returns rendered sections.
+
+    Failures (BQ errors, empty results, missing SQL) are surfaced explicitly so
+    the rendered report shows a clear placeholder instead of looking silently
+    empty.
+    """
+    out_sections = []
+    for s in (config.get("sections") or [])[:20]:
+        sec = {"id": s.get("id"), "title": s.get("title", ""), "kind": s.get("kind", "narrative")}
+        if sec["kind"] == "narrative":
+            sec["text"] = s.get("text", "") or "(no narrative provided)"
+            out_sections.append(sec)
+            continue
+
+        sql = (s.get("sql") or "").strip()
+        if not sql:
+            print(f"[report] section {sec['id']} has no sql — skipping")
+            sec["error"] = "No SQL was generated for this section."
+            sec["columns"] = []
+            sec["rows"] = []
+            out_sections.append(sec)
+            continue
+
+        # Strip BigQuery code fences / leading 'sql' tokens the model sometimes
+        # leaves behind.
+        if sql.startswith("```"):
+            sql = sql.strip("`").lstrip("sql").strip()
+
+        print(f"[report] running section '{sec['id']}': {sql[:160]}{'...' if len(sql) > 160 else ''}")
+        r = bq_run_query(sql, max_rows=50)
+        if "error" in r:
+            print(f"[report]   ERROR: {r['error']}")
+            sec["error"] = r["error"]
+            sec["columns"] = []
+            sec["rows"] = []
+        else:
+            sec["columns"] = r.get("columns", [])
+            sec["rows"] = r.get("rows", [])
+            print(f"[report]   ok — {len(sec['rows'])} rows, cols={sec['columns']}")
+            if not sec["rows"]:
+                sec["note"] = "No matching data for the chosen scope."
+        out_sections.append(sec)
+    return {
+        "title":    config.get("title", "Satori Report"),
+        "subtitle": config.get("subtitle", ""),
+        "sections": out_sections,
+    }
+
+
+@app.post("/api/report/preview")
+def report_preview(body: dict, user: dict = Depends(get_current_user)):
+    config = body.get("config") or {}
+    return _run_report_config(config)
+
+
+@app.post("/api/report/generate")
+def report_generate(body: dict, user: dict = Depends(get_current_user)):
+    """Render a report to PDF or Excel and return as a download."""
+    config = body.get("config") or {}
+    fmt = (body.get("format") or "pdf").lower()
+    rendered = _run_report_config(config)
+
+    if fmt == "xlsx":
+        try:
+            from openpyxl import Workbook
+            from io import BytesIO
+            wb = Workbook()
+            ws0 = wb.active
+            ws0.title = "Summary"
+            ws0.append([rendered.get("title", "Report")])
+            ws0.append([rendered.get("subtitle", "")])
+            ws0.append([])
+            for sec in rendered.get("sections", []):
+                ws0.append([sec.get("title", "")])
+                if sec.get("kind") == "narrative":
+                    ws0.append([sec.get("text", "")])
                 else:
-                    elements.append(Paragraph("(no rows)", styles["BodyText"]))
+                    cols = sec.get("columns") or []
+                    rows = sec.get("rows") or []
+                    if sec.get("error"):
+                        ws0.append([f"(query error: {sec['error']})"])
+                    elif not rows:
+                        ws0.append([sec.get("note") or "(no data)"])
+                    else:
+                        ws0.append(cols)
+                        for row in rows:
+                            ws0.append([row.get(c, "") for c in cols])
+                ws0.append([])
+            buf = BytesIO()
+            wb.save(buf)
+            buf.seek(0)
+            return Response(
+                content=buf.read(),
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": 'attachment; filename="satori-report.xlsx"'},
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Excel export failed: {e}")
+
+    # PDF (default format)
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from io import BytesIO
+        buf = BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=letter)
+        styles = getSampleStyleSheet()
+        elements = [Paragraph(rendered.get("title", "Report"), styles["Title"])]
+        if rendered.get("subtitle"):
+            elements.append(Paragraph(rendered["subtitle"], styles["Italic"]))
+        elements.append(Spacer(1, 16))
+        for sec in rendered.get("sections", []):
+            elements.append(Paragraph(sec.get("title", ""), styles["Heading2"]))
+            if sec.get("kind") == "narrative":
+                elements.append(Paragraph(sec.get("text", ""), styles["BodyText"]))
+            else:
+                cols = sec.get("columns") or []
+                rows = sec.get("rows") or []
+                if sec.get("error"):
+                    elements.append(Paragraph(f"<i>Query error: {sec['error']}</i>", styles["BodyText"]))
+                elif not rows or not cols:
+                    elements.append(Paragraph(sec.get("note") or "(no data for the chosen scope)", styles["BodyText"]))
+                else:
+                    data = [cols] + [[str(row.get(c, "")) for c in cols] for row in rows[:30]]
+                    t = Table(data, repeatRows=1)
+                    t.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1F2D3D')),
+                        ('TEXTCOLOR',  (0, 0), (-1, 0), colors.white),
+                        ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE',   (0, 0), (-1, -1), 8),
+                        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+                        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F4F6F8')]),
+                    ]))
+                    elements.append(t)
             elements.append(Spacer(1, 12))
         doc.build(elements)
         buf.seek(0)
