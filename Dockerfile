@@ -68,16 +68,11 @@ COPY --chown=nonroot:nonroot backend/ /app/
 # React build artefacts.
 COPY --from=frontend-builder --chown=nonroot:nonroot /frontend/dist /app/frontend/dist
 
-# libpq for psycopg2 — Postgres user/audit/dashboard storage.
-COPY --from=python-builder /usr/lib/x86_64-linux-gnu/libpq.so.5 /lib/x86_64-linux-gnu/libpq.so.5
-COPY --from=python-builder /usr/lib/x86_64-linux-gnu/libgssapi_krb5.so.2 /lib/x86_64-linux-gnu/libgssapi_krb5.so.2
-COPY --from=python-builder /usr/lib/x86_64-linux-gnu/libkrb5.so.3 /lib/x86_64-linux-gnu/libkrb5.so.3
-COPY --from=python-builder /usr/lib/x86_64-linux-gnu/libcom_err.so.2 /lib/x86_64-linux-gnu/libcom_err.so.2
-COPY --from=python-builder /usr/lib/x86_64-linux-gnu/libk5crypto.so.3 /lib/x86_64-linux-gnu/libk5crypto.so.3
-COPY --from=python-builder /usr/lib/x86_64-linux-gnu/libkrb5support.so.0 /lib/x86_64-linux-gnu/libkrb5support.so.0
-COPY --from=python-builder /usr/lib/x86_64-linux-gnu/libldap-2.5.so.0 /lib/x86_64-linux-gnu/libldap-2.5.so.0
-COPY --from=python-builder /usr/lib/x86_64-linux-gnu/liblber-2.5.so.0 /lib/x86_64-linux-gnu/liblber-2.5.so.0
-COPY --from=python-builder /usr/lib/x86_64-linux-gnu/libsasl2.so.2 /lib/x86_64-linux-gnu/libsasl2.so.2
+# NOTE: psycopg2-binary bundles libpq + its transitive deps (libldap, libsasl2,
+# libkrb5, etc.) statically inside the wheel itself. The earlier approach of
+# copying system .so files from the builder was both unnecessary AND broken on
+# Debian 13 trixie (which ships libldap 2.6 instead of 2.5). Distroless ships
+# libssl + libz which is all psycopg2-binary needs beyond its own bundle.
 
 WORKDIR /app
 EXPOSE 8080
