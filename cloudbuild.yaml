@@ -62,17 +62,15 @@ steps:
       - '--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${_TAG}'
       - '--region=${_REGION}'
       - '--platform=managed'
-      - '--service-account=satori-runtime@${PROJECT_ID}.iam.gserviceaccount.com'
-      - '--set-env-vars=VERTEX_PROJECT=${PROJECT_ID},VERTEX_DATASET=Satori_Project,GEMINI_API_KEY=projects/${PROJECT_ID}/secrets/satori-gemini-api-key/versions/latest,JWT_SECRET=projects/${PROJECT_ID}/secrets/satori-v2-jwt-secret/versions/latest'
-      - '--add-cloudsql-instances=${PROJECT_ID}:${_REGION}:satori-v2-db'
-      - '--min-instances=0'
-      - '--max-instances=10'
-      - '--concurrency=80'
-      - '--cpu=1'
-      - '--memory=1Gi'
-      - '--timeout=120s'
-      - '--allow-unauthenticated'
       - '--quiet'
+    # NOTE: env vars, secrets, service account, Cloud SQL connection, and
+    # scaling/network settings are configured ONCE during the HOSTING.md
+    # bootstrap (Blocks 5–10). `gcloud run deploy` preserves all of those
+    # when you don't pass them, so this step's only job is to roll out the
+    # new image. Avoids the "Cannot update environment variable to string
+    # literal because it has already been set with a different type" trap
+    # that happens when --set-env-vars and --set-secrets are both supplied
+    # to an existing service.
     waitFor: ['docker-push-sha']
 
 timeout: '1500s'
