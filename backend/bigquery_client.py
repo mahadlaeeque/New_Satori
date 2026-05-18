@@ -576,28 +576,39 @@ def find_relevant_data(user_message: str, dataset: str = None) -> str:
         if any(kw in message_lower for kw in config["keywords"]):
             matched_categories.add(category)
 
-    for category in matched_categories:
+    # Speed cap: only fire context-injection queries for AT MOST 2 categories, and
+    # only the FIRST (lightest) query per category. The previous behaviour ran every
+    # query in every matched category up-front (often 8+ BQ round-trips before
+    # Gemini even saw the question). The LLM has a run_sql tool — let it ask for
+    # exactly what it needs instead of guessing for it. Pre-execution is just for
+    # cheap orientation, not exhaustive coverage.
+    MAX_CATEGORIES = 2
+    MAX_QUERIES_PER_CATEGORY = 1
+    capped_categories = list(matched_categories)[:MAX_CATEGORIES]
+
+    for category in capped_categories:
         config = QUERY_MAP[category]
         print(f"[BQ] Matched category: {category}")
-        for q in config["queries"]:
+        for q in config["queries"][:MAX_QUERIES_PER_CATEGORY]:
             sql = q["sql"].format(project=project_id, dataset=dataset_name)
             print(f"[BQ] Running query: {sql[:100]}...")
-            result = run_query(sql)
+            result = run_query(sql, max_rows=15)
             if "error" in result:
                 print(f"[BQ] Query error: {result['error']}")
-            elif not result.get("rows"):
+                continue
+            if not result.get("rows"):
                 print(f"[BQ] Query returned 0 rows")
-            if "error" not in result and result.get("rows"):
-                header = " | ".join(result["columns"])
-                rows_text = "\n".join(
-                    " | ".join(str(row.get(c, "")) for c in result["columns"])
-                    for row in result["rows"][:30]
-                )
-                matched_data.append(
-                    f"### {q['name']} (from BigQuery)\n"
-                    f"Total rows: {result.get('total_rows', 'unknown')}\n\n"
-                    f"{header}\n{'─' * len(header)}\n{rows_text}"
-                )
+                continue
+            header = " | ".join(result["columns"])
+            rows_text = "\n".join(
+                " | ".join(str(row.get(c, "")) for c in result["columns"])
+                for row in result["rows"][:15]
+            )
+            matched_data.append(
+                f"### {q['name']} (from BigQuery)\n"
+                f"Total rows: {result.get('total_rows', 'unknown')}\n\n"
+                f"{header}\n{'─' * min(len(header), 100)}\n{rows_text}"
+            )
 
     if not matched_data:
         print("[BQ] No QUERY_MAP match found for this message")

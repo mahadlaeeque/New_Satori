@@ -1141,13 +1141,38 @@ WRITING CUSTOM run_sql QUERIES:
 
 NEVER WRITE SQL IN CHAT. The `run_sql` tool is the ONLY way to execute a query. Forbidden chat content: triple-backtick `sql` fences, `SELECT ...`, `WITH ... AS (...)`, "Calling SQL tool", "Here is the SQL", "let me query". When you need data not in the injected block, your turn must be EXACTLY ONE function call to `run_sql` with a single complete SELECT/WITH query in the `sql` argument — and zero text content. Only after the tool returns do you write user-facing prose with the numbers.
 
-STYLE & TONE:
-- Concise and actionable. Bullet points when listing data.
-- Format numbers properly: 1,250 employees · 2.4M USD pipeline · 87.5% attendance.
+STYLE & TONE — read this carefully, it controls response length and tone:
+
+DEFAULT: SHORT SUMMARY. Lead with a 1-3 line answer to the user's question. Then a
+3-6 bullet headline summary of the most important figures. STOP THERE.
+
+DO NOT volunteer a long detailed breakdown unless the user asks for it. After the
+summary, offer ONE follow-up line like: "Want a daily breakdown?" or "Should I
+list each absence by date?" — and wait for the user to say yes.
+
+VERBOSITY RULES:
+- Single-employee questions ("how was Mahad's attendance in April?"): ONE summary
+  paragraph + 3-5 bullets max. NEVER list every individual day unless asked.
+- Aggregate questions ("attendance rate by department"): bullet list capped at top
+  10 rows. Offer "Want the full list?" if there are more.
+- "Top N" / "list" questions: respect the N. If user says "top 5", give 5, not 15.
+- Greetings / small talk: ONE sentence. Don't dump data.
+
+FORMATTING:
+- Format numbers: 1,250 employees · 2.4M USD pipeline · 87.5% attendance.
 - Round percentages to one decimal place.
-- Use **bold** sparingly for emphasis on key figures.
-- Bilingual: English + Urdu. Match the user's language; switch with them.
-- Never expose individual salary, contact details, or HR-confidential PII."""
+- Use **bold** sparingly — only for the single most important figure.
+- Bullets only when listing 2+ items. Single facts → plain prose.
+- NEVER use tables for less than 3 rows.
+
+BILINGUAL: Match the user's language (English / Urdu). Switch mid-conversation.
+
+PII: Never expose individual salary, contact details, or HR-confidential PII.
+
+EFFICIENCY:
+- Don't recompute. If the injected TMC LIVE DATA block already has the answer, state it verbatim — no tool call.
+- Don't pre-emptively run multiple queries. One focused query beats three vague ones.
+- If the user's question is ambiguous, ASK ONE clarifying question instead of guessing with queries."""
 
 VOICE_SYSTEM_PROMPT_URDU = """### ABSOLUTE RULE #0 — NEVER FABRICATE DATA. TOOLS FIRST, ALWAYS. ###
 You have two data tools: get_business_summary and query_enterprise_data.
@@ -1536,7 +1561,7 @@ def chat(body: ChatRequest, request: Request, user: dict = Depends(get_current_u
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
                     temperature=0.7,
-                    max_output_tokens=4096,
+                    max_output_tokens=1024,
                     tools=[_CHAT_SQL_TOOL],
                 ),
             )
@@ -1668,7 +1693,7 @@ def chat(body: ChatRequest, request: Request, user: dict = Depends(get_current_u
             config=genai.types.GenerateContentConfig(
                 system_instruction=system_prompt_final,
                 temperature=0.5,
-                max_output_tokens=4096,
+                max_output_tokens=1024,
                 # Cap thinking so a complex post-rounds compose still has output budget
                 # left for the actual answer — but allow some reasoning.
                 thinking_config=genai.types.ThinkingConfig(thinking_budget=1024),
@@ -1779,7 +1804,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                     config=genai.types.GenerateContentConfig(
                         system_instruction=system_prompt_final,
                         temperature=0.7,
-                        max_output_tokens=4096,
+                        max_output_tokens=1024,
                         tools=[_CHAT_SQL_TOOL],
                     ),
                 )
@@ -1890,7 +1915,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
                     temperature=0.5,
-                    max_output_tokens=4096,
+                    max_output_tokens=1024,
                 ),
             ):
                 if chunk.text:
@@ -1909,7 +1934,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                     config=genai.types.GenerateContentConfig(
                         system_instruction=system_prompt_final,
                         temperature=0.3,
-                        max_output_tokens=4096,
+                        max_output_tokens=1024,
                         thinking_config=genai.types.ThinkingConfig(thinking_budget=0),
                     ),
                 )
@@ -2547,85 +2572,431 @@ def admin_user_delete_data(target_id: int, user: dict = Depends(get_current_user
     return {"user_id": target_id, "ok": True, "note": "stub — GDPR delete endpoint pending rebuild"}
 
 
-# ── REPORTS — stubs preserving the route shape from the original ──
+# ── REPORTS — full CRUD against saved_reports table ──
 @app.get("/api/reports")
 def list_reports(user: dict = Depends(get_current_user)):
-    return {"reports": []}
+    uid = int(user["sub"])
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute("SELECT id, name, description, updated_at, is_favorite FROM saved_reports WHERE user_id = ? ORDER BY updated_at DESC", (uid,))
+        rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[/api/reports] error: {e}")
+        rows = []
+    db.close()
+    return {"reports": rows}
 
 
 @app.get("/api/reports/{report_id}")
 def get_report(report_id: int, user: dict = Depends(get_current_user)):
-    raise HTTPException(status_code=404, detail="Report not found (reports feature pending rebuild)")
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT id, name, description, config, user_id, updated_at FROM saved_reports WHERE id = ?", (report_id,))
+    r = cur.fetchone()
+    db.close()
+    if not r:
+        raise HTTPException(status_code=404, detail="Report not found")
+    r = dict(r)
+    if isinstance(r.get("config"), str):
+        try:
+            r["config"] = json.loads(r["config"])
+        except Exception:
+            pass
+    return r
 
 
 @app.post("/api/reports")
 def create_report(body: dict, user: dict = Depends(get_current_user)):
-    raise HTTPException(status_code=501, detail="Reports feature pending rebuild")
+    from database import USE_POSTGRES
+    uid = int(user["sub"])
+    name = (body.get("name") or body.get("title") or "Untitled report").strip()
+    description = (body.get("description") or "").strip()
+    config_json = json.dumps(body.get("config") or {})
+    db = get_db(); cur = db.cursor()
+    if USE_POSTGRES:
+        cur.execute(
+            "INSERT INTO saved_reports (user_id, name, description, config) VALUES (?, ?, ?, ?) RETURNING id",
+            (uid, name, description, config_json),
+        )
+        row = cur.fetchone()
+        new_id = row["id"] if isinstance(row, dict) else row[0]
+    else:
+        cur.execute(
+            "INSERT INTO saved_reports (user_id, name, description, config) VALUES (?, ?, ?, ?)",
+            (uid, name, description, config_json),
+        )
+        new_id = cur.lastrowid
+    db.commit(); db.close()
+    return {"id": new_id, "ok": True}
 
 
 @app.put("/api/reports/{report_id}")
 def update_report(report_id: int, body: dict, user: dict = Depends(get_current_user)):
-    raise HTTPException(status_code=501, detail="Reports feature pending rebuild")
+    from database import USE_POSTGRES
+    name = body.get("name") or body.get("title")
+    description = body.get("description")
+    config = body.get("config")
+    sets, params = [], []
+    if name is not None:         sets.append("name = ?");        params.append(name)
+    if description is not None:  sets.append("description = ?"); params.append(description)
+    if config is not None:       sets.append("config = ?");      params.append(json.dumps(config))
+    if not sets:
+        return {"ok": True, "note": "nothing to update"}
+    sets.append("updated_at = " + ("NOW()" if USE_POSTGRES else "datetime('now')"))
+    params.append(report_id)
+    db = get_db(); cur = db.cursor()
+    cur.execute(f"UPDATE saved_reports SET {', '.join(sets)} WHERE id = ?", tuple(params))
+    db.commit(); db.close()
+    return {"ok": True}
 
 
 @app.delete("/api/reports/{report_id}")
 def delete_report(report_id: int, user: dict = Depends(get_current_user)):
-    raise HTTPException(status_code=501, detail="Reports feature pending rebuild")
-
-
-@app.post("/api/report/refine")
-def report_refine(body: dict, user: dict = Depends(get_current_user)):
-    return {"text": "Report generation is pending rebuild in this Satori v1."}
-
-
-@app.post("/api/report/generate")
-def report_generate(body: dict, user: dict = Depends(get_current_user)):
-    raise HTTPException(status_code=501, detail="Report generation pending rebuild")
-
-
-@app.post("/api/report/preview")
-def report_preview(body: dict, user: dict = Depends(get_current_user)):
-    raise HTTPException(status_code=501, detail="Report preview pending rebuild")
-
-
-# ── User search + share endpoints (stubs) ──
-@app.get("/api/users/search")
-def users_search(q: str = "", user: dict = Depends(get_current_user)):
-    return {"users": []}
-
-
-@app.get("/api/dashboards/{dashboard_id}/shares")
-def list_dashboard_shares(dashboard_id: int, user: dict = Depends(get_current_user)):
-    return {"shares": []}
-
-
-@app.post("/api/dashboards/{dashboard_id}/shares")
-def add_dashboard_share(dashboard_id: int, body: dict, user: dict = Depends(get_current_user)):
-    return {"ok": True}
-
-
-@app.delete("/api/dashboards/{dashboard_id}/shares/{target_user_id}")
-def remove_dashboard_share(dashboard_id: int, target_user_id: int, user: dict = Depends(get_current_user)):
-    return {"ok": True}
-
-
-@app.get("/api/reports/{report_id}/shares")
-def list_report_shares(report_id: int, user: dict = Depends(get_current_user)):
-    return {"shares": []}
-
-
-@app.post("/api/reports/{report_id}/shares")
-def add_report_share(report_id: int, body: dict, user: dict = Depends(get_current_user)):
-    return {"ok": True}
-
-
-@app.delete("/api/reports/{report_id}/shares/{target_user_id}")
-def remove_report_share(report_id: int, target_user_id: int, user: dict = Depends(get_current_user)):
+    db = get_db(); cur = db.cursor()
+    cur.execute("DELETE FROM saved_reports WHERE id = ?", (report_id,))
+    db.commit(); db.close()
     return {"ok": True}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  HEALTH CHECK
+#  DASHBOARD BUILDER  ──  AI-assisted creation + runtime
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/dashboard/refine")
+def dashboard_refine(body: dict, user: dict = Depends(get_current_user)):
+    """Chat with the AI to build/edit a dashboard config.
+    Body: { message, history, existing_config? }. Returns: { text }."""
+    msg = (body.get("message") or "").strip()
+    if not msg:
+        return {"text": "What kind of dashboard would you like to build?"}
+    history = body.get("history") or []
+    existing = body.get("existing_config")
+    safe_msg = _redact_pii(msg)
+    text = refine_dashboard(safe_msg, history, existing)
+    return {"text": text}
+
+
+@app.post("/api/dashboard/run")
+def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
+    """Execute a dashboard config against TMC BigQuery.
+    Body: { config: {kpis, charts}, filters: {field: value} }.
+    """
+    config = body.get("config") or {}
+    user_filters = body.get("filters") or {}
+
+    def _where():
+        if not user_filters:
+            return ""
+        parts = []
+        for f, v in user_filters.items():
+            if v is None or str(v).strip() == "":
+                continue
+            safe_v = str(v).replace("'", "\\'")
+            parts.append(f"{f} = '{safe_v}'")
+        return ("WHERE " + " AND ".join(parts)) if parts else ""
+
+    def _exec(sql_template):
+        if not sql_template:
+            return {"error": "no sql"}
+        sql = sql_template.replace("{where}", _where())
+        return bq_run_query(sql, max_rows=200)
+
+    kpis_out = []
+    for k in (config.get("kpis") or [])[:6]:
+        r = _exec(k.get("sql"))
+        if "error" in r:
+            kpis_out.append({"id": k.get("id"), "value": None, "error": r["error"]})
+            continue
+        rows = r.get("rows") or []
+        if rows and r.get("columns"):
+            first_col = r["columns"][0]
+            kpis_out.append({"id": k.get("id"), "value": rows[0].get(first_col)})
+        else:
+            kpis_out.append({"id": k.get("id"), "value": None})
+
+    charts_out = []
+    for c in (config.get("charts") or [])[:4]:
+        r = _exec(c.get("sql"))
+        if "error" in r:
+            charts_out.append({"id": c.get("id"), "rows": [], "error": r["error"]})
+            continue
+        charts_out.append({"id": c.get("id"), "rows": r.get("rows", []), "columns": r.get("columns", [])})
+
+    return {"kpis": kpis_out, "charts": charts_out}
+
+
+@app.get("/api/dashboards")
+def list_dashboards(user: dict = Depends(get_current_user)):
+    uid = int(user["sub"])
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute("SELECT id, name, description, updated_at, is_favorite FROM saved_dashboards WHERE user_id = ? ORDER BY updated_at DESC", (uid,))
+        rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[/api/dashboards] error: {e}")
+        rows = []
+    db.close()
+    return {"dashboards": rows}
+
+
+@app.post("/api/dashboards")
+def create_dashboard(body: dict, user: dict = Depends(get_current_user)):
+    from database import USE_POSTGRES
+    uid = int(user["sub"])
+    name = (body.get("name") or body.get("title") or "Untitled dashboard").strip()
+    description = (body.get("description") or "").strip()
+    config_json = json.dumps(body.get("config") or {})
+    db = get_db(); cur = db.cursor()
+    if USE_POSTGRES:
+        cur.execute(
+            "INSERT INTO saved_dashboards (user_id, name, description, config) VALUES (?, ?, ?, ?) RETURNING id",
+            (uid, name, description, config_json),
+        )
+        row = cur.fetchone()
+        new_id = row["id"] if isinstance(row, dict) else row[0]
+    else:
+        cur.execute(
+            "INSERT INTO saved_dashboards (user_id, name, description, config) VALUES (?, ?, ?, ?)",
+            (uid, name, description, config_json),
+        )
+        new_id = cur.lastrowid
+    db.commit(); db.close()
+    return {"id": new_id, "ok": True}
+
+
+@app.get("/api/dashboards/{dashboard_id}")
+def get_dashboard(dashboard_id: int, user: dict = Depends(get_current_user)):
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT id, name, description, config, user_id, updated_at FROM saved_dashboards WHERE id = ?", (dashboard_id,))
+    r = cur.fetchone()
+    db.close()
+    if not r:
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+    r = dict(r)
+    if isinstance(r.get("config"), str):
+        try:
+            r["config"] = json.loads(r["config"])
+        except Exception:
+            pass
+    return r
+
+
+@app.put("/api/dashboards/{dashboard_id}")
+def update_dashboard(dashboard_id: int, body: dict, user: dict = Depends(get_current_user)):
+    from database import USE_POSTGRES
+    name = body.get("name") or body.get("title")
+    description = body.get("description")
+    config = body.get("config")
+    sets, params = [], []
+    if name is not None:         sets.append("name = ?");        params.append(name)
+    if description is not None:  sets.append("description = ?"); params.append(description)
+    if config is not None:       sets.append("config = ?");      params.append(json.dumps(config))
+    if not sets:
+        return {"ok": True, "note": "nothing to update"}
+    sets.append("updated_at = " + ("NOW()" if USE_POSTGRES else "datetime('now')"))
+    params.append(dashboard_id)
+    db = get_db(); cur = db.cursor()
+    cur.execute(f"UPDATE saved_dashboards SET {', '.join(sets)} WHERE id = ?", tuple(params))
+    db.commit(); db.close()
+    return {"ok": True}
+
+
+@app.delete("/api/dashboards/{dashboard_id}")
+def delete_dashboard(dashboard_id: int, user: dict = Depends(get_current_user)):
+    db = get_db(); cur = db.cursor()
+    cur.execute("DELETE FROM saved_dashboards WHERE id = ?", (dashboard_id,))
+    db.commit(); db.close()
+    return {"ok": True}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  REPORT BUILDER  ──  AI-assisted creation + render to PDF/Excel
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_REPORT_SYSTEM_PROMPT = """You are Satori AI, a smart business analyst building TMC workforce + sales reports.
+
+A report is a structured document of SECTIONS. Each section has:
+  - id: short slug
+  - title: short heading
+  - kind: 'narrative' (just text) or 'table' (a SQL-backed table)
+  - sql: (only if kind='table') a BigQuery SELECT against ai-vertex-mahad.Satori_Project.<table>
+  - text: (only if kind='narrative') the paragraph text
+
+Schema (use exactly these table + column names):
+- Employee_Data: Employee_Code, Resource_Name, Employee_Position, Employee_Hierarchy (department), Employee_Location, Employee_Type. Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
+- Attendance_Data: attendance_date DATE, employee_id, employee_name, attendance_status_text, is_present/is_absent/is_on_leave/is_remote (0/1). 'Late' = LOWER(attendance_status_text)='late'.
+- Allocation_data: project_id, employee_id, allocation_percent (STRING — SAFE_CAST), emp_competency, Flag.
+- Timesheet_Data: TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST), DATE_KEY.
+- Sales_AM_Scorecard: VP, AM, Role, City, col_2026_Target/Q1_ACH/Open_Pipeline (STRING USD — SAFE_CAST), Hist_Win_Rate (decimal 0-1).
+- Sales_Pipeline_Health, Sales_Plan_vs_Pipeline, Sales_Accounts, Sales_Hunting_Gap.
+
+CONVERSATION FLOW:
+1. User describes the report they want.
+2. You ask 1-2 clarifying questions if scope is unclear (timeframe, scope of departments/AMs).
+3. Once clear, present the PROPOSED outline in plain language: list each section's title + what it shows. Ask the user to confirm with "generate".
+4. When the user says "generate", return ONLY this JSON (no surrounding text):
+   {"ready": true, "config": {"title": "...", "subtitle": "...", "sections": [
+     {"id": "kpis", "title": "Headline metrics", "kind": "table", "sql": "SELECT ..."},
+     {"id": "intro", "title": "Overview", "kind": "narrative", "text": "..."}
+   ]}}
+
+SQL RULES (CRITICAL):
+- Fully qualify: ai-vertex-mahad.Satori_Project.<table>.
+- SAFE_CAST all STRING-typed numerics (allocation_percent, TICKET_HOURS, USD/visit fields).
+- LIMIT every query to 50 rows max.
+- Use ROUND() for percentages and currency.
+
+STYLE: short clean section titles. Plain English narrative (no markdown headers).
+NEVER expose technical details (table names, column names, SQL) to the user.
+NEVER output the JSON until the user explicitly says "generate".
+Be concise — max 3-4 sentences per chat turn."""
+
+
+@app.post("/api/report/refine")
+def report_refine(body: dict, user: dict = Depends(get_current_user)):
+    """Chat to build a report config. Body: { message, history, existing_config? }."""
+    msg = (body.get("message") or "").strip()
+    if not msg:
+        return {"text": "What kind of report would you like to build? (e.g. 'monthly attendance summary by department', 'Q1 AM scorecard ranking')"}
+    history = body.get("history") or []
+
+    client = get_genai_client()
+    contents = []
+    for m in history[-12:]:
+        role = "user" if m.get("role") == "user" else "model"
+        contents.append(genai.types.Content(role=role, parts=[genai.types.Part(text=m.get("text", ""))]))
+    contents.append(genai.types.Content(role="user", parts=[genai.types.Part(text=msg)]))
+
+    try:
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=contents,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=_REPORT_SYSTEM_PROMPT,
+                temperature=0.5,
+                max_output_tokens=1500,
+            ),
+        )
+        return {"text": resp.text or "I wasn't able to generate a response. Please try again."}
+    except Exception as e:
+        print(f"[/api/report/refine] error: {e}")
+        return {"text": f"Sorry, I ran into an error: {e}"}
+
+
+def _run_report_config(config: dict) -> dict:
+    """Execute every table section's SQL. Returns rendered sections."""
+    out_sections = []
+    for s in (config.get("sections") or [])[:20]:
+        sec = {"id": s.get("id"), "title": s.get("title", ""), "kind": s.get("kind", "narrative")}
+        if sec["kind"] == "narrative":
+            sec["text"] = s.get("text", "")
+        else:
+            r = bq_run_query(s.get("sql", ""), max_rows=50)
+            if "error" in r:
+                sec["error"] = r["error"]
+                sec["rows"] = []
+            else:
+                sec["columns"] = r.get("columns", [])
+                sec["rows"] = r.get("rows", [])
+        out_sections.append(sec)
+    return {
+        "title":    config.get("title", "Satori Report"),
+        "subtitle": config.get("subtitle", ""),
+        "sections": out_sections,
+    }
+
+
+@app.post("/api/report/preview")
+def report_preview(body: dict, user: dict = Depends(get_current_user)):
+    config = body.get("config") or {}
+    return _run_report_config(config)
+
+
+@app.post("/api/report/generate")
+def report_generate(body: dict, user: dict = Depends(get_current_user)):
+    """Render a report to PDF or Excel and return as a download."""
+    config = body.get("config") or {}
+    fmt = (body.get("format") or "pdf").lower()
+    rendered = _run_report_config(config)
+
+    if fmt == "xlsx":
+        try:
+            from openpyxl import Workbook
+            from io import BytesIO
+            wb = Workbook()
+            ws0 = wb.active
+            ws0.title = "Summary"
+            ws0.append([rendered.get("title", "Report")])
+            ws0.append([rendered.get("subtitle", "")])
+            ws0.append([])
+            for sec in rendered.get("sections", []):
+                ws0.append([sec.get("title", "")])
+                if sec.get("kind") == "narrative":
+                    ws0.append([sec.get("text", "")])
+                else:
+                    cols = sec.get("columns", [])
+                    ws0.append(cols)
+                    for row in sec.get("rows", []):
+                        ws0.append([row.get(c, "") for c in cols])
+                ws0.append([])
+            buf = BytesIO()
+            wb.save(buf)
+            buf.seek(0)
+            return Response(
+                content=buf.read(),
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": 'attachment; filename="satori-report.xlsx"'},
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Excel export failed: {e}")
+
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from io import BytesIO
+        buf = BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=letter)
+        styles = getSampleStyleSheet()
+        elements = [Paragraph(rendered.get("title", "Report"), styles["Title"])]
+        if rendered.get("subtitle"):
+            elements.append(Paragraph(rendered["subtitle"], styles["Italic"]))
+        elements.append(Spacer(1, 16))
+        for sec in rendered.get("sections", []):
+            elements.append(Paragraph(sec.get("title", ""), styles["Heading2"]))
+            if sec.get("kind") == "narrative":
+                elements.append(Paragraph(sec.get("text", ""), styles["BodyText"]))
+            else:
+                cols = sec.get("columns") or []
+                rows = sec.get("rows") or []
+                data = [cols] + [[str(row.get(c, "")) for c in cols] for row in rows[:30]]
+                if len(data) > 1:
+                    t = Table(data, repeatRows=1)
+                    t.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1F2D3D')),
+                        ('TEXTCOLOR',  (0, 0), (-1, 0), colors.white),
+                        ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE',   (0, 0), (-1, -1), 8),
+                        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+                        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F4F6F8')]),
+                    ]))
+                    elements.append(t)
+                else:
+                    elements.append(Paragraph("(no rows)", styles["BodyText"]))
+            elements.append(Spacer(1, 12))
+        doc.build(elements)
+        buf.seek(0)
+        return Response(
+            content=buf.read(),
+            media_type="application/pdf",
+            headers={"Content-Disposition": 'attachment; filename="satori-report.pdf"'},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF export failed: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HEALTH CHECK + SPA MOUNT
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/health")
@@ -2639,12 +3010,6 @@ def health_check():
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SPA STATIC MOUNT — serve the React build at "/"
-#  Must come AFTER every @app.get/@app.post route is registered. FastAPI checks
-#  routes in registration order, so API endpoints are matched first; the mount
-#  catches everything else and returns index.html for client-side routes.
-# ═══════════════════════════════════════════════════════════════════════════════
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -2670,7 +3035,5 @@ else:
     def _no_frontend_yet():
         return {
             "ok": True,
-            "message": "Satori v2 backend is up. React frontend not yet built into this container "
-                       "(frontend/dist missing). Run `npm run build` in the frontend folder, or wait "
-                       "for the next Cloud Build to bundle it in.",
+            "message": "Satori v2 backend up. React frontend not built into this container.",
         }
