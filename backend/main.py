@@ -1172,7 +1172,25 @@ PII: Never expose individual salary, contact details, or HR-confidential PII.
 EFFICIENCY:
 - Don't recompute. If the injected TMC LIVE DATA block already has the answer, state it verbatim — no tool call.
 - Don't pre-emptively run multiple queries. One focused query beats three vague ones.
-- If the user's question is ambiguous, ASK ONE clarifying question instead of guessing with queries."""
+- If the user's question is ambiguous, ASK ONE clarifying question instead of guessing with queries.
+
+INTELLIGENT NAME RESOLUTION:
+- When a user mentions a first name only ("Mahad", "Adeel", "Anas"), assume they mean the FULL employee record. Use `LOWER(employee_name) LIKE '%mahad%'` (or similar fuzzy match) — never reject because they omitted the surname.
+- If multiple employees match the first name, pick the one with the most recent activity (latest attendance_date) and mention which person you used in your reply: "I found data for Mahad Laeeque…" so they can correct you if it's the wrong person.
+- For Allocation_data / Timesheet_Data joins, names map via employee_id ↔ Employee_Code. Always CAST both sides to STRING.
+
+ATTENDANCE QUERY DEFAULTS:
+When the user asks about an employee's attendance for a time window, ALWAYS include ALL day categories so the total accounts for every calendar day. The Attendance_Data schema has flags is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (each 0/1). A complete summary contains:
+- Present days  (is_present = 1)
+- Absent days   (is_absent = 1)
+- Late count    (LOWER(attendance_status_text) = 'late' — subset of present)
+- On-leave days (is_on_leave = 1)
+- Remote days   (is_remote = 1)
+- Holiday days  (is_holiday = 1)
+- Weekend days  (is_weekend = 1)
+- Total records (= sum of the above; this is the number of days in the window)
+
+Always check that present + absent + leave + holiday + weekend ≈ total. If something is missing (e.g., the table has a "Missing Punch" status), call it out as its own line. Don't leave the user wondering where the rest of the month went."""
 
 VOICE_SYSTEM_PROMPT_URDU = """### ABSOLUTE RULE #0 — NEVER FABRICATE DATA. TOOLS FIRST, ALWAYS. ###
 You have two data tools: get_business_summary and query_enterprise_data.
@@ -2664,15 +2682,21 @@ def delete_report(report_id: int, user: dict = Depends(get_current_user)):
 @app.post("/api/dashboard/refine")
 def dashboard_refine(body: dict, user: dict = Depends(get_current_user)):
     """Chat with the AI to build/edit a dashboard config.
-    Body: { message, history, existing_config? }. Returns: { text }."""
+    Body: { message, history, existing_config? }.
+    Returns: { reply: "AI text" } during chat,
+             { ready: true, config: {...}, reply: "..." } when the user says 'generate'.
+    """
     msg = (body.get("message") or "").strip()
     if not msg:
-        return {"text": "What kind of dashboard would you like to build?"}
+        return {"reply": "What kind of dashboard would you like to build?"}
     history = body.get("history") or []
     existing = body.get("existing_config")
     safe_msg = _redact_pii(msg)
     text = refine_dashboard(safe_msg, history, existing)
-    return {"text": text}
+    cfg, _truncated = _extract_ready_config(text)
+    if cfg is not None:
+        return {"ready": True, "config": cfg, "reply": text}
+    return {"reply": text}
 
 
 @app.post("/api/dashboard/run")
@@ -2851,12 +2875,44 @@ NEVER output the JSON until the user explicitly says "generate".
 Be concise — max 3-4 sentences per chat turn."""
 
 
+def _extract_ready_config(reply_text: str):
+    """The refine AIs are instructed to emit `{"ready": true, "config": {...}}` JSON
+    when the user has confirmed the design. Parse it out if present.
+    Returns (config_dict, was_truncated)."""
+    if not reply_text:
+        return None, False
+    text = reply_text.strip()
+    # Try whole reply as JSON first
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict) and obj.get("ready") and isinstance(obj.get("config"), dict):
+            return obj["config"], False
+    except Exception:
+        pass
+    # Try to find an embedded JSON object
+    import re as _re
+    m = _re.search(r'\{[\s\S]*"ready"\s*:\s*true[\s\S]*\}', text)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict) and obj.get("ready") and isinstance(obj.get("config"), dict):
+                return obj["config"], False
+        except Exception:
+            # JSON looked truncated — flag it so the frontend can offer a retry
+            return None, True
+    return None, False
+
+
 @app.post("/api/report/refine")
 def report_refine(body: dict, user: dict = Depends(get_current_user)):
-    """Chat to build a report config. Body: { message, history, existing_config? }."""
+    """Chat to build a report config.
+    Body: { message, history, existing_config? }.
+    Returns: { reply: "AI text" } during conversation,
+             { ready: true, config: {...}, reply: "..." } when the user confirms.
+    """
     msg = (body.get("message") or "").strip()
     if not msg:
-        return {"text": "What kind of report would you like to build? (e.g. 'monthly attendance summary by department', 'Q1 AM scorecard ranking')"}
+        return {"reply": "What kind of report would you like to build? (e.g. 'monthly attendance summary by department', 'Q1 AM scorecard ranking')"}
     history = body.get("history") or []
 
     client = get_genai_client()
@@ -2873,13 +2929,17 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
             config=genai.types.GenerateContentConfig(
                 system_instruction=_REPORT_SYSTEM_PROMPT,
                 temperature=0.5,
-                max_output_tokens=1500,
+                max_output_tokens=2048,
             ),
         )
-        return {"text": resp.text or "I wasn't able to generate a response. Please try again."}
+        reply_text = resp.text or "I wasn't able to generate a response. Please try again."
+        cfg, _truncated = _extract_ready_config(reply_text)
+        if cfg is not None:
+            return {"ready": True, "config": cfg, "reply": reply_text}
+        return {"reply": reply_text}
     except Exception as e:
         print(f"[/api/report/refine] error: {e}")
-        return {"text": f"Sorry, I ran into an error: {e}"}
+        return {"reply": f"Sorry, I ran into an error: {e}"}
 
 
 def _run_report_config(config: dict) -> dict:
@@ -2949,6 +3009,7 @@ def report_generate(body: dict, user: dict = Depends(get_current_user)):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Excel export failed: {e}")
 
+    # PDF (default format)
     try:
         from reportlab.lib.pagesizes import letter
         from reportlab.lib import colors
@@ -2996,7 +3057,7 @@ def report_generate(body: dict, user: dict = Depends(get_current_user)):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  HEALTH CHECK + SPA MOUNT
+#  HEALTH CHECK + SPA STATIC MOUNT
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/health")
