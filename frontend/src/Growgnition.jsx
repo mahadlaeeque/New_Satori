@@ -926,61 +926,61 @@ const QualityDashboard = () => (
 );
 
 // ─── Sample Prompts Data ───
-// Aligned to SAP HANA mirror (sap_hana_mirror) — procurement + manufacturing + finance.
-// NO customer-facing sales / HR / QM data in the mirror, so those categories are absent.
+// Aligned to TMC's Satori_Project dataset — workforce (attendance, allocation,
+// timesheets, capability) + sales operations (account coverage, pipeline, AM
+// scorecards, hunting gap).
 const SAMPLE_PROMPTS = {
-  inventory: [
-    { title: "Current Stock Value", prompt: "What's the total on-hand stock value and quantity across active plants right now?" },
-    { title: "Stock by Storage Location", prompt: "Break down current stock by plant and storage location. Which sloc holds the most value?" },
-    { title: "Stock by Material Type", prompt: "Which material types have the most inventory across active plants right now?" },
-    { title: "Top Stocked Items", prompt: "Top 10 materials by on-hand stock value with descriptions and plant." },
+  attendance: [
+    { title: "Today's Attendance",      prompt: "What's the overall attendance rate today and how many people were marked late?" },
+    { title: "Top Absentees",           prompt: "Who are the top 10 absentees in the last 30 days?" },
+    { title: "Department Attendance",   prompt: "Break down attendance rate by department for the last 30 days." },
+    { title: "Late Arrival Patterns",   prompt: "Which weekdays have the most late arrivals?" },
   ],
-  movements: [
-    { title: "Movement Mix", prompt: "Break down goods movements by type in the last 90 days (receipts, issues, transfers, adjustments)." },
-    { title: "Receipts vs Issues", prompt: "Compare total receipts vs issues value at each active plant for the last 90 days." },
-    { title: "Busiest Materials", prompt: "Which 10 materials moved the most quantity in the last 30 days?" },
-    { title: "Plant Activity", prompt: "Which plants had the most material document postings in the last year?" },
+  availability: [
+    { title: "Who's on Bench",          prompt: "List all employees currently on the bench with their position and competencies." },
+    { title: "Allocation Breakdown",    prompt: "How many employees are Allocated vs Partially Available vs On Bench right now?" },
+    { title: "Find a Developer",        prompt: "Find me a React developer who is available next month, ideally bilingual." },
+    { title: "Department Capacity",     prompt: "Average allocation percentage by department right now." },
   ],
-  procurement: [
-    { title: "PO Mix by Type", prompt: "Show top purchase order types by count with earliest and latest PO dates." },
-    { title: "Recent POs", prompt: "List purchase orders created in the last 30 days with type and date." },
-    { title: "PO Amounts by Plant", prompt: "Total accounting-segment amount tied to POs per plant this year." },
-    { title: "PO Trend", prompt: "How has monthly PO creation volume changed over the last 12 months?" },
+  capability: [
+    { title: "Top Competencies",        prompt: "What are the top 10 competencies in the workforce by employee count?" },
+    { title: "Capability Coverage",     prompt: "Headcount per Employee_Position. Where are we thin?" },
+    { title: "Location Distribution",   prompt: "How is the workforce distributed across locations?" },
+    { title: "Skills by Department",    prompt: "Top 3 competencies for each department." },
   ],
-  orders: [
-    { title: "Order Type Mix", prompt: "Show production/internal order counts by order_type." },
-    { title: "Active Orders by Plant", prompt: "Which plants have the most distinct orders active in the last 365 days?" },
-    { title: "Recent Orders", prompt: "Show the 20 most recent orders by creation date with type." },
-    { title: "PMWO vs CMWO", prompt: "Compare preventive maintenance orders (PMWO) vs corrective (CMWO) volumes this year." },
+  timesheets: [
+    { title: "Hours by Project",        prompt: "Total hours logged per project in the last 30 days. Top 15 projects." },
+    { title: "Top Contributors",        prompt: "Who logged the most hours in the last 30 days?" },
+    { title: "Ticket Status Mix",       prompt: "Breakdown of ticket statuses for the last 60 days." },
   ],
-  finance: [
-    { title: "Journal by Period", prompt: "Show universal journal posting counts and debit-side amounts by fiscal_year and fiscal_period." },
-    { title: "Document Type Mix", prompt: "Break down accounting document segments by document_type (ML/WA/WL/WE/RE/SA/KR/KZ/RV) for the last 180 days." },
-    { title: "GL Activity Trend", prompt: "Which fiscal periods have the most GL postings in the current fiscal year so far?" },
-    { title: "Currency Split", prompt: "Universal journal line counts and totals by transaction_currency." },
+  pipeline: [
+    { title: "Pipeline Health",         prompt: "Open pipeline USD by salesperson with deal count and win rate." },
+    { title: "Plan vs Pipeline",        prompt: "For each AM, show their 2026 target vs Q1 achievement vs CRM pipeline coverage ratio." },
+    { title: "Q1 Achievement Ranking",  prompt: "Rank AMs by Q1 USD achievement. Who's leading and who's at risk?" },
+    { title: "Win Rate Leaders",        prompt: "Top 5 salespeople by historical win rate. How does pipeline size correlate?" },
   ],
-  materials: [
-    { title: "Material Catalog", prompt: "How many materials do we have by material_type? Top 10 types." },
-    { title: "Sample Materials", prompt: "Show me 20 sample materials with their English descriptions and base unit of measure." },
-    { title: "Price Coverage", prompt: "What percentage of materials have a moving_average_price populated in material_valuation?" },
-    { title: "Valuation Classes", prompt: "Top valuation classes by material count. Any correlation with material_type?" },
+  accounts: [
+    { title: "Account Coverage",        prompt: "How many accounts does each AM cover by tier (A/B/C)?" },
+    { title: "Zero-Visit Accounts",     prompt: "Which AMs have the most accounts with zero visits in Q1?" },
+    { title: "Dormant Accounts",        prompt: "Show me the dormant accounts list — names, AM, and last activity if available." },
+    { title: "Q1 Visit Totals",         prompt: "Total Q1 visits per AM. Compare against headcount of accounts they cover." },
   ],
-  plants: [
-    { title: "Active Plants", prompt: "List the active plants with their city, sales_org, purchasing_org, and division." },
-    { title: "Plant Activity", prompt: "Which plants actually have goods movements and stock data? Show coverage for each active plant." },
-    { title: "Plant Stock", prompt: "Current on-hand quantity per plant for the latest snapshot." },
+  hunting: [
+    { title: "New-Business Gap",        prompt: "Which AMs have the biggest new-business hunting gap right now?" },
+    { title: "Hunting Targets",         prompt: "What's the hunting gap quota per AM for the year and Q1 progress so far?" },
+    { title: "Workload Feasibility",    prompt: "Compare each AM's required field days vs available field days. Who's overbooked?" },
   ],
 };
 
 const PROMPT_CATEGORIES = [
-  { id: "all", label: "All" },
-  { id: "inventory", label: "Inventory" },
-  { id: "movements", label: "Movements" },
-  { id: "procurement", label: "Procurement" },
-  { id: "orders", label: "Orders" },
-  { id: "finance", label: "Finance" },
-  { id: "materials", label: "Materials" },
-  { id: "plants", label: "Plants" },
+  { id: "all",          label: "All" },
+  { id: "attendance",   label: "Attendance" },
+  { id: "availability", label: "Availability" },
+  { id: "capability",   label: "Capability" },
+  { id: "timesheets",   label: "Timesheets" },
+  { id: "pipeline",     label: "Pipeline" },
+  { id: "accounts",     label: "Accounts" },
+  { id: "hunting",      label: "Hunting Gap" },
 ];
 
 

@@ -1054,16 +1054,21 @@ GOOGLE_SA_KEY = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
 if GOOGLE_SA_KEY and os.path.exists(GOOGLE_SA_KEY):
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_SA_KEY
 
-USE_VERTEX = bool(VERTEX_PROJECT)
+# Use Vertex AI only if explicitly opted in. VERTEX_PROJECT is also used by BigQuery
+# to know which project to query, so its presence alone shouldn't switch the LLM to
+# Vertex (which needs the runtime SA to have roles/aiplatform.user — extra setup).
+# Set USE_VERTEX_AI=1 to opt in.
+USE_VERTEX = os.environ.get("USE_VERTEX_AI") == "1"
 
 
 def get_genai_client():
-    """Get a genai client — Vertex AI if configured, otherwise API key."""
-    if USE_VERTEX:
-        return genai.Client(vertexai=True, project=VERTEX_PROJECT, location=VERTEX_LOCATION)
+    """Get a genai client. Prefers AI Studio (API key) since we already have one
+    in Secret Manager and Vertex AI would require an extra IAM role on the runtime SA."""
     if GEMINI_API_KEY:
         return genai.Client(api_key=GEMINI_API_KEY)
-    raise HTTPException(status_code=500, detail="No AI backend configured. Set VERTEX_PROJECT or GEMINI_API_KEY.")
+    if USE_VERTEX and VERTEX_PROJECT:
+        return genai.Client(vertexai=True, project=VERTEX_PROJECT, location=VERTEX_LOCATION)
+    raise HTTPException(status_code=500, detail="No AI backend configured. Set GEMINI_API_KEY or USE_VERTEX_AI=1 + VERTEX_PROJECT.")
 
 
 def _build_date_context():
