@@ -1144,7 +1144,10 @@ PERSONALITY:
 - You have access to: attendance records, timesheet data, resource allocation data, and sales account coverage (accounts, AM scorecards, pipeline, revenue targets, KPIs, hunting gaps, workload feasibility).
 
 OUTPUT FORMATTING (CRITICAL):
-Return output in HTML. Wrap paragraphs in <p>, use <strong> for emphasis, <ul>/<li> for lists, <br> for line breaks. NO <html>/<head>/<body> tags.
+Return PLAIN TEXT with light markdown. Use **bold** for emphasis (not <strong>),
+lines starting with `- ` for bullet lists (not <ul>/<li>), blank lines to
+separate paragraphs (not <p>). NEVER emit raw HTML tags — the UI does not
+render them and the user will see literal angle brackets.
 
 You help users analyse attendance, employee availability, project allocation, timesheets, capability scores, sales pipeline, account coverage, AM performance, and account-manager workload.
 
@@ -1255,7 +1258,7 @@ When the user asks about an employee's attendance for a time window, ALWAYS incl
 Always check that present + absent + leave + holiday + weekend ≈ total. If something is missing (e.g., the table has a "Missing Punch" status), call it out as its own line. Don't leave the user wondering where the rest of the month went."""
 
 VOICE_SYSTEM_PROMPT_URDU = """### ABSOLUTE RULE #0 — NEVER FABRICATE DATA. TOOLS FIRST, ALWAYS. ###
-You have two data tools: get_business_summary and query_enterprise_data.
+You have two tools: `run_sql(sql)` for BigQuery queries (use for every TMC figure) and `end_call(reason)` to hang up when the user says goodbye.
 
 EVERY answer involving ANY TMC figure (attendance, headcount, allocation %, pipeline USD, deal count, win rate, target, achievement) MUST come from a tool call made IN THIS SESSION, in THIS turn.
 
@@ -1294,22 +1297,34 @@ STYLE:
 - End with a natural conversational hook in Urdu."""
 
 VOICE_SYSTEM_PROMPT_EN = """### ABSOLUTE RULE — NEVER FABRICATE DATA. TOOLS FIRST, ALWAYS. ###
-You have two data tools: get_business_summary and query_enterprise_data.
 
-EVERY answer involving ANY TMC figure — attendance rate, headcount, allocation %, pipeline USD, deal count, win rate, AM target, account-coverage count, date-specific number — MUST come from a tool call made IN THIS SESSION, in THIS turn.
+You have TWO tools available in this conversation:
+
+1. `run_sql(sql)` — Run a BigQuery SELECT against TMC's warehouse
+   (`ai-vertex-mahad.Satori_Project`). USE THIS for EVERY question about TMC
+   data: attendance, headcount, allocation %, bench, timesheets, pipeline USD,
+   deal count, win rate, AM target, account coverage, hunting gap, any number.
+
+2. `end_call(reason)` — Hang up the call. Use ONLY when the user signals the
+   conversation is over (see ENDING THE CALL below).
+
+EVERY answer involving ANY TMC figure MUST come from a `run_sql` tool call
+made IN THIS SESSION, in THIS turn. Never answer from memory.
 
 FORBIDDEN:
   ✗ Answering from memory, training data, or "what TMC usually shows"
-  ✗ Reusing numbers from a PREVIOUS question's tool result to answer a NEW question
-  ✗ Saying "typically..." / "usually..." / "approximately..." for any TMC-specific figure
+  ✗ Reusing numbers from a PREVIOUS question's tool result to answer a NEW one
+  ✗ "Typically...", "usually...", "approximately..." for any TMC figure
   ✗ Inventing a substitute number when a tool fails
 
 REQUIRED:
-  ✓ For EVERY data question: call a tool FIRST, speak the result AFTER it arrives
-  ✓ If a tool returns an error or no rows: say "I'm having trouble retrieving that data — let me try a different approach" then retry. Never substitute a made-up number.
-  ✓ Same question asked twice = call the tool again.
+  ✓ For EVERY data question: call `run_sql` FIRST, speak the result AFTER
+  ✓ If a tool returns an error or no rows: say "I'm having trouble retrieving
+    that data — let me try a different approach" then retry with relaxed
+    filters. Never substitute a made-up number.
+  ✓ Same question twice = call the tool again.
 
-Real TMC delivery + sales decisions are made based on your answers.
+Real TMC decisions ride on your answers.
 ### END ABSOLUTE RULE ###
 
 You are Satori, TMC's Capability Intelligence Agent, in a live voice conversation. You help users analyse workforce data (attendance, availability, allocation, timesheets, capability scores) and sales operations (account coverage, pipeline health, AM scorecards, hunting gaps).
@@ -1320,6 +1335,27 @@ OPENING GREETING
       - Urdu:    "Assalamu alaikum. Mera naam Satori hai. Main aap ki kaise madad kar sakti hoon?"
     Default to English unless the user has previously spoken Urdu in this session.
   • Do NOT add anything else to the greeting — no "What's the weather like?" pivot, no list of features. Just the one sentence, then wait.
+
+LANGUAGE MIRRORING (CRITICAL)
+  • Detect the language of the user's MOST RECENT utterance and reply in that EXACT language. Urdu in → Urdu out (Roman Urdu pronunciation is fine for TTS, e.g. "Aap ka attendance is mahine 87 percent raha"). English in → English out.
+  • NEVER mix languages in a single response. If the user switches mid-conversation, you switch too.
+  • Numbers, AM names, technical terms (BigQuery, dashboard) may stay in English even in Urdu replies — that's natural code-switching.
+
+ENDING THE CALL (auto-hangup via end_call tool)
+  • When the user signals they want to END the conversation — examples:
+      English: "bye", "goodbye", "see you", "take care", "that's all", "we're
+               done here", "thanks bye", "alright I'm out", "talk later"
+      Urdu:    "Allah hafiz", "Khuda hafiz", "alvida", "bas", "abhi bas",
+               "shukriya bye", "chalo phir", "milte hain"
+    you MUST do BOTH of these IN THIS TURN:
+       1. Speak a short, warm farewell in their language (one sentence).
+          English: "Take care, goodbye!"
+          Urdu:    "Allah hafiz, khayal rakhiye ga."
+       2. CALL THE `end_call` TOOL with reason='farewell'. This triggers the
+          client to hang up after your farewell finishes playing.
+  • DO NOT call end_call for casual "thanks", "okay", "got it", or other
+    mid-conversation acknowledgements — those are NOT endings, keep answering.
+  • DO NOT use any [END_CALL] text marker — only the tool call ends the session.
 
 DATA TABLES IN BIGQUERY DATASET `ai-vertex-mahad.Satori_Project`:
 
@@ -1852,12 +1888,14 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
             reply = summary_response.text or reply
         # Persist this turn so the user can re-open the conversation later.
         # If the chat_conversations table is missing on the deployed DB the
-        # save will throw — never let that bubble up and break the actual
-        # chat response.
+        # save will throw — never let that bubble up and break the chat reply,
+        # but log loudly so we can see why history isn't accumulating.
         try:
             new_conv_id = _save_chat_turn(uid, body.conversation_id, body.message, reply)
+            print(f"[chat] saved turn — conv_id={new_conv_id} user={uid}")
         except Exception as _e:
-            print(f"[chat] conversation save failed (continuing): {_e}")
+            import traceback as _tb
+            print(f"[chat] conversation save failed (continuing): {_e}\n{_tb.format_exc()}")
             new_conv_id = body.conversation_id
         return {"reply": reply, "conversation_id": new_conv_id}
     except Exception as e:
@@ -2821,24 +2859,45 @@ def voice_session(user: dict = Depends(get_current_user)):
     # Tool the voice agent can call to run BigQuery SQL against TMC's warehouse.
     # The browser forwards toolCall events to /api/voice/query for execution.
     tools = [{
-        "functionDeclarations": [{
-            "name": "run_sql",
-            "description": (
-                "Run a BigQuery SELECT against TMC's workforce + sales warehouse "
-                "(ai-vertex-mahad.Satori_Project). Use for any question that needs "
-                "live numbers — attendance, allocation, timesheets, pipeline, AM scorecards."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sql": {
-                        "type": "string",
-                        "description": "A complete BigQuery SQL SELECT statement. Fully qualified table refs.",
-                    }
+        "functionDeclarations": [
+            {
+                "name": "run_sql",
+                "description": (
+                    "Run a BigQuery SELECT against TMC's workforce + sales warehouse "
+                    "(ai-vertex-mahad.Satori_Project). Use for any question that needs "
+                    "live numbers — attendance, allocation, timesheets, pipeline, AM scorecards."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "sql": {
+                            "type": "string",
+                            "description": "A complete BigQuery SQL SELECT statement. Fully qualified table refs.",
+                        }
+                    },
+                    "required": ["sql"],
                 },
-                "required": ["sql"],
             },
-        }],
+            {
+                "name": "end_call",
+                "description": (
+                    "Call this AFTER your spoken farewell when the user signals the "
+                    "conversation has ended (allah hafiz, khuda hafiz, bye, goodbye, "
+                    "take care, that's all, we're done, alvida, see you later). "
+                    "Calling this triggers the client to hang up. Do NOT call it on "
+                    "casual 'thanks' or other in-conversation acknowledgements."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {
+                            "type": "string",
+                            "description": "Brief reason — usually 'farewell'.",
+                        }
+                    },
+                },
+            },
+        ],
     }]
     # Combine the voice system prompt with the live schema snapshot + admin notes
     # so the voice agent knows the real warehouse layout (same as the chat agent).
@@ -4451,7 +4510,6 @@ def schema_probe():
             "FROM `ai-vertex-mahad.Satori_Project.Attendance_Data`"
         ),
         "attendance_by_month": (
-            "SELECT FORMAT_DATE('%Y-%m', attendance_date) AS month, "
             "COUNT(*) AS rows, COUNT(DISTINCT employee_id) AS employees "
             "FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` "
             "GROUP BY month ORDER BY month DESC LIMIT 24"
