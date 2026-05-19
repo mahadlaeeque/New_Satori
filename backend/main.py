@@ -2724,15 +2724,123 @@ async def voice_websocket(websocket: WebSocket):
 
 @app.post("/api/voice/session")
 def voice_session(user: dict = Depends(get_current_user)):
+    """Return everything the browser needs to open the Gemini Live WebSocket."""
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured.")
+    # Tool the voice agent can call to run BigQuery SQL against TMC's warehouse.
+    # The browser forwards toolCall events to /api/voice/query for execution.
+    tools = [{
+        "functionDeclarations": [{
+            "name": "run_sql",
+            "description": (
+                "Run a BigQuery SELECT against TMC's workforce + sales warehouse "
+                "(ai-vertex-mahad.Satori_Project). Use for any question that needs "
+                "live numbers — attendance, allocation, timesheets, pipeline, AM scorecards."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": "A complete BigQuery SQL SELECT statement. Fully qualified table refs.",
+                    }
+                },
+                "required": ["sql"],
+            },
+        }],
+    }]
+    # Combine the voice system prompt with the live schema snapshot + admin notes
+    # so the voice agent knows the real warehouse layout (same as the chat agent).
+    system_instruction = (
+        VOICE_SYSTEM_PROMPT_EN
+        + "\n\n" + _load_schema_settings_block()
+        + "\n\n" + live_schema.render_context_block()
+    )
     return {
         "apiKey": api_key,
         "model": os.environ.get("GEMINI_MODEL_VOICE", "models/gemini-2.5-flash-live-preview"),
         "voice": os.environ.get("GEMINI_TTS_VOICE", "Leda"),
-        "systemInstruction": VOICE_SYSTEM_PROMPT_EN,
+        "systemInstruction": system_instruction,
+        "tools": tools,
     }
+
+
+@app.post("/api/voice/query")
+def voice_query(body: dict, user: dict = Depends(get_current_user)):
+    """Execute a BigQuery SELECT for the voice agent's tool calls.
+    Body: { sql: "SELECT …" }. Returns { result: "tab-formatted text" }."""
+    sql = (body.get("sql") or "").strip()
+    if not sql:
+        return {"result": "No SQL provided."}
+    up = sql.upper().lstrip()
+    if not (up.startswith("SELECT") or up.startswith("WITH")):
+        return {"result": "Only SELECT queries are allowed."}
+    forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE", "MERGE"]
+    if any(w in up.split() for w in forbidden):
+        return {"result": "Write statements are not allowed."}
+    # Reuse the dashboard SQL autofix so the voice agent gets the same healing
+    # (LOWER() filters, name-based joins, no fake 'Late', Flag fixes).
+    sql = _autofix_dashboard_sql(sql)
+    print(f"[voice] {sql[:240]}{'...' if len(sql) > 240 else ''}")
+    r = bq_run_query(sql, max_rows=30)
+    if "error" in r:
+        return {"result": f"Query error: {r['error']}"}
+    rows = r.get("rows") or []
+    cols = r.get("columns") or []
+    if not rows:
+        return {"result": "No records found matching this query."}
+    # Tab-formatted text — small, readable for the LLM to summarize aloud.
+    header = "\t".join(cols)
+    body_lines = ["\t".join(str(row.get(c, "")) for c in cols) for row in rows[:30]]
+    suffix = f"\n... ({len(rows)} total rows shown)" if len(rows) == 30 else ""
+    return {"result": header + "\n" + "\n".join(body_lines) + suffix}
+
+
+# ── /api/help — Gemini-powered in-app help bubble ──────────────────────────
+_SATORI_HELP_PROMPT = """You are Satori Help, an expert assistant for the Satori v2 platform — TMC's Capability Intelligence Agent.
+
+Satori v2 is an AI-powered analytics platform for managers, HR, and sales leadership at TMC. It connects to a BigQuery warehouse (ai-vertex-mahad.Satori_Project) containing workforce data (Employee_Data, Attendance_Data, Allocation_data, Timesheet_Data) and sales data (Sales_AM_Scorecard, Sales_Accounts, Sales_Pipeline_Health, Sales_Plan_vs_Pipeline, Sales_Hunting_Gap). Powered by Google Gemini 2.5.
+
+KEY FEATURES:
+1. **Ask Me Anything** — Natural-language chat. Ask about attendance, allocation, pipeline, AM performance, etc. Replies stream live with citations from BigQuery.
+2. **Report Builder** — Conversational builder for tabular reports. Describe what you want, the AI proposes columns + filters, say "generate" to produce a downloadable Excel / PDF.
+3. **Dashboard Builder** — Conversational builder for interactive dashboards (KPIs, charts, filters). Re-runs every load against live BigQuery.
+4. **Voice Agent** — Floating mic at bottom-right. Tap, then ask questions aloud — Satori speaks the answer back.
+5. **Schema Settings** — System Settings → Schema Settings. Admins curate per-table descriptions that get injected into every AI agent's prompt, so Satori knows what each column means.
+6. **User Management / Audit Log** — Admin pages.
+7. **Dark Mode** — Toggle (Sun/Moon icon) at the top-right corner.
+
+NAVIGATION:
+- Sidebar (left): Ask Me Anything, Report Builder, Dashboard Builder, plus Admin pages.
+- Top bar: dark mode toggle, profile.
+- Floating buttons (bottom-right): green Mic and Help.
+
+DATA SCOPE: All workforce + sales data for TMC. No SAP ERP / inventory data.
+
+Answer concisely in a friendly, helpful tone. Focus on practical "how to" guidance. If the user asks about a specific business question, suggest they use Ask Me Anything. Return plain text (no HTML, no markdown headers) — 2-4 short sentences max."""
+
+
+@app.post("/api/help")
+def satori_help(body: dict):
+    """Gemini-powered help bubble. No auth — public help is fine."""
+    question = (body.get("question") or "").strip()
+    if not question:
+        return {"answer": "Please ask a question about how to use Satori."}
+    try:
+        client = get_genai_client()
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=question)])],
+            config=genai.types.GenerateContentConfig(
+                system_instruction=_SATORI_HELP_PROMPT,
+                temperature=0.3,
+                max_output_tokens=600,
+            ),
+        )
+        return {"answer": (resp.text or "I'm not sure how to answer that.").strip()}
+    except Exception as e:
+        return {"answer": f"Help service unavailable: {e}"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -384,88 +384,418 @@ const ChatAgent = ({ isOpen, onClose, dashboardContext }) => {
 };
 
 // ─── Voice Agent Component ───
-const VoiceAgent = ({ isListening, onToggle, dashboardContext }) => {
-  const [transcript, setTranscript] = useState("");
-  const [response, setResponse] = useState("");
-  const [showPanel, setShowPanel] = useState(false);
+// ─── Real Voice Modal (ports Old Satori) ──────────────────────────────────────
+// Browser <-> Gemini Live API via WebSocket. Mic capture as PCM16 -> WS. Audio
+// output PCM played back. Tool calls (BigQuery SQL) round-trip through
+// /api/voice/query on the backend.
+const GEMINI_WS_BASE = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+
+const VoiceModal = ({ open, onClose }) => {
+  const [state, setState] = useState("connecting"); // connecting | listening | speaking | closing
+  const [statusText, setStatusText] = useState("Connecting to Satori\u2026");
+
+  const wsRef = useRef(null);
+  const captureCtxRef = useRef(null);
+  const playCtxRef = useRef(null);
+  const streamRef = useRef(null);
+  const processorRef = useRef(null);
+  const sourceRef = useRef(null);
+  const nextPlayTimeRef = useRef(0);
+  const isSpeakingRef = useRef(false);
+  const setupDoneRef = useRef(false);
+  const setupTimeoutRef = useRef(null);
+  const closingRef = useRef(false);
 
   useEffect(() => {
-    if (isListening) {
-      setShowPanel(true);
-      setTranscript("");
-      setResponse("");
-      const timer1 = setTimeout(() => setTranscript("Show me the revenue trend for last quarter..."), 1500);
-      const timer2 = setTimeout(() => {
-        setResponse(`Based on ${dashboardContext} data, last quarter's revenue showed a 14.2% increase, rising from $12.4M in October to $16.8M in December. The strongest growth came from the APAC region. Would you like me to break this down further?`);
-      }, 3500);
-      return () => { clearTimeout(timer1); clearTimeout(timer2); };
+    if (!open) return;
+    start();
+    return () => stop();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const start = async () => {
+    closingRef.current = false;
+    setupDoneRef.current = false;
+    setState("connecting");
+    setStatusText("Connecting to Satori\u2026");
+
+    const apiBase = import.meta.env.VITE_API_BASE || "";
+    const token = localStorage.getItem("token");
+    let config;
+    try {
+      const res = await fetch(`${apiBase}/api/voice/session`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Failed to get session config");
+      config = await res.json();
+    } catch (e) {
+      setStatusText(e?.message || "Failed to get session config.");
+      setTimeout(stop, 3000);
+      return;
     }
-  }, [isListening, dashboardContext]);
+
+    try {
+      streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      captureCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      playCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+      sourceRef.current = captureCtxRef.current.createMediaStreamSource(streamRef.current);
+      processorRef.current = captureCtxRef.current.createScriptProcessor(4096, 1, 1);
+      sourceRef.current.connect(processorRef.current);
+      processorRef.current.connect(captureCtxRef.current.destination);
+    } catch {
+      setStatusText("Microphone permission denied.");
+      setTimeout(stop, 3000);
+      return;
+    }
+
+    const ws = new WebSocket(`${GEMINI_WS_BASE}?key=${config.apiKey}`);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        setup: {
+          model: config.model,
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: config.voice } } },
+          },
+          systemInstruction: { parts: [{ text: config.systemInstruction }] },
+          tools: config.tools || [],
+        },
+      }));
+      setupTimeoutRef.current = setTimeout(() => {
+        if (!setupDoneRef.current) { setStatusText("Setup timed out."); stop(); }
+      }, 8000);
+    };
+
+    ws.onmessage = async (evt) => {
+      let data;
+      try { data = JSON.parse(typeof evt.data === "string" ? evt.data : await evt.data.text()); } catch { return; }
+
+      if (data.setupComplete) {
+        setupDoneRef.current = true;
+        if (setupTimeoutRef.current) clearTimeout(setupTimeoutRef.current);
+        setState("listening");
+        setStatusText("Listening\u2026 speak now");
+        return;
+      }
+
+      if (data.toolCall?.functionCalls?.length) {
+        const responses = [];
+        for (const fc of data.toolCall.functionCalls) {
+          try {
+            const r = await fetch(`${apiBase}/api/voice/query`, {
+              method: "POST",
+              headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ sql: fc.args?.sql || "" }),
+            });
+            const json = await r.json();
+            responses.push({ id: fc.id, name: fc.name, response: { output: json.result || "(no result)" } });
+          } catch (err) {
+            responses.push({ id: fc.id, name: fc.name, response: { output: "Query failed: " + (err?.message || "unknown") } });
+          }
+        }
+        ws.send(JSON.stringify({ toolResponse: { functionResponses: responses } }));
+        return;
+      }
+
+      if (data.serverContent) {
+        const sc = data.serverContent;
+        if (sc.modelTurn?.parts) {
+          for (const part of sc.modelTurn.parts) {
+            if (part.inlineData?.data) {
+              if (!isSpeakingRef.current) {
+                isSpeakingRef.current = true;
+                setState("speaking");
+                setStatusText("Satori is speaking\u2026");
+              }
+              playPcm(part.inlineData.data);
+            }
+          }
+        }
+        if (sc.turnComplete) {
+          isSpeakingRef.current = false;
+          setState("listening");
+          setStatusText("Listening\u2026 speak now");
+        }
+        if (sc.interrupted) {
+          isSpeakingRef.current = false;
+          nextPlayTimeRef.current = 0;
+        }
+      }
+    };
+
+    ws.onerror = () => { if (!closingRef.current) setStatusText("Connection error \u2014 see console."); };
+    ws.onclose = (ev) => {
+      if (closingRef.current) return;
+      const reason = ev.reason || (
+        ev.code === 1008 ? "policy violation (API key or model)" :
+        ev.code === 1011 ? "server error" :
+        ev.code === 1006 ? "abnormal close (network or auth)" :
+        ev.code >= 4000  ? "auth or model error" :
+        "unknown"
+      );
+      setStatusText(`Disconnected (${ev.code}: ${reason})`);
+      setTimeout(stop, 4000);
+    };
+
+    const captureSR = captureCtxRef.current.sampleRate;
+    processorRef.current.onaudioprocess = (e) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN || !setupDoneRef.current) return;
+      const input = e.inputBuffer.getChannelData(0);
+      const pcm16 = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) pcm16[i] = Math.max(-32768, Math.min(32767, Math.round(input[i] * 32767)));
+      let samples = pcm16;
+      if (captureSR !== 16000) {
+        const ratio = captureSR / 16000;
+        const outLen = Math.floor(pcm16.length / ratio);
+        samples = new Int16Array(outLen);
+        for (let i = 0; i < outLen; i++) samples[i] = pcm16[Math.round(i * ratio)];
+      }
+      const bytes = new Uint8Array(samples.buffer);
+      let bin = "";
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      ws.send(JSON.stringify({
+        realtimeInput: { audio: { mimeType: "audio/pcm;rate=16000", data: btoa(bin) } },
+      }));
+    };
+  };
+
+  const playPcm = (b64) => {
+    const ctx = playCtxRef.current;
+    if (!ctx) return;
+    try {
+      const raw = atob(b64);
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      const pcm16 = new Int16Array(bytes.buffer);
+      const floats = new Float32Array(pcm16.length);
+      for (let i = 0; i < pcm16.length; i++) floats[i] = pcm16[i] / 32768.0;
+      const buf = ctx.createBuffer(1, floats.length, 24000);
+      buf.copyToChannel(floats, 0);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      const when = Math.max(ctx.currentTime, nextPlayTimeRef.current);
+      src.start(when);
+      nextPlayTimeRef.current = when + buf.duration;
+    } catch { /* ignore */ }
+  };
+
+  const stop = () => {
+    closingRef.current = true;
+    setState("closing");
+    setupDoneRef.current = false;
+    try { processorRef.current?.disconnect(); } catch {}
+    try { sourceRef.current?.disconnect(); } catch {}
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    try { captureCtxRef.current?.close(); } catch {}
+    try { playCtxRef.current?.close(); } catch {}
+    try { if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.close(); } catch {}
+    processorRef.current = null; sourceRef.current = null; streamRef.current = null;
+    captureCtxRef.current = null; playCtxRef.current = null; wsRef.current = null;
+    nextPlayTimeRef.current = 0;
+    if (setupTimeoutRef.current) clearTimeout(setupTimeoutRef.current);
+    onClose?.();
+  };
+
+  if (!open) return null;
+  return (
+    <div onClick={stop} style={{
+      position: "fixed", inset: 0, zIndex: 1000,
+      background: "rgba(0,0,0,0.7)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ textAlign: "center" }}>
+        <div style={{
+          position: "relative", margin: "0 auto 24px", width: 128, height: 128, borderRadius: "50%",
+          display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.3s",
+          background: state === "speaking"
+            ? `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.teal})`
+            : state === "listening" ? `${COLORS.accent}22` : "#1F2937",
+          border: state === "listening" ? `4px solid ${COLORS.accent}` : (state === "speaking" ? "none" : "4px solid #475569"),
+          animation: state === "speaking" ? "pulse 2s infinite" : "none",
+        }}>
+          {state === "connecting" || state === "closing"
+            ? <Activity size={48} color="#cbd5e1" style={{ animation: "spin 1s linear infinite" }} />
+            : <Mic size={48} color={state === "speaking" ? "#fff" : COLORS.accent} />}
+          {state === "listening" && (
+            <span style={{
+              position: "absolute", inset: 0, borderRadius: "50%",
+              border: `4px solid ${COLORS.accent}55`, animation: "pulse 1.6s infinite",
+            }} />
+          )}
+        </div>
+        <div style={{ color: "#e2e8f0", fontSize: 14, maxWidth: 420 }}>{statusText}</div>
+        <button onClick={stop} style={{
+          marginTop: 24, display: "inline-flex", alignItems: "center", gap: 8,
+          padding: "8px 20px", borderRadius: 999,
+          background: "rgba(239,68,68,0.2)", border: "1px solid rgba(239,68,68,0.4)",
+          color: "#fca5a5", fontSize: 13, cursor: "pointer",
+        }}>
+          <X size={15} /> End call
+        </button>
+      </div>
+    </div>
+  );
+};
+
+
+// ─── Floating Mic + Help buttons (ports Old Satori FabButtons) ──────────────
+const HELP_TOPICS = [
+  "How do I ask a question about my data?",
+  "How do I build a dashboard?",
+  "How do I generate a report?",
+  "How do I use the voice agent?",
+  "What is Schema Settings?",
+  "What data is available in Satori?",
+];
+
+const FabButtons = () => {
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpBusy, setHelpBusy] = useState(false);
+  const [helpAnswer, setHelpAnswer] = useState("");
+  const [helpQuestion, setHelpQuestion] = useState("");
+  const apiBase = import.meta.env.VITE_API_BASE || "";
+
+  const askHelp = async (q) => {
+    setHelpBusy(true); setHelpAnswer(""); setHelpQuestion(q);
+    try {
+      const r = await fetch(`${apiBase}/api/help`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: q }),
+      });
+      const data = await r.json();
+      setHelpAnswer((data.answer || "(no response)").replace(/<[^>]+>/g, ""));
+    } catch (e) {
+      setHelpAnswer("Failed: " + (e?.message || "unknown"));
+    } finally { setHelpBusy(false); }
+  };
+
+  const fabStyle = {
+    width: 56, height: 56, borderRadius: "50%", border: "none", cursor: "pointer",
+    background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.teal})`,
+    color: "#fff", boxShadow: "0 10px 28px rgba(15,23,42,0.25)",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    transition: "transform 0.15s",
+  };
 
   return (
     <>
-      {/* Floating Voice Button */}
-      <button
-        onClick={() => { onToggle(); setShowPanel(true); }}
-        style={{
-          position: "fixed", bottom: 80, right: 80, width: 56, height: 56, borderRadius: "50%",
-          background: isListening
-            ? `linear-gradient(135deg, ${COLORS.danger}, #F97316)`
-            : `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`,
-          border: "none", color: "#fff", cursor: "pointer",
-          boxShadow: isListening ? "0 0 0 8px rgba(239,68,68,0.2)" : "0 4px 20px rgba(138,196,65,0.3)",
-          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 999,
-          animation: isListening ? "pulse 2s infinite" : "none",
-          transition: "all 0.3s"
-        }}
-      >
-        {isListening ? <MicOff size={22} /> : <Mic size={22} />}
-      </button>
+      <div style={{
+        position: "fixed", bottom: 28, right: 28, zIndex: 900,
+        display: "flex", flexDirection: "column", gap: 12, alignItems: "flex-end",
+      }}>
+        <button
+          onClick={() => setHelpOpen(o => !o)}
+          title="Help — how to use Satori"
+          style={fabStyle}
+          onMouseEnter={e => e.currentTarget.style.transform = "scale(1.05)"}
+          onMouseLeave={e => e.currentTarget.style.transform = "scale(1)"}
+        ><HelpCircle size={24} /></button>
+        <button
+          onClick={() => setVoiceOpen(true)}
+          title="Talk to Satori (voice)"
+          style={fabStyle}
+          onMouseEnter={e => e.currentTarget.style.transform = "scale(1.05)"}
+          onMouseLeave={e => e.currentTarget.style.transform = "scale(1)"}
+        ><Mic size={24} /></button>
+      </div>
 
-      {/* Voice Panel */}
-      {showPanel && isListening && (
+      {helpOpen && (
         <div style={{
-          position: "fixed", bottom: 150, right: 20, width: 340, background: "#fff",
-          borderRadius: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.15)", padding: 24,
-          zIndex: 999, border: "1px solid #E2E8F0"
+          position: "fixed", bottom: 110, right: 28, zIndex: 900,
+          width: 360, maxHeight: 520, borderRadius: 16, overflow: "hidden",
+          background: "#fff", border: `1px solid ${COLORS.border}`,
+          boxShadow: "0 24px 60px rgba(0,0,0,0.18)",
+          display: "flex", flexDirection: "column",
         }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <Volume2 size={18} color={COLORS.danger} />
-              <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.textPrimary }}>Voice Agent Active</span>
-            </div>
-            <button onClick={() => { onToggle(); setShowPanel(false); }} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted }}>
-              <X size={16} />
+          <div style={{
+            padding: "12px 16px", color: "#fff",
+            background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.teal})`,
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+          }}>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>Need a hand?</div>
+            <button onClick={() => setHelpOpen(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.85)", display: "flex", alignItems: "center" }}>
+              <X size={15} />
             </button>
           </div>
 
-          {/* Waveform */}
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, height: 40, marginBottom: 16 }}>
-            {Array.from({ length: 20 }, (_, i) => (
-              <div key={i} style={{
-                width: 3, borderRadius: 2,
-                background: `linear-gradient(180deg, ${COLORS.primary}, ${COLORS.accent})`,
-                animation: `wave 1s infinite ease-in-out`,
-                animationDelay: `${i * 0.05}s`,
-                height: `${12 + Math.random() * 28}px`
-              }} />
-            ))}
+          {/* Custom question input */}
+          <div style={{ padding: 10, borderBottom: `1px solid ${COLORS.border}` }}>
+            <div style={{ display: "flex", gap: 6 }}>
+              <input
+                type="text"
+                placeholder="Or type your own question..."
+                value={helpQuestion}
+                onChange={(e) => setHelpQuestion(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && helpQuestion.trim()) askHelp(helpQuestion.trim()); }}
+                style={{
+                  flex: 1, padding: "8px 10px", borderRadius: 8,
+                  border: `1px solid ${COLORS.border}`, fontSize: 12.5, background: "#fff",
+                }}
+              />
+              <button
+                disabled={helpBusy || !helpQuestion.trim()}
+                onClick={() => askHelp(helpQuestion.trim())}
+                style={{
+                  padding: "8px 12px", borderRadius: 8, border: "none",
+                  background: helpBusy || !helpQuestion.trim() ? "#E2E8F0" : COLORS.accent,
+                  color: helpBusy || !helpQuestion.trim() ? COLORS.textMuted : "#fff",
+                  fontSize: 12, fontWeight: 600, cursor: helpBusy ? "default" : "pointer",
+                }}
+              >Ask</button>
+            </div>
           </div>
 
-          {transcript && (
-            <div style={{ background: "#F8FAFC", borderRadius: 12, padding: 12, marginBottom: 12 }}>
-              <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.textMuted, textTransform: "uppercase", marginBottom: 4 }}>You said:</div>
-              <div style={{ fontSize: 13, color: COLORS.textPrimary, fontStyle: "italic" }}>{transcript}</div>
-            </div>
-          )}
-          {response && (
-            <div style={{ background: `${COLORS.primary}08`, borderRadius: 12, padding: 12, borderLeft: `3px solid ${COLORS.primary}` }}>
-              <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.primary, textTransform: "uppercase", marginBottom: 4 }}>AI Response:</div>
-              <div style={{ fontSize: 13, color: COLORS.textPrimary, lineHeight: 1.5 }}>{response}</div>
-            </div>
-          )}
+          {/* Topic suggestions OR answer */}
+          <div style={{ padding: 10, overflowY: "auto", flex: 1 }}>
+            {helpBusy && (
+              <div style={{ padding: 20, textAlign: "center", color: COLORS.textMuted, fontSize: 12 }}>
+                <Activity size={16} style={{ animation: "spin 1s linear infinite" }} /> Asking Satori…
+              </div>
+            )}
+            {!helpBusy && helpAnswer && (
+              <>
+                <div style={{
+                  padding: 10, background: "#F8FAFC", borderRadius: 10,
+                  fontSize: 11.5, fontStyle: "italic", color: COLORS.textSecondary, marginBottom: 6,
+                }}>
+                  Q: {helpQuestion}
+                </div>
+                <div style={{
+                  padding: 12, background: `${COLORS.accent}10`, borderLeft: `3px solid ${COLORS.accent}`,
+                  borderRadius: 8, fontSize: 13, color: COLORS.textPrimary, lineHeight: 1.55, whiteSpace: "pre-wrap",
+                }}>{helpAnswer}</div>
+                <button onClick={() => { setHelpAnswer(""); setHelpQuestion(""); }} style={{
+                  marginTop: 10, padding: "6px 10px", borderRadius: 8, border: "none",
+                  background: "transparent", color: COLORS.textSecondary, fontSize: 11.5, cursor: "pointer",
+                }}>← Back to topics</button>
+              </>
+            )}
+            {!helpBusy && !helpAnswer && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {HELP_TOPICS.map(t => (
+                  <button key={t} onClick={() => askHelp(t)} style={{
+                    display: "block", width: "100%", textAlign: "left",
+                    padding: "8px 12px", borderRadius: 8, border: "none",
+                    background: "#F8FAFC", color: COLORS.textPrimary, fontSize: 12, cursor: "pointer",
+                    transition: "all 0.15s",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = `${COLORS.accent}15`; e.currentTarget.style.color = COLORS.accent; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "#F8FAFC"; e.currentTarget.style.color = COLORS.textPrimary; }}
+                  >{t}</button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
+
+      <VoiceModal open={voiceOpen} onClose={() => setVoiceOpen(false)} />
     </>
   );
 };
@@ -8429,6 +8759,9 @@ export default function App() {
 
       {/* Chat Agent */}
       <ChatAgent isOpen={chatOpen} onClose={() => setChatOpen(false)} dashboardContext={currentNav?.label} />
+
+      {/* Floating Mic + Help buttons (ports Old Satori FAB) — visible on every page */}
+      <FabButtons />
 
 
       {/* Global Styles */}
