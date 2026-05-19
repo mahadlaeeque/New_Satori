@@ -409,6 +409,7 @@ const VoiceModal = ({ open, onClose }) => {
   const setupDoneRef = useRef(false);
   const setupTimeoutRef = useRef(null);
   const closingRef = useRef(false);
+  const activeSourcesRef = useRef([]);
 
   useEffect(() => {
     if (!open) return;
@@ -585,28 +586,69 @@ const VoiceModal = ({ open, onClose }) => {
   const playPcm = (b64) => {
     const ctx = playCtxRef.current;
     if (!ctx) return;
+    // Browsers sometimes suspend the AudioContext (autoplay policy, tab focus
+    // loss). resume() is a no-op when already running and avoids the
+    // 'click-click-click' silent gaps we see when chunks arrive on a
+    // suspended ctx.
+    if (ctx.state === "suspended") {
+      try { ctx.resume(); } catch {}
+    }
     try {
       const raw = atob(b64);
-      const bytes = new Uint8Array(raw.length);
-      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-      const pcm16 = new Int16Array(bytes.buffer);
+      // PCM16 needs an even byte count. If the chunk is odd-length (which can
+      // happen at packet boundaries) DROP the last byte rather than letting
+      // Int16Array() throw and the whole chunk get tossed.
+      const len = raw.length & ~1;
+      if (len < 2) return;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = raw.charCodeAt(i);
+      const pcm16 = new Int16Array(bytes.buffer, 0, len / 2);
       const floats = new Float32Array(pcm16.length);
       for (let i = 0; i < pcm16.length; i++) floats[i] = pcm16[i] / 32768.0;
       const buf = ctx.createBuffer(1, floats.length, 24000);
       buf.copyToChannel(floats, 0);
       const src = ctx.createBufferSource();
       src.buffer = buf;
-      src.connect(ctx.destination);
-      const when = Math.max(ctx.currentTime, nextPlayTimeRef.current);
+      // A short gain node smooths out the chunk-to-chunk seams so the
+      // playback sounds continuous instead of crackly.
+      const gain = ctx.createGain();
+      gain.gain.value = 1.0;
+      src.connect(gain);
+      gain.connect(ctx.destination);
+
+      const now = ctx.currentTime;
+      // If we've fallen far behind realtime (eg. tab was throttled), don't
+      // try to queue 30 seconds of audio in the future — that's where the
+      // 'fast / squeaky / overlapped' glitches come from. Reset to ~50ms
+      // ahead so playback resumes cleanly.
+      if (nextPlayTimeRef.current > now + 0.5) {
+        nextPlayTimeRef.current = now + 0.05;
+      }
+      const when = Math.max(now + 0.02, nextPlayTimeRef.current);
       src.start(when);
       nextPlayTimeRef.current = when + buf.duration;
-    } catch { /* ignore */ }
+
+      // Track the source so stop() can cancel in-flight chunks if the user
+      // ends the call mid-sentence.
+      activeSourcesRef.current.push(src);
+      src.onended = () => {
+        activeSourcesRef.current = activeSourcesRef.current.filter((s) => s !== src);
+      };
+    } catch (e) {
+      console.warn("[VoiceModal] playPcm error", e);
+    }
   };
 
   const stop = () => {
     closingRef.current = true;
     setState("closing");
     setupDoneRef.current = false;
+    // Cancel any audio chunks queued for future playback so the modal
+    // closes cleanly instead of continuing to speak for 5 seconds.
+    for (const s of (activeSourcesRef.current || [])) {
+      try { s.stop(); } catch {}
+    }
+    activeSourcesRef.current = [];
     try { processorRef.current?.disconnect(); } catch {}
     try { sourceRef.current?.disconnect(); } catch {}
     streamRef.current?.getTracks().forEach(t => t.stop());
