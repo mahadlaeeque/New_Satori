@@ -1411,7 +1411,22 @@ const PROMPT_CATEGORIES = [
 // ─── Markdown Renderer ───
 const renderMarkdown = (text) => {
   if (!text) return null;
-  const lines = text.split("\n");
+  // Strip any HTML the AI might still emit (legacy prompts told it to use
+  // <p>/<strong>/<ul>/<li>). Convert common tags to markdown equivalents so
+  // bold + lists still render, then drop everything else.
+  let s = String(text);
+  s = s.replace(/<\s*br\s*\/?>/gi, "\n");
+  s = s.replace(/<\/p>/gi, "\n\n");
+  s = s.replace(/<p[^>]*>/gi, "");
+  s = s.replace(/<\/?strong[^>]*>/gi, "**");
+  s = s.replace(/<\/?b>/gi, "**");
+  s = s.replace(/<li[^>]*>/gi, "- ");
+  s = s.replace(/<\/li>/gi, "\n");
+  s = s.replace(/<\/?ul[^>]*>/gi, "");
+  s = s.replace(/<\/?ol[^>]*>/gi, "");
+  s = s.replace(/<[^>]+>/g, "");           // strip anything else
+  s = s.replace(/\n{3,}/g, "\n\n").trim();
+  const lines = s.split("\n");
   const elements = [];
   let inList = false;
   let listItems = [];
@@ -3421,7 +3436,7 @@ const ACTION_CHANNELS = [
   { id: "whatsapp", label: "WhatsApp", icon: Phone, color: "#25D366", bg: "#F0FDF4" },
   { id: "sms", label: "SMS", icon: MessageCircle, color: "#8B5CF6", bg: "#F5F3FF" },
   { id: "slack", label: "Slack", icon: Hash, color: "#E01E5A", bg: "#FFF1F2" },
-  { id: "webhook", label: "Webhook", icon: Globe, color: "#6B7280", bg: "#F9FAFB" },
+  { id: "webhook", label: "Webhook", icon: Globe, color: COLORS.textMuted, bg: "#F9FAFB" },
 ];
 
 const RULE_METRICS = [
@@ -5109,7 +5124,7 @@ const DashboardRenderer = ({ spec, onBack }) => {
                       {w.sql && (
                         <pre style={{
                           marginTop: 6, padding: 8, background: "#F9FAFB", borderRadius: 6,
-                          fontSize: 11, color: "#374151", overflow: "auto", maxHeight: 220, whiteSpace: "pre-wrap"
+                          fontSize: 11, color: COLORS.textSecondary, overflow: "auto", maxHeight: 220, whiteSpace: "pre-wrap"
                         }}>{w.sql}</pre>
                       )}
                     </div>
@@ -8533,6 +8548,78 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
         html[data-satori-theme="dark"] [style*="color: rgb(148, 163, 184)"],
         html[data-satori-theme="dark"] [style*="color: rgb(156, 163, 175)"] {
           color: var(--c-text-muted) !important;
+        }
+
+        /* Hex-form text-color overrides — Chrome sometimes preserves the
+           original hex string in inline-style, so attribute selectors keyed
+           on rgb() won't match. Match the hex form too. */
+        html[data-satori-theme="dark"] [style*="color: #0F172A"],
+        html[data-satori-theme="dark"] [style*="color: #0f172a"],
+        html[data-satori-theme="dark"] [style*="color: #111827"],
+        html[data-satori-theme="dark"] [style*="color:#0F172A"],
+        html[data-satori-theme="dark"] [style*="color: #1F2937"],
+        html[data-satori-theme="dark"] [style*="color: #1F1F1F"],
+        html[data-satori-theme="dark"] [style*="color: #1E293B"],
+        html[data-satori-theme="dark"] [style*="color: #1e293b"],
+        html[data-satori-theme="dark"] [style*="color: #0B1220"] {
+          color: var(--c-text-primary) !important;
+        }
+        html[data-satori-theme="dark"] [style*="color: #475569"],
+        html[data-satori-theme="dark"] [style*="color: #4B5563"],
+        html[data-satori-theme="dark"] [style*="color: #374151"],
+        html[data-satori-theme="dark"] [style*="color: #334155"] {
+          color: var(--c-text-secondary) !important;
+        }
+        html[data-satori-theme="dark"] [style*="color: #64748B"],
+        html[data-satori-theme="dark"] [style*="color: #6B7280"],
+        html[data-satori-theme="dark"] [style*="color: #94A3B8"],
+        html[data-satori-theme="dark"] [style*="color: #94a3b8"],
+        html[data-satori-theme="dark"] [style*="color: #9CA3AF"] {
+          color: var(--c-text-muted) !important;
+        }
+
+        /* Catch borders specified with darker hex literals */
+        html[data-satori-theme="dark"] [style*="border: 1px solid #E2E8F0"],
+        html[data-satori-theme="dark"] [style*="border: 1px solid #e2e8f0"],
+        html[data-satori-theme="dark"] [style*="border: 1px solid #E5E7EB"],
+        html[data-satori-theme="dark"] [style*="border: 1px solid #CBD5E1"],
+        html[data-satori-theme="dark"] [style*="1px solid #F1F5F9"] {
+          border-color: var(--c-border) !important;
+        }
+
+        /* Light-grey card surfaces commonly used inside other panels */
+        html[data-satori-theme="dark"] [style*="background: #F8FAFC"],
+        html[data-satori-theme="dark"] [style*="background:#F8FAFC"],
+        html[data-satori-theme="dark"] [style*="background: rgb(248, 250, 252)"],
+        html[data-satori-theme="dark"] [style*="background: #F1F5F9"],
+        html[data-satori-theme="dark"] [style*="background:#F1F5F9"],
+        html[data-satori-theme="dark"] [style*="background: rgb(241, 245, 249)"],
+        html[data-satori-theme="dark"] [style*="background: #FAFBFC"],
+        html[data-satori-theme="dark"] [style*="background:#FAFBFC"],
+        html[data-satori-theme="dark"] [style*="background: rgb(250, 251, 252)"] {
+          background: var(--c-surface-alt) !important;
+        }
+        /* Pure-white card surfaces */
+        html[data-satori-theme="dark"] [style*="background: #FFFFFF"],
+        html[data-satori-theme="dark"] [style*="background:#FFFFFF"],
+        html[data-satori-theme="dark"] [style*="background: #fff"],
+        html[data-satori-theme="dark"] [style*="background:#fff"],
+        html[data-satori-theme="dark"] [style*="background: rgb(255, 255, 255)"] {
+          background: var(--c-surface) !important;
+        }
+
+        /* The chat / dashboard / report page wrapper often sets background
+           on the outer div via Tailwind-like literals; force the page bg in
+           dark mode so the white sliver behind cards isn't blinding. */
+        html[data-satori-theme="dark"] body,
+        html[data-satori-theme="dark"] #root {
+          background: var(--c-page-bg) !important;
+        }
+
+        /* Default text color for any element that didn't set its own — keeps
+           anything we haven't migrated yet readable. */
+        html[data-satori-theme="dark"] {
+          color-scheme: dark;
         }
 
         /* Scrollbar tint per theme */
