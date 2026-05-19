@@ -1063,6 +1063,42 @@ if GOOGLE_SA_KEY and os.path.exists(GOOGLE_SA_KEY):
 USE_VERTEX = os.environ.get("USE_VERTEX_AI") == "1"
 
 
+def _ai_opt_out(user_id: int) -> bool:
+    """Whether a user has opted out of sending business data to the LLM.
+    Reads user_settings if present; defaults to False (opt-in) otherwise."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT ai_opt_out FROM user_settings WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        db.close()
+        if not row:
+            return False
+        val = row["ai_opt_out"] if isinstance(row, dict) else row[0]
+        return bool(val)
+    except Exception:
+        return False
+
+
+def _get_user_plant_scope(user_id: int):
+    """Returns the list of plant codes the user is restricted to, or None
+    when unrestricted. With plant-scope governance not yet wired for TMC v2
+    (workforce data isn't plant-partitioned the way SAP data was), this
+    always returns None so admin SQL is unrestricted."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute(
+            "SELECT value FROM user_data_scope WHERE user_id = ? AND dimension = 'plant'",
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        db.close()
+        if not rows:
+            return None
+        return [r["value"] if isinstance(r, dict) else r[0] for r in rows]
+    except Exception:
+        return None
+
+
 def get_genai_client():
     """Get a genai client. Prefers AI Studio (API key) since we already have one
     in Secret Manager and Vertex AI would require an extra IAM role on the runtime SA."""
@@ -1302,9 +1338,13 @@ DATA QUALITY
   • Win-rate decimals (0.32 = 32%) → multiply by 100 for display.
   • Department grouping: COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified').
 
-SCOPE
-  • Warehouse covers workforce + sales operations ONLY. NOT in scope: SAP ERP, inventory, AR/AP, GL, manufacturing, payroll/salary.
-  • If asked about out-of-scope, state clearly + offer closest available proxy.
+SCOPE — STRICTLY ENFORCED
+  • You ONLY answer questions about TMC's workforce + sales data in BigQuery — attendance, allocation, bench, timesheets, capability, accounts, AM scorecards, pipeline, hunting gap, workload feasibility, departments, employees.
+  • If the user asks ANYTHING outside that scope (general knowledge, news, weather, jokes, math, coding, recipes, sports, history, advice on unrelated topics, philosophical/personal questions, anything not about TMC employees / sales / operations data), POLITELY REFUSE in one sentence:
+      "I'm Satori — I only answer questions about TMC's workforce and sales data. Ask me about attendance, allocation, pipeline, account coverage, or AM performance."
+    Then STOP. Do NOT attempt to answer the off-topic question — even if you know it.
+  • Greetings, "are you there?", "thank you", and similar conversational acknowledgements ARE allowed — answer briefly and pivot back to TMC data ("Yes — what would you like to know about the workforce or pipeline?").
+  • In-scope but-out-of-warehouse questions (eg SAP ERP / inventory / AR-AP / GL / manufacturing / payroll / salary numbers) → say the warehouse doesn't include that and suggest the closest available cut (eg. allocation utilization instead of payroll burn).
 
 STYLE
   • Voice answers: 2-3 sentences. No tables, no markdown — you're speaking.
@@ -4419,7 +4459,6 @@ def schema_probe():
             "  FROM `ai-vertex-mahad.Satori_Project.Employee_Data`), "
             "a AS (SELECT DISTINCT CAST(employee_id AS STRING) AS eid "
             "  FROM `ai-vertex-mahad.Satori_Project.Attendance_Data`) "
-            "SELECT "
             "  (SELECT COUNT(*) FROM e) AS employee_data_distinct, "
             "  (SELECT COUNT(*) FROM a) AS attendance_distinct, "
             "  (SELECT COUNT(*) FROM e JOIN a ON e.code = a.eid) AS overlap, "
