@@ -411,6 +411,7 @@ const VoiceModal = ({ open, onClose }) => {
   const closingRef = useRef(false);
   const activeSourcesRef = useRef([]);
   const turnEndedRef = useRef(false);
+  const pendingHangupRef = useRef(false);
 
   useEffect(() => {
     if (!open) return;
@@ -505,16 +506,22 @@ const VoiceModal = ({ open, onClose }) => {
       }
 
       if (data.toolCall?.functionCalls?.length) {
-        // Voice agent UX: tell the user we heard them and are now looking up
-        // the answer in BigQuery. Also mark "busy" so the mic capture loop
-        // stops sending audio — prevents the agent from hearing its own
-        // status message or background chatter and barging in on itself.
-        isSpeakingRef.current = true;  // doubles as a "busy" lock for capture
-        setState("speaking");
-        setStatusText("Satori is consulting BigQuery\u2026");
-
+        // Voice agent gating: mic stops capturing while the agent is busy.
+        isSpeakingRef.current = true;
         const responses = [];
+        let sawEndCall = false;
         for (const fc of data.toolCall.functionCalls) {
+          if (fc.name === "end_call") {
+            // The model is signaling that the user said goodbye. Acknowledge
+            // the tool call so Gemini moves on, then mark the connection
+            // for shutdown once audio playback drains.
+            sawEndCall = true;
+            responses.push({ id: fc.id, name: fc.name, response: { output: "Goodbye accepted." } });
+            continue;
+          }
+          // BigQuery tool call
+          setState("speaking");
+          setStatusText("Satori is consulting BigQuery\u2026");
           try {
             const r = await fetch(`${apiBase}/api/voice/query`, {
               method: "POST",
@@ -528,9 +535,13 @@ const VoiceModal = ({ open, onClose }) => {
           }
         }
         ws.send(JSON.stringify({ toolResponse: { functionResponses: responses } }));
-        // Keep "busy" flag on until the model actually starts producing audio
-        // (which flips it on again) or signals turnComplete (which clears it).
-        setStatusText("Working on your answer\u2026");
+        if (sawEndCall) {
+          // Flag for hang-up after current audio finishes.
+          pendingHangupRef.current = true;
+          setStatusText("Goodbye\u2026");
+        } else {
+          setStatusText("Working on your answer\u2026");
+        }
         return;
       }
 
@@ -647,7 +658,7 @@ const VoiceModal = ({ open, onClose }) => {
       const now = ctx.currentTime;
       const base = (nextPlayTimeRef.current && nextPlayTimeRef.current > now)
         ? nextPlayTimeRef.current
-        : now + 0.04;
+        : now + 0.015;
       src.start(base);
       nextPlayTimeRef.current = base + buf.duration;
 
@@ -661,9 +672,16 @@ const VoiceModal = ({ open, onClose }) => {
         if (activeSourcesRef.current.length === 0 && turnEndedRef.current) {
           isSpeakingRef.current = false;
           turnEndedRef.current = false;
-          setState("listening");
-          setStatusText("Listening\u2026 speak now");
           nextPlayTimeRef.current = 0;
+          if (pendingHangupRef.current) {
+            // Voice agent goodbye: drop straight to closing.
+            pendingHangupRef.current = false;
+            setStatusText("Goodbye");
+            setTimeout(() => { try { stop(); } catch {} }, 400);
+          } else {
+            setState("listening");
+            setStatusText("Listening\u2026 speak now");
+          }
         }
       };
     } catch (e) {
