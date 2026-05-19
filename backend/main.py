@@ -2840,6 +2840,47 @@ def _autofix_dashboard_sql(sql: str) -> str:
 
     # Fix 3 — collapse runs of internal whitespace introduced by empty {where}
     sql = _re.sub(r"  +", " ", sql)
+
+    # Fix 4 — Convert plain `JOIN Employee_Data` to `LEFT JOIN`, and move any
+    # `LOWER(<alias>.Employee_Type) IN (...)` predicate from the WHERE clause
+    # into the JOIN's ON clause. This makes the outer query preserve attendance
+    # rows even when the lookup table doesn't have a matching row, AND prevents
+    # a missing Employee_Type from dropping the row. The AI keeps generating
+    # INNER joins that throw out every row when the Employee_Data side is
+    # incomplete or the join-key types don't align (e.g. STRING vs INT64
+    # zero-padding).
+    join_re = _re.compile(
+        r"\b(?<!LEFT\s)JOIN\s+`?(?:ai-vertex-mahad\.Satori_Project\.Employee_Data)`?\s+(?P<alias>[A-Za-z_][A-Za-z0-9_]*)\s+ON\s+(?P<on>[^\n]+?)(?=\s+(?:WHERE|GROUP|ORDER|LIMIT|LEFT\s+JOIN|JOIN)\b|$)",
+        _re.IGNORECASE,
+    )
+    m = join_re.search(sql)
+    if m:
+        alias = m.group("alias")
+        on_clause = m.group("on").rstrip()
+        emp_type_re = _re.compile(
+            r"(?:\s+AND\s+|\s+WHERE\s+)LOWER\(\s*" + _re.escape(alias) + r"\.Employee_Type\s*\)\s+IN\s*\([^)]+\)",
+            _re.IGNORECASE,
+        )
+        emp_type_m = emp_type_re.search(sql)
+        if emp_type_m:
+            predicate = emp_type_m.group(0)
+            predicate_body = _re.sub(r"^\s*(?:AND|WHERE)\s+", "", predicate, flags=_re.IGNORECASE).strip()
+            if predicate.lstrip().upper().startswith("WHERE"):
+                sql = _re.sub(
+                    r"\s+WHERE\s+LOWER\(\s*" + _re.escape(alias) + r"\.Employee_Type\s*\)\s+IN\s*\([^)]+\)\s+AND\s+",
+                    " WHERE ", sql, flags=_re.IGNORECASE,
+                )
+                sql = _re.sub(
+                    r"\s+WHERE\s+LOWER\(\s*" + _re.escape(alias) + r"\.Employee_Type\s*\)\s+IN\s*\([^)]+\)\s*",
+                    " ", sql, flags=_re.IGNORECASE,
+                )
+            else:
+                sql = sql.replace(predicate, "")
+            new_on = on_clause + " AND " + predicate_body
+            sql = sql.replace(m.group(0), "LEFT JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` " + alias + " ON " + new_on)
+        else:
+            sql = sql.replace(m.group(0), "LEFT JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` " + alias + " ON " + on_clause)
+
     return sql
 
 
@@ -3600,6 +3641,58 @@ def report_generate(body: dict, user: dict = Depends(get_current_user)):
 # ═══════════════════════════════════════════════════════════════════════════════
 #  HEALTH CHECK + SPA STATIC MOUNT
 # ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/admin/schema-probe")
+def schema_probe(user: dict = Depends(get_current_user)):
+    """One-shot sanity probe for debugging empty dashboards.
+
+    Returns five small result sets that together tell you whether the
+    join keys match, what Employee_Type values actually exist, the
+    attendance_date range, the distinct attendance status values, and
+    a per-month row count. Run this once when a saved dashboard is
+    empty and you can see exactly which assumption is broken.
+    """
+    probes = {
+        "employee_type_values": (
+            "SELECT Employee_Type, COUNT(*) AS n "
+            "FROM `ai-vertex-mahad.Satori_Project.Employee_Data` "
+            "GROUP BY Employee_Type ORDER BY n DESC LIMIT 30"
+        ),
+        "attendance_date_range": (
+            "SELECT MIN(attendance_date) AS min_date, "
+            "MAX(attendance_date) AS max_date, COUNT(*) AS total_rows "
+            "FROM `ai-vertex-mahad.Satori_Project.Attendance_Data`"
+        ),
+        "attendance_by_month": (
+            "SELECT FORMAT_DATE('%Y-%m', attendance_date) AS month, "
+            "COUNT(*) AS rows, COUNT(DISTINCT employee_id) AS employees "
+            "FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` "
+            "GROUP BY month ORDER BY month DESC LIMIT 24"
+        ),
+        "attendance_status_values": (
+            "SELECT attendance_status_text, COUNT(*) AS n "
+            "FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` "
+            "GROUP BY attendance_status_text ORDER BY n DESC LIMIT 30"
+        ),
+        "join_compatibility": (
+            "WITH e AS (SELECT DISTINCT CAST(Employee_Code AS STRING) AS code "
+            "  FROM `ai-vertex-mahad.Satori_Project.Employee_Data`), "
+            "a AS (SELECT DISTINCT CAST(employee_id AS STRING) AS eid "
+            "  FROM `ai-vertex-mahad.Satori_Project.Attendance_Data`) "
+            "SELECT "
+            "  (SELECT COUNT(*) FROM e) AS employee_data_distinct, "
+            "  (SELECT COUNT(*) FROM a) AS attendance_distinct, "
+            "  (SELECT COUNT(*) FROM e JOIN a ON e.code = a.eid) AS overlap, "
+            "  (SELECT code FROM e LIMIT 1) AS sample_employee_code, "
+            "  (SELECT eid FROM a LIMIT 1) AS sample_employee_id"
+        ),
+    }
+    out = {}
+    for name, sql in probes.items():
+        r = bq_run_query(sql, max_rows=40)
+        out[name] = r
+    return {"probes": out}
+
 
 @app.get("/api/health")
 def health_check():
