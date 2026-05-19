@@ -4550,13 +4550,31 @@ const DashboardRenderer = ({ spec, onBack }) => {
             </div>
           )}
 
-          {/* Diagnostic banner — surfaces BQ errors so empty dashboards are debuggable */}
+          {/* Diagnostic banner — surfaces BQ errors AND zero-row queries so empty dashboards are debuggable */}
           {(() => {
-            const issues = [
-              ...((data.kpis || []).filter((k) => k.error).map((k) => ({ kind: "KPI", title: k.title, error: k.error, sql: k.sql }))),
-              ...((data.charts || []).filter((c) => c.error).map((c) => ({ kind: "Chart", title: c.title, error: c.error, sql: c.sql }))),
+            const widgets = [
+              ...((data.kpis || []).map((k) => {
+                const hasError = !!k.error;
+                const empty = !hasError && (k.value === null || k.value === undefined || k.value === "");
+                return { kind: "KPI", title: k.title, error: k.error, sql: k.sql,
+                         status: hasError ? "error" : (empty ? "empty" : "ok"),
+                         rows: empty ? 0 : (hasError ? 0 : 1) };
+              })),
+              ...((data.charts || []).map((c) => {
+                const hasError = !!c.error;
+                const rowCount = (c.data || []).length;
+                return { kind: "Chart", title: c.title, error: c.error, sql: c.sql,
+                         status: hasError ? "error" : (rowCount === 0 ? "empty" : "ok"),
+                         rows: rowCount };
+              })),
             ];
-            if (issues.length === 0) return null;
+            const problems = widgets.filter((w) => w.status !== "ok");
+            if (problems.length === 0) return null;
+            const errCount = problems.filter((w) => w.status === "error").length;
+            const emptyCount = problems.filter((w) => w.status === "empty").length;
+            const headline = errCount > 0
+              ? `${errCount} ${errCount === 1 ? "query" : "queries"} errored${emptyCount ? ` and ${emptyCount} returned no rows` : ""} — click for SQL`
+              : `${emptyCount} ${emptyCount === 1 ? "query" : "queries"} returned no rows — click to see the SQL`;
             return (
               <details style={{
                 marginBottom: 16, padding: "10px 14px", borderRadius: 10,
@@ -4564,18 +4582,26 @@ const DashboardRenderer = ({ spec, onBack }) => {
               }}>
                 <summary style={{ cursor: "pointer", fontWeight: 600 }}>
                   <AlertTriangle size={13} style={{ verticalAlign: "middle", marginRight: 6 }} />
-                  {issues.length} {issues.length === 1 ? "query" : "queries"} returned an error — click to see details
+                  {headline}
                 </summary>
                 <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
-                  {issues.map((iss, ix) => (
+                  {problems.map((w, ix) => (
                     <div key={ix} style={{ padding: 10, background: "#fff", borderRadius: 8, border: "1px solid #FCD34D" }}>
-                      <div style={{ fontWeight: 600, marginBottom: 4 }}>{iss.kind}: {iss.title}</div>
-                      <div style={{ fontFamily: "monospace", fontSize: 11.5, color: "#7C2D12" }}>{iss.error}</div>
-                      {iss.sql && (
+                      <div style={{ fontWeight: 600, marginBottom: 4, display: "flex", justifyContent: "space-between", gap: 8 }}>
+                        <span>{w.kind}: {w.title}</span>
+                        <span style={{
+                          fontSize: 10.5, padding: "2px 8px", borderRadius: 4, color: "#fff",
+                          background: w.status === "error" ? "#DC2626" : "#9CA3AF"
+                        }}>{w.status === "error" ? "ERROR" : `${w.rows} rows`}</span>
+                      </div>
+                      {w.error && (
+                        <div style={{ fontFamily: "monospace", fontSize: 11.5, color: "#7C2D12", marginBottom: 4 }}>{w.error}</div>
+                      )}
+                      {w.sql && (
                         <pre style={{
                           marginTop: 6, padding: 8, background: "#F9FAFB", borderRadius: 6,
-                          fontSize: 11, color: "#374151", overflow: "auto", maxHeight: 140, whiteSpace: "pre-wrap"
-                        }}>{iss.sql}</pre>
+                          fontSize: 11, color: "#374151", overflow: "auto", maxHeight: 220, whiteSpace: "pre-wrap"
+                        }}>{w.sql}</pre>
                       )}
                     </div>
                   ))}
