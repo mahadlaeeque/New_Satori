@@ -2757,9 +2757,45 @@ def voice_session(user: dict = Depends(get_current_user)):
         + "\n\n" + _load_schema_settings_block()
         + "\n\n" + live_schema.render_context_block()
     )
+    # Pick a live model that exists for THIS API key. We probe the list and
+    # fall back through a preferred order. Cached on the function for life of
+    # the process.
+    cache = getattr(voice_session, "_model_cache", {"model": None})
+    model = os.environ.get("GEMINI_MODEL_VOICE", "").strip() or cache.get("model")
+    if not model:
+        preferred = [
+            "models/gemini-2.0-flash-live-001",
+            "models/gemini-2.5-flash-live-preview",
+            "models/gemini-2.5-flash-preview-native-audio-dialog",
+        ]
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                import json as _j
+                data = _j.loads(resp.read())
+                names = [m.get("name", "") for m in data.get("models", [])]
+                # Only consider models that actually support BidiGenerateContent.
+                supports_live = set()
+                for m in data.get("models", []):
+                    methods = m.get("supportedGenerationMethods", []) or []
+                    if "bidiGenerateContent" in methods:
+                        supports_live.add(m.get("name", ""))
+                model = next((p for p in preferred if p in supports_live), None)
+                if not model and supports_live:
+                    model = sorted(supports_live)[0]
+        except Exception as e:
+            print(f"[voice/session] model probe failed: {e}")
+        if not model:
+            model = "models/gemini-2.0-flash-live-001"
+        cache["model"] = model
+        voice_session._model_cache = cache  # type: ignore[attr-defined]
+        print(f"[voice/session] using model {model}")
     return {
         "apiKey": api_key,
-        "model": os.environ.get("GEMINI_MODEL_VOICE", "models/gemini-2.5-flash-live-preview"),
+        "model": model,
         "voice": os.environ.get("GEMINI_TTS_VOICE", "Leda"),
         "systemInstruction": system_instruction,
         "tools": tools,

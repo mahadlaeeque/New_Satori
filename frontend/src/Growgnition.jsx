@@ -18,29 +18,33 @@ import {
 } from "lucide-react";
 
 // ─── TMC Brand Color Palette ───
+// Theme-aware tokens go through CSS custom properties so the same JSX inline
+// styles render correctly in both light and dark mode. Brand colors that
+// should NOT flip (accent green, danger red, etc.) stay as hex literals.
+// The CSS variable defaults live in the global <style> block at the App root.
 const COLORS = {
-  primary: "#333333",       // Mine Shaft - primary dark
-  primaryLight: "#676767",  // Dove Gray
-  primaryDark: "#1a1a1a",   // Near black
-  accent: "#8AC441",        // Green Shushi - TMC signature green
-  accentLight: "#9DD35A",   // Lighter green
-  accentDark: "#68933F",    // Apple - darker green
-  purple: "#353085",        // Minsk - secondary
-  teal: "#0A5F89",          // Venice Blue - secondary
-  warning: "#F59E0B",
-  danger: "#EF4444",
-  success: "#8AC441",       // TMC green as success
-  info: "#0A5F89",          // Venice Blue as info
-  surface: "#FFFFFF",
-  surfaceAlt: "#F8FAF5",    // Very light green tint
-  border: "#E6E7E8",        // Iron
-  silver: "#B3B2B3",        // Shady Lady
-  textPrimary: "#333333",   // Mine Shaft
-  textSecondary: "#676767", // Dove Gray
-  textMuted: "#B3B2B3",     // Shady Lady
-  chartColors: ["#8AC441", "#353085", "#0A5F89", "#333333", "#68933F", "#F59E0B", "#EF4444", "#9DD35A"],
-  gradientStart: "#333333",
-  gradientEnd: "#8AC441",
+  primary:        "var(--c-primary)",
+  primaryLight:   "var(--c-primary-light)",
+  primaryDark:    "var(--c-primary-dark)",
+  accent:         "#8AC441",
+  accentLight:    "#9DD35A",
+  accentDark:     "#68933F",
+  purple:         "#353085",
+  teal:           "#0A5F89",
+  warning:        "#F59E0B",
+  danger:         "#EF4444",
+  success:        "#8AC441",
+  info:           "#0A5F89",
+  surface:        "var(--c-surface)",
+  surfaceAlt:     "var(--c-surface-alt)",
+  border:         "var(--c-border)",
+  silver:         "var(--c-text-muted)",
+  textPrimary:    "var(--c-text-primary)",
+  textSecondary:  "var(--c-text-secondary)",
+  textMuted:      "var(--c-text-muted)",
+  chartColors:    ["#8AC441", "#353085", "#0A5F89", "#94A3B8", "#68933F", "#F59E0B", "#EF4444", "#9DD35A"],
+  gradientStart:  "var(--c-primary)",
+  gradientEnd:    "#8AC441",
 };
 
 // ─── TMC Logo Image Component ───
@@ -8352,25 +8356,96 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
         ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
         ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
 
-        /* Dark mode (toggled by html[data-satori-theme="dark"]). Uses a
-           global filter inversion so every inline-styled component flips
-           to dark without per-component refactoring. Images/charts are
-           re-inverted so they look normal. */
-        html[data-satori-theme="dark"] body { background: #111 !important; }
+        /* ─── Theme tokens ─── Light is default. Dark overrides the same
+           variables under html[data-satori-theme="dark"]. JSX inline styles
+           that read COLORS.surface etc. resolve to var(--c-…) so they pick
+           up the active theme automatically. */
+        :root, html[data-satori-theme="light"] {
+          --c-primary:         #333333;
+          --c-primary-light:   #676767;
+          --c-primary-dark:    #1a1a1a;
+          --c-surface:         #FFFFFF;
+          --c-surface-alt:     #F8FAF5;
+          --c-border:          #E6E7E8;
+          --c-text-primary:    #333333;
+          --c-text-secondary:  #676767;
+          --c-text-muted:      #B3B2B3;
+          --c-page-bg:         #F7F9FA;
+          --c-input-bg:        #FFFFFF;
+        }
         html[data-satori-theme="dark"] {
-          filter: invert(0.92) hue-rotate(180deg);
-          background: #111 !important;
+          --c-primary:         #F1F5F9;
+          --c-primary-light:   #CBD5E1;
+          --c-primary-dark:    #FFFFFF;
+          --c-surface:         #1E293B;
+          --c-surface-alt:     #0F172A;
+          --c-border:          #334155;
+          --c-text-primary:    #F1F5F9;
+          --c-text-secondary:  #CBD5E1;
+          --c-text-muted:      #94A3B8;
+          --c-page-bg:         #0B1220;
+          --c-input-bg:        #1E293B;
         }
-        html[data-satori-theme="dark"] img,
-        html[data-satori-theme="dark"] svg,
-        html[data-satori-theme="dark"] video,
-        html[data-satori-theme="dark"] canvas,
-        html[data-satori-theme="dark"] .recharts-wrapper,
-        html[data-satori-theme="dark"] [data-no-invert] {
-          filter: invert(0.92) hue-rotate(180deg);
+        html[data-satori-theme="dark"] body { background: var(--c-page-bg); color: var(--c-text-primary); }
+
+        /* Override hardcoded hex backgrounds via attribute selector. Inline
+           styles use rgb(...) serialization on most browsers, so we target
+           both spellings. Selectors are intentionally specific. */
+        html[data-satori-theme="dark"] [style*="background: rgb(255, 255, 255)"],
+        html[data-satori-theme="dark"] [style*="background:#fff"],
+        html[data-satori-theme="dark"] [style*='background: #fff'],
+        html[data-satori-theme="dark"] [style*='background: "#fff"'] {
+          background: var(--c-surface) !important;
         }
+        html[data-satori-theme="dark"] [style*="background: rgb(248, 250, 252)"],
+        html[data-satori-theme="dark"] [style*="background:#F8FAFC"],
+        html[data-satori-theme="dark"] [style*="background:#f8fafc"] {
+          background: var(--c-surface-alt) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: rgb(250, 251, 252)"],
+        html[data-satori-theme="dark"] [style*="background:#FAFBFC"] {
+          background: var(--c-surface-alt) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: rgb(241, 245, 249)"],
+        html[data-satori-theme="dark"] [style*="background:#F1F5F9"] {
+          background: var(--c-surface-alt) !important;
+        }
+        html[data-satori-theme="dark"] [style*="border: 1px solid rgb(241, 245, 249)"],
+        html[data-satori-theme="dark"] [style*="border-bottom: 1px solid rgb(241, 245, 249)"],
+        html[data-satori-theme="dark"] [style*="borderBottom"][style*="rgb(241, 245, 249)"] {
+          border-color: var(--c-border) !important;
+        }
+        html[data-satori-theme="dark"] [style*="color: rgb(17, 24, 39)"],
+        html[data-satori-theme="dark"] [style*="color: rgb(31, 41, 55)"],
+        html[data-satori-theme="dark"] [style*="color: rgb(15, 23, 42)"] {
+          color: var(--c-text-primary) !important;
+        }
+        html[data-satori-theme="dark"] [style*="color: rgb(100, 116, 139)"],
+        html[data-satori-theme="dark"] [style*="color: rgb(71, 85, 105)"] {
+          color: var(--c-text-secondary) !important;
+        }
+        html[data-satori-theme="dark"] [style*="color: rgb(148, 163, 184)"],
+        html[data-satori-theme="dark"] [style*="color: rgb(156, 163, 175)"] {
+          color: var(--c-text-muted) !important;
+        }
+
+        /* Scrollbar tint per theme */
         html[data-satori-theme="dark"] ::-webkit-scrollbar-thumb { background: #4B5563; }
         html[data-satori-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: #6B7280; }
+
+        /* Native form controls — inputs/selects/textareas with no inline bg
+           need to flip too. */
+        html[data-satori-theme="dark"] input[type="text"],
+        html[data-satori-theme="dark"] input[type="search"],
+        html[data-satori-theme="dark"] input[type="number"],
+        html[data-satori-theme="dark"] input[type="email"],
+        html[data-satori-theme="dark"] input[type="password"],
+        html[data-satori-theme="dark"] textarea,
+        html[data-satori-theme="dark"] select {
+          background-color: var(--c-input-bg) !important;
+          color: var(--c-text-primary) !important;
+          border-color: var(--c-border) !important;
+        }
       `}</style>
     </div>
   );
