@@ -1,7 +1,8 @@
 from fastapi import FastAPI, HTTPException, Depends, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
+from typing import Optional
 from database import get_db, init_db
 from auth import (
     verify_password, create_access_token, decode_token,
@@ -1323,7 +1324,8 @@ class ChatRequest(BaseModel):
     message: str
     history: list[ChatMessage] = []
     voice_mode: bool = False
-    conversation_id: int | None = None
+    # Use Optional[...] not int | None — broadest Pydantic v1/v2 compat.
+    conversation_id: Optional[int] = None
 
 
 _CHAT_SQL_TOOL = genai.types.Tool(function_declarations=[
@@ -1494,6 +1496,26 @@ def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None) -> str:
 
 @app.post("/api/chat")
 def chat(body: ChatRequest, request: Request, user: dict = Depends(get_current_user)):
+    """Outer wrapper — any uncaught exception surfaces the real message + a
+    short traceback to the user (and a full one to Cloud Run logs) instead of
+    returning a generic 500 'Internal Server Error'."""
+    try:
+        return _chat_impl(body, request, user)
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[/api/chat] UNHANDLED EXCEPTION:\n{tb}")
+        # Short, copy-pasteable detail for the user so we don't need server logs.
+        first_line = tb.strip().split("\n")[-1][:300]
+        return JSONResponse(
+            status_code=502,
+            content={"reply": f"Backend error: {first_line}", "error": str(e)},
+        )
+
+
+def _chat_impl(body: ChatRequest, request: Request, user: dict):
     client = get_genai_client()
     uid = int(user["sub"])
     opted_out = _ai_opt_out(uid)
@@ -4423,6 +4445,10 @@ def health_check():
     }
 
 
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+_FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
