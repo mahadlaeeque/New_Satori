@@ -12,6 +12,7 @@ import totp as totp_lib
 import audit as audit_log
 from redact import redact as _redact_pii, redact_history as _redact_history_pii
 from bigquery_client import find_relevant_data, discover_tables, get_all_key_data, get_schema_context
+import live_schema
 from report_generator import generate_report
 from google import genai
 from dotenv import load_dotenv
@@ -1561,7 +1562,7 @@ def chat(body: ChatRequest, request: Request, user: dict = Depends(get_current_u
                     "--- END SCOPE RESTRICTION ---"
                 )
 
-    system_prompt_final = (VOICE_SYSTEM_PROMPT_URDU if body.voice_mode else SYSTEM_PROMPT) + _build_date_context() + scope_addon
+    system_prompt_final = (VOICE_SYSTEM_PROMPT_URDU if body.voice_mode else SYSTEM_PROMPT) + _build_date_context() + scope_addon + "\n\n" + live_schema.render_context_block()
 
     try:
         # Voice mode stays simple (no tools) — the voice WS has its own tool path
@@ -1816,7 +1817,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                     "--- END SCOPE RESTRICTION ---"
                 )
 
-    system_prompt_final = SYSTEM_PROMPT + _build_date_context() + scope_addon_stream
+    system_prompt_final = SYSTEM_PROMPT + _build_date_context() + scope_addon_stream + "\n\n" + live_schema.render_context_block()
 
     def generate():
         try:
@@ -2536,6 +2537,9 @@ def refine_dashboard(user_message: str, history: list, existing_config=None) -> 
         system = DASHBOARD_EDIT_PROMPT.format(current_config=json.dumps(existing_config, indent=2), tables=tables_str)
     else:
         system = DASHBOARD_REFINE_PROMPT.format(tables=tables_str)
+    # Inject live warehouse snapshot so the AI knows the REAL departments,
+    # employee types, AMs, etc. — not just the abstract schema.
+    system = system + "\n\n" + live_schema.render_context_block()
 
     contents = []
     for msg in history[-12:]:
@@ -3445,7 +3449,7 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
             model="gemini-2.5-flash",
             contents=contents,
             config=genai.types.GenerateContentConfig(
-                system_instruction=_REPORT_SYSTEM_PROMPT,
+                system_instruction=_REPORT_SYSTEM_PROMPT + "\n\n" + live_schema.render_context_block(),
                 temperature=0.4,
                 # Reports often span 3-6 sections each with a SQL block;
                 # 2048 tokens reliably clipped the last section's sql mid-
@@ -3734,6 +3738,17 @@ def report_generate(body: dict, user: dict = Depends(get_current_user)):
 # ═══════════════════════════════════════════════════════════════════════════════
 #  HEALTH CHECK + SPA STATIC MOUNT
 # ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/admin/live-schema")
+def live_schema_endpoint(refresh: int = 0):
+    """Return the live BQ snapshot the agents currently see. Pass ?refresh=1
+    to force a refresh from BigQuery (otherwise hourly cache)."""
+    if refresh:
+        live_schema.reset_cache()
+    snap = live_schema.get_snapshot()
+    rendered = live_schema.render_context_block()
+    return {"snapshot": snap, "rendered": rendered}
+
 
 @app.get("/api/admin/schema-probe")
 def schema_probe():
