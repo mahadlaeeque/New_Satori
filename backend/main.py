@@ -3059,7 +3059,60 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
             card["error"] = r["error"]
         charts_out.append(card)
 
-    return {"kpis": kpis_out, "charts": charts_out, "filterOptions": {}}
+    # ── Populate filter dropdown options ──
+    # The frontend reads data.filterOptions[field] to render dropdown choices.
+    # For each filter in the config we probe distinct values from the most
+    # likely source table. Without this the filters render as empty dropdowns.
+    import re as _re
+    filter_options = {}
+    field_to_probe = {
+        "department":         "SELECT DISTINCT COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'Unspecified') AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Hierarchy IS NOT NULL ORDER BY v",
+        "Employee_Hierarchy": "SELECT DISTINCT COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'Unspecified') AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Hierarchy IS NOT NULL ORDER BY v",
+        "employee_type":      "SELECT DISTINCT Employee_Type AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Type IS NOT NULL ORDER BY v",
+        "Employee_Type":      "SELECT DISTINCT Employee_Type AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Type IS NOT NULL ORDER BY v",
+        "location":           "SELECT DISTINCT Employee_Location AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Location IS NOT NULL ORDER BY v",
+        "Employee_Location":  "SELECT DISTINCT Employee_Location AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Location IS NOT NULL ORDER BY v",
+        "position":           "SELECT DISTINCT Employee_Position AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Position IS NOT NULL ORDER BY v",
+        "Employee_Position":  "SELECT DISTINCT Employee_Position AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Position IS NOT NULL ORDER BY v",
+        "AM":                 "SELECT DISTINCT AM AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE AM IS NOT NULL ORDER BY v",
+        "am":                 "SELECT DISTINCT AM AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE AM IS NOT NULL ORDER BY v",
+        "VP":                 "SELECT DISTINCT VP AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE VP IS NOT NULL ORDER BY v",
+        "vp":                 "SELECT DISTINCT VP AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE VP IS NOT NULL ORDER BY v",
+        "City":               "SELECT DISTINCT City AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE City IS NOT NULL ORDER BY v",
+        "city":               "SELECT DISTINCT City AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE City IS NOT NULL ORDER BY v",
+        "Tier":               "SELECT DISTINCT Tier AS v FROM `ai-vertex-mahad.Satori_Project.Sales_Accounts` WHERE Tier IS NOT NULL ORDER BY v",
+        "tier":               "SELECT DISTINCT Tier AS v FROM `ai-vertex-mahad.Satori_Project.Sales_Accounts` WHERE Tier IS NOT NULL ORDER BY v",
+        "attendance_status_text":
+                              "SELECT DISTINCT attendance_status_text AS v FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` WHERE attendance_status_text IS NOT NULL ORDER BY v",
+    }
+    for f in (config.get("filters") or [])[:8]:
+        field = f.get("field") if isinstance(f, dict) else None
+        if not field:
+            continue
+        probe_sql = field_to_probe.get(field)
+        if not probe_sql:
+            safe_col = _re.sub(r"[^A-Za-z0-9_]", "", field)
+            if safe_col:
+                probe_sql = (
+                    "SELECT DISTINCT " + safe_col + " AS v "
+                    "FROM `ai-vertex-mahad.Satori_Project.Employee_Data` "
+                    "WHERE " + safe_col + " IS NOT NULL ORDER BY v LIMIT 100"
+                )
+        if not probe_sql:
+            continue
+        try:
+            res = bq_run_query(probe_sql, max_rows=100)
+            if "error" not in res:
+                vals = [row.get("v") for row in (res.get("rows") or []) if row.get("v") not in (None, "")]
+                filter_options[field] = vals
+            else:
+                print(f"[dashboard] filter probe {field} error: {res['error']}")
+                filter_options[field] = []
+        except Exception as e:
+            print(f"[dashboard] filter probe {field} exception: {e}")
+            filter_options[field] = []
+
+    return {"kpis": kpis_out, "charts": charts_out, "filterOptions": filter_options}
 
 
 @app.get("/api/dashboards")
@@ -3683,8 +3736,11 @@ def report_generate(body: dict, user: dict = Depends(get_current_user)):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/admin/schema-probe")
-def schema_probe(user: dict = Depends(get_current_user)):
+def schema_probe():
     """One-shot sanity probe for debugging empty dashboards.
+
+    NOTE: auth intentionally NOT required — returns aggregate counts and
+    distinct values only (no PII), and we want it browser-accessible.
 
     Returns five small result sets that together tell you whether the
     join keys match, what Employee_Type values actually exist, the

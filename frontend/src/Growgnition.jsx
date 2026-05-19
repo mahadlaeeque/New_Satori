@@ -14,7 +14,7 @@ import {
   Volume2, VolumeX, Minimize2, Maximize2, Bot, Sparkles, ChevronDown, Download,
   Plus, ToggleLeft, ToggleRight, Phone, Hash, Trash2, Edit3, Play, Pause, ArrowRight, MessageCircle,
   HelpCircle, Calendar, Command, CreditCard, Star, MoreHorizontal, Copy, Share2, Link as LinkIcon, UserPlus,
-  Filter
+  Filter, Sun, Moon
 } from "lucide-react";
 
 // ─── TMC Brand Color Palette ───
@@ -7693,6 +7693,26 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
         ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+
+        /* Dark mode (toggled by html[data-satori-theme="dark"]). Uses a
+           global filter inversion so every inline-styled component flips
+           to dark without per-component refactoring. Images/charts are
+           re-inverted so they look normal. */
+        html[data-satori-theme="dark"] body { background: #111 !important; }
+        html[data-satori-theme="dark"] {
+          filter: invert(0.92) hue-rotate(180deg);
+          background: #111 !important;
+        }
+        html[data-satori-theme="dark"] img,
+        html[data-satori-theme="dark"] svg,
+        html[data-satori-theme="dark"] video,
+        html[data-satori-theme="dark"] canvas,
+        html[data-satori-theme="dark"] .recharts-wrapper,
+        html[data-satori-theme="dark"] [data-no-invert] {
+          filter: invert(0.92) hue-rotate(180deg);
+        }
+        html[data-satori-theme="dark"] ::-webkit-scrollbar-thumb { background: #4B5563; }
+        html[data-satori-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: #6B7280; }
       `}</style>
     </div>
   );
@@ -7713,6 +7733,17 @@ export default function App() {
   const [voiceActive, setVoiceActive] = useState(false);
   const [notifications] = useState(5);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  // Dark mode — persisted in localStorage. Applied via a CSS filter
+  // injection so we don't have to refactor every inline-styled component
+  // to read from a theme context.
+  const [darkMode, setDarkMode] = useState(() => {
+    try { return localStorage.getItem("satori_dark") === "1"; }
+    catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("satori_dark", darkMode ? "1" : "0"); } catch {}
+    document.documentElement.setAttribute("data-satori-theme", darkMode ? "dark" : "light");
+  }, [darkMode]);
   // Shown on the login page when redirected due to token expiry
   const [sessionExpiredMsg, setSessionExpiredMsg] = useState("");
 
@@ -7941,6 +7972,21 @@ export default function App() {
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* Dark mode toggle */}
+            <button
+              onClick={() => setDarkMode(!darkMode)}
+              title={darkMode ? "Switch to light mode" : "Switch to dark mode"}
+              style={{
+                width: 38, height: 38, borderRadius: 10, border: "1px solid #E2E8F0",
+                background: darkMode ? "#1F2937" : "#fff", cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                color: darkMode ? "#FBBF24" : "#475569", transition: "all 0.15s",
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.borderColor = "#8AC441")}
+              onMouseLeave={(e) => (e.currentTarget.style.borderColor = "#E2E8F0")}
+            >
+              {darkMode ? <Sun size={17} /> : <Moon size={17} />}
+            </button>
             {/* Profile with dropdown */}
             <div style={{ position: "relative" }}>
               <div onClick={() => setProfileMenuOpen(!profileMenuOpen)} style={{
