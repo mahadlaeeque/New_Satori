@@ -410,6 +410,7 @@ const VoiceModal = ({ open, onClose }) => {
   const setupTimeoutRef = useRef(null);
   const closingRef = useRef(false);
   const activeSourcesRef = useRef([]);
+  const turnEndedRef = useRef(false);
 
   useEffect(() => {
     if (!open) return;
@@ -481,8 +482,25 @@ const VoiceModal = ({ open, onClose }) => {
       if (data.setupComplete) {
         setupDoneRef.current = true;
         if (setupTimeoutRef.current) clearTimeout(setupTimeoutRef.current);
-        setState("listening");
-        setStatusText("Listening\u2026 speak now");
+        // Trigger the model to greet the user. The voice system prompt
+        // tells it to say the right opening line in English or Urdu.
+        // Treating this as a normal user turn means the audio response
+        // comes back through the existing speaker pipeline.
+        try {
+          ws.send(JSON.stringify({
+            clientContent: {
+              turns: [{ role: "user", parts: [{ text: "Greet the user now with your opening line." }] }],
+              turnComplete: true,
+            },
+          }));
+          // Set busy so the mic doesn't capture during the greeting playback.
+          isSpeakingRef.current = true;
+          setState("speaking");
+          setStatusText("Satori is greeting you\u2026");
+        } catch (e) {
+          setState("listening");
+          setStatusText("Listening\u2026 speak now");
+        }
         return;
       }
 
@@ -531,13 +549,29 @@ const VoiceModal = ({ open, onClose }) => {
           }
         }
         if (sc.turnComplete) {
-          isSpeakingRef.current = false;
-          setState("listening");
-          setStatusText("Listening\u2026 speak now");
+          // Gemini signals "I'm done emitting audio" but the chunks are still
+          // queued ahead. Flip the mic gate OFF only after the last queued
+          // chunk finishes playing (handled in src.onended). If audio is
+          // already drained, drop straight back to listening.
+          turnEndedRef.current = true;
+          if (activeSourcesRef.current.length === 0) {
+            isSpeakingRef.current = false;
+            turnEndedRef.current = false;
+            setState("listening");
+            setStatusText("Listening\u2026 speak now");
+            nextPlayTimeRef.current = 0;
+          }
         }
         if (sc.interrupted) {
+          // User interrupted Gemini mid-sentence (or VAD detected speech).
+          // Stop every queued chunk so we don't keep talking AT the user.
+          for (const s of activeSourcesRef.current) { try { s.stop(); } catch {} }
+          activeSourcesRef.current = [];
           isSpeakingRef.current = false;
+          turnEndedRef.current = false;
           nextPlayTimeRef.current = 0;
+          setState("listening");
+          setStatusText("Listening\u2026 speak now");
         }
       }
     };
@@ -586,18 +620,11 @@ const VoiceModal = ({ open, onClose }) => {
   const playPcm = (b64) => {
     const ctx = playCtxRef.current;
     if (!ctx) return;
-    // Browsers sometimes suspend the AudioContext (autoplay policy, tab focus
-    // loss). resume() is a no-op when already running and avoids the
-    // 'click-click-click' silent gaps we see when chunks arrive on a
-    // suspended ctx.
-    if (ctx.state === "suspended") {
-      try { ctx.resume(); } catch {}
-    }
+    if (ctx.state === "suspended") { try { ctx.resume(); } catch {} }
     try {
       const raw = atob(b64);
-      // PCM16 needs an even byte count. If the chunk is odd-length (which can
-      // happen at packet boundaries) DROP the last byte rather than letting
-      // Int16Array() throw and the whole chunk get tossed.
+      // PCM16 needs an even byte count. Drop a trailing odd byte rather than
+      // tossing the whole frame on chunk-boundary alignment.
       const len = raw.length & ~1;
       if (len < 2) return;
       const bytes = new Uint8Array(len);
@@ -609,30 +636,35 @@ const VoiceModal = ({ open, onClose }) => {
       buf.copyToChannel(floats, 0);
       const src = ctx.createBufferSource();
       src.buffer = buf;
-      // A short gain node smooths out the chunk-to-chunk seams so the
-      // playback sounds continuous instead of crackly.
-      const gain = ctx.createGain();
-      gain.gain.value = 1.0;
-      src.connect(gain);
-      gain.connect(ctx.destination);
+      src.connect(ctx.destination);
 
+      // Scheduling: queue chunks back-to-back. If the playhead is behind
+      // realtime (first chunk of a turn, or recovery after a stall), start
+      // a hair after now to avoid a click. Otherwise let the queue extend
+      // naturally — the model is allowed to stay several seconds ahead
+      // during a long answer, that is NORMAL and not a glitch. The previous
+      // 500ms cap was truncating long sentences.
       const now = ctx.currentTime;
-      // If we've fallen far behind realtime (eg. tab was throttled), don't
-      // try to queue 30 seconds of audio in the future — that's where the
-      // 'fast / squeaky / overlapped' glitches come from. Reset to ~50ms
-      // ahead so playback resumes cleanly.
-      if (nextPlayTimeRef.current > now + 0.5) {
-        nextPlayTimeRef.current = now + 0.05;
-      }
-      const when = Math.max(now + 0.02, nextPlayTimeRef.current);
-      src.start(when);
-      nextPlayTimeRef.current = when + buf.duration;
+      const base = (nextPlayTimeRef.current && nextPlayTimeRef.current > now)
+        ? nextPlayTimeRef.current
+        : now + 0.04;
+      src.start(base);
+      nextPlayTimeRef.current = base + buf.duration;
 
-      // Track the source so stop() can cancel in-flight chunks if the user
-      // ends the call mid-sentence.
       activeSourcesRef.current.push(src);
       src.onended = () => {
         activeSourcesRef.current = activeSourcesRef.current.filter((s) => s !== src);
+        // When the LAST queued chunk finishes AND Gemini already signaled
+        // turnComplete, only THEN flip the mic gate off. This prevents the
+        // mic from re-enabling while the speaker is still mid-sentence,
+        // which is what caused the agent to "speak over itself".
+        if (activeSourcesRef.current.length === 0 && turnEndedRef.current) {
+          isSpeakingRef.current = false;
+          turnEndedRef.current = false;
+          setState("listening");
+          setStatusText("Listening\u2026 speak now");
+          nextPlayTimeRef.current = 0;
+        }
       };
     } catch (e) {
       console.warn("[VoiceModal] playPcm error", e);
