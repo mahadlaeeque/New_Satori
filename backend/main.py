@@ -1092,7 +1092,22 @@ def _build_date_context():
             f"--- END DATE CONTEXT ---")
 
 
-SYSTEM_PROMPT = """You are Satori, TMC's Capability Intelligence Agent — an enterprise AI assistant connected to TMC's workforce and sales data in BigQuery.
+SYSTEM_PROMPT = """You are Satori, TMC's Capability Intelligence Agent. You help managers, HR teams, and sales leadership understand employee attendance patterns, timesheets, resource allocation, and sales account coverage.
+
+PERSONALITY:
+- Friendly, professional, and concise.
+- Use specific numbers, names, and dates in answers.
+- Format times in 12-hour format (e.g., 9:37 AM).
+- Format dollar amounts with $ and commas (e.g., $5,000,000).
+- Round percentages to 1 decimal place.
+- Never mention SQL, queries, tables, or columns to the user — translate everything into business language.
+- If data seems unusual, flag it as a potential data quality issue.
+- If no records found, suggest the user rephrase their question.
+- Handle general conversation gracefully; use context for follow-up questions.
+- You have access to: attendance records, timesheet data, resource allocation data, and sales account coverage (accounts, AM scorecards, pipeline, revenue targets, KPIs, hunting gaps, workload feasibility).
+
+OUTPUT FORMATTING (CRITICAL):
+Return output in HTML. Wrap paragraphs in <p>, use <strong> for emphasis, <ul>/<li> for lists, <br> for line breaks. NO <html>/<head>/<body> tags.
 
 You help users analyse attendance, employee availability, project allocation, timesheets, capability scores, sales pipeline, account coverage, AM performance, and account-manager workload.
 
@@ -1562,7 +1577,7 @@ def chat(body: ChatRequest, request: Request, user: dict = Depends(get_current_u
                     "--- END SCOPE RESTRICTION ---"
                 )
 
-    system_prompt_final = (VOICE_SYSTEM_PROMPT_URDU if body.voice_mode else SYSTEM_PROMPT) + _build_date_context() + scope_addon + "\n\n" + live_schema.render_context_block()
+    system_prompt_final = (VOICE_SYSTEM_PROMPT_URDU if body.voice_mode else SYSTEM_PROMPT) + _build_date_context() + scope_addon + "\n\n" + _load_schema_settings_block() + "\n\n" + live_schema.render_context_block()
 
     try:
         # Voice mode stays simple (no tools) — the voice WS has its own tool path
@@ -1817,7 +1832,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                     "--- END SCOPE RESTRICTION ---"
                 )
 
-    system_prompt_final = SYSTEM_PROMPT + _build_date_context() + scope_addon_stream + "\n\n" + live_schema.render_context_block()
+    system_prompt_final = SYSTEM_PROMPT + _build_date_context() + scope_addon_stream + "\n\n" + _load_schema_settings_block() + "\n\n" + live_schema.render_context_block()
 
     def generate():
         try:
@@ -2537,9 +2552,9 @@ def refine_dashboard(user_message: str, history: list, existing_config=None) -> 
         system = DASHBOARD_EDIT_PROMPT.format(current_config=json.dumps(existing_config, indent=2), tables=tables_str)
     else:
         system = DASHBOARD_REFINE_PROMPT.format(tables=tables_str)
-    # Inject live warehouse snapshot so the AI knows the REAL departments,
-    # employee types, AMs, etc. — not just the abstract schema.
-    system = system + "\n\n" + live_schema.render_context_block()
+    # Inject admin-curated schema notes + live warehouse snapshot so the AI
+    # knows the REAL departments, employee types, AMs, etc. and the join rules.
+    system = system + "\n\n" + _load_schema_settings_block() + "\n\n" + live_schema.render_context_block()
 
     contents = []
     for msg in history[-12:]:
@@ -3545,7 +3560,7 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
             model="gemini-2.5-flash",
             contents=contents,
             config=genai.types.GenerateContentConfig(
-                system_instruction=_REPORT_SYSTEM_PROMPT + "\n\n" + live_schema.render_context_block(),
+                system_instruction=_REPORT_SYSTEM_PROMPT + "\n\n" + _load_schema_settings_block() + "\n\n" + live_schema.render_context_block(),
                 temperature=0.4,
                 # Reports often span 3-6 sections each with a SQL block;
                 # 2048 tokens reliably clipped the last section's sql mid-
@@ -3834,6 +3849,231 @@ def report_generate(body: dict, user: dict = Depends(get_current_user)):
 # ═══════════════════════════════════════════════════════════════════════════════
 #  HEALTH CHECK + SPA STATIC MOUNT
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SCHEMA SETTINGS  ──  user-curated descriptions per table that get injected
+#  into every agent's system prompt. Lets admins teach Satori what each table
+#  contains (column types, business meaning, join hints) so the AI doesn't
+#  have to rediscover the warehouse on every call.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_DEFAULT_SCHEMA_SETTINGS = [
+    {
+        "table_name": "Employee_Data",
+        "sort_order": 10,
+        "description": (
+            "Master employee records (1,199 rows).\n"
+            "Columns: Employee_Code (STRING, e.g. 'E-2141'), Resource_Name (STRING — full name), "
+            "Employee_Position (STRING), Employee_Email (STRING), Employee_Hierarchy (STRING = department), "
+            "Employee_Location (STRING — city), Employee_Status (STRING), Employee_Type (STRING — Permanent / MTO / Probation / Contractual Fixed term / Contractor / Freelancer / Internship), "
+            "Joining_Date, Gender.\n"
+            "JOIN with Attendance_Data on UPPER(TRIM(Resource_Name)) = UPPER(TRIM(employee_name)) — "
+            "Employee_Code does NOT match employee_id.\n"
+            "Department grouping: COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'Unspecified') AS department."
+        ),
+    },
+    {
+        "table_name": "Attendance_Data",
+        "sort_order": 20,
+        "description": (
+            "Daily attendance per employee (~208k rows, date range Dec 2025 → Apr 2026).\n"
+            "Columns: attendance_date (DATE), employee_id (STRING), employee_name (STRING), employee_email, "
+            "checkin_time / checkout_time (STRING HH:MM:SS), attendance_status_text (STRING — values: "
+            "Present, Weekend, Absent, Missing Punch, Holiday, On Leave, Remote Work, and their 'Submitted …' variants — there is NO 'Late' status), "
+            "is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1 INT), leave_type_name.\n"
+            "Attendance % = ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1).\n"
+            "JOIN with Employee_Data on UPPER(TRIM(employee_name)) = UPPER(TRIM(Resource_Name))."
+        ),
+    },
+    {
+        "table_name": "Allocation_data",
+        "sort_order": 30,
+        "description": (
+            "Weekly project allocation (~385k rows).\n"
+            "Columns: project_id (STRING), employee_id (STRING), emp_name (STRING — JOIN key to Employee_Data.Resource_Name), "
+            "allocation_percent (INT64 or STRING — use SAFE_CAST AS FLOAT64), emp_competency (STRING), "
+            "Flag (STRING — values: 'Allocated' / 'Bench' — NOT 'Actual' / 'Forecast'), Forecast_Flag, "
+            "week_id, year_id, Week, Date (DATE), Year, Month (STRING), Data_Type.\n"
+            "Bench classification: MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per employee = 0 or NULL."
+        ),
+    },
+    {
+        "table_name": "Timesheet_Data",
+        "sort_order": 40,
+        "description": (
+            "Ticket / project hours (~279k rows).\n"
+            "Columns: FLAG (STRING), Key (STRING), TICKET_USER_ID (INT64 — employee), TICKET_ID (INT64), "
+            "TICKET_NUMBER (STRING), TICKET_PROJECT_CODE (STRING), TICKET_PROJECT_LABEL (STRING), "
+            "TICKET_DESCRIPTION, TICKET_STATUS (STRING), TICKET_WEEK_NO, TICKET_PRIORITY, "
+            "TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), DATE_KEY (INT64 — YYYYMMDD).\n"
+            "Timesheet has no name field — joining to Employee_Data is unreliable. Prefer to report against "
+            "TICKET_PROJECT_LABEL / TICKET_USER_ID directly."
+        ),
+    },
+    {
+        "table_name": "Sales_AM_Scorecard",
+        "sort_order": 50,
+        "description": (
+            "Account Manager performance (8 AMs).\n"
+            "Columns: VP, AM, Role, City, col_2026_Target (USD — STRING, SAFE_CAST), Q1_ACH (USD), "
+            "Open_Pipeline (USD), Hist_Win_Rate (decimal 0-1 — multiply by 100 for %)."
+        ),
+    },
+    {
+        "table_name": "Sales_Accounts",
+        "sort_order": 60,
+        "description": (
+            "Customer accounts (~359 rows).\n"
+            "Columns: VP, AM, Location, Account, Tier ('A' / 'B' / 'C' / '-'), Dormant ('Yes' / 'No'), "
+            "Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits (STRING — SAFE_CAST AS INT64), Zero_Visit ('Yes' / 'No')."
+        ),
+    },
+    {
+        "table_name": "Sales_Pipeline_Health",
+        "sort_order": 70,
+        "description": (
+            "Salesperson pipeline (14 rows).\n"
+            "Columns: Salesperson, Open_Pipeline (USD — STRING, SAFE_CAST), Open_Deals, Win_Rate_by (decimal 0-1)."
+        ),
+    },
+    {
+        "table_name": "Sales_Plan_vs_Pipeline",
+        "sort_order": 80,
+        "description": (
+            "Revenue plan vs pipeline (10 rows).\n"
+            "Columns: AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio, Status, Action."
+        ),
+    },
+    {
+        "table_name": "Sales_Hunting_Gap",
+        "sort_order": 90,
+        "description": (
+            "New-business quotas + gaps per AM (14 rows).\n"
+            "Columns: AM, City, Hunting_Target, Hunting_Achieved, Hunting_Gap."
+        ),
+    },
+]
+
+
+def _ensure_default_schema_settings():
+    """Seed the schema_settings table with TMC defaults the first time the
+    table is empty (or any specific table is missing). Idempotent — safe to
+    call on every startup. Existing user-edited rows are never overwritten."""
+    try:
+        db = get_db(); cur = db.cursor()
+        from database import USE_POSTGRES
+        for s in _DEFAULT_SCHEMA_SETTINGS:
+            cur.execute("SELECT id FROM schema_settings WHERE table_name = ?", (s["table_name"],))
+            if cur.fetchone():
+                continue
+            if USE_POSTGRES:
+                cur.execute(
+                    "INSERT INTO schema_settings (table_name, description, sort_order) VALUES (?, ?, ?)",
+                    (s["table_name"], s["description"], s["sort_order"]),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO schema_settings (table_name, description, sort_order) VALUES (?, ?, ?)",
+                    (s["table_name"], s["description"], s["sort_order"]),
+                )
+        db.commit(); db.close()
+    except Exception as e:
+        print(f"[schema_settings] default-seed error: {e}")
+
+
+_ensure_default_schema_settings()
+
+
+def _load_schema_settings_block() -> str:
+    """Concatenate every saved schema_settings.description into a single text
+    block to inject into agent system prompts. Empty if the table is missing
+    or no rows exist."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT table_name, description FROM schema_settings ORDER BY sort_order, table_name")
+        rows = cur.fetchall()
+        db.close()
+    except Exception as e:
+        print(f"[schema_settings] load error: {e}")
+        return ""
+    if not rows:
+        return ""
+    parts = ["=== TABLE-LEVEL SCHEMA NOTES (admin-curated; refer here for column meanings and join keys) ===\n"]
+    for r in rows:
+        tn = r["table_name"] if isinstance(r, dict) else r[0]
+        desc = r["description"] if isinstance(r, dict) else r[1]
+        if not (tn and desc):
+            continue
+        parts.append(f"\n• `ai-vertex-mahad.Satori_Project.{tn}`\n{desc}\n")
+    parts.append("\n=== END SCHEMA NOTES ===\n")
+    return "".join(parts)
+
+
+@app.get("/api/admin/schema-settings")
+def get_schema_settings(user: dict = Depends(get_current_user)):
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT id, table_name, description, sort_order, updated_at FROM schema_settings ORDER BY sort_order, table_name")
+    rows = [dict(r) for r in cur.fetchall()]
+    db.close()
+    return {"settings": rows}
+
+
+@app.put("/api/admin/schema-settings")
+def save_schema_settings(body: dict, user: dict = Depends(get_current_user)):
+    """Replace the entire schema_settings table with the rows the user sent.
+    Body: { settings: [{table_name, description, sort_order?}] }."""
+    from database import USE_POSTGRES
+    settings = body.get("settings") or []
+    db = get_db(); cur = db.cursor()
+    cur.execute("DELETE FROM schema_settings")
+    for i, s in enumerate(settings):
+        tn = (s.get("table_name") or "").strip()
+        if not tn:
+            continue
+        desc = s.get("description") or ""
+        order = s.get("sort_order") or (10 * (i + 1))
+        cur.execute(
+            "INSERT INTO schema_settings (table_name, description, sort_order) VALUES (?, ?, ?)",
+            (tn, desc, order),
+        )
+    db.commit(); db.close()
+    return {"ok": True, "count": len(settings)}
+
+
+@app.post("/api/admin/schema-settings/reset")
+def reset_schema_settings(user: dict = Depends(get_current_user)):
+    """Wipe + re-seed schema_settings from _DEFAULT_SCHEMA_SETTINGS."""
+    db = get_db(); cur = db.cursor()
+    cur.execute("DELETE FROM schema_settings")
+    db.commit(); db.close()
+    _ensure_default_schema_settings()
+    return {"ok": True}
+
+
+@app.post("/api/admin/schema-settings/auto-detect")
+def auto_detect_schema(body: dict, user: dict = Depends(get_current_user)):
+    """Pull live column metadata for a single table from BigQuery and return
+    a formatted description string the UI can drop into the text area.
+    Body: { table_name: 'Employee_Data' } (case-sensitive)."""
+    from bigquery_client import get_table_schema, _project, _dataset
+    table_name = (body.get("table_name") or "").strip()
+    if not table_name:
+        raise HTTPException(status_code=400, detail="table_name is required")
+    full_id = f"{_project()}.{_dataset()}.{table_name}"
+    schema = get_table_schema(full_id)
+    if not schema:
+        raise HTTPException(status_code=404, detail=f"Schema lookup failed for {full_id}")
+    cols_str = ", ".join(f"{f['name']} ({f['type']})" for f in schema[:80])
+    return {"table_name": table_name, "description": f"Columns: {cols_str}", "fields": schema}
+
+
+@app.get("/api/admin/schema-tables")
+def list_schema_tables(user: dict = Depends(get_current_user)):
+    """List every table in the warehouse so the UI can offer them to add."""
+    from bigquery_client import discover_tables
+    tables = discover_tables()
+    return {"tables": [t["table"] for t in tables]}
+
 
 @app.get("/api/admin/live-schema")
 def live_schema_endpoint(refresh: int = 0):

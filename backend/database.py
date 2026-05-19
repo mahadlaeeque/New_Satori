@@ -442,6 +442,16 @@ def _init_sqlite():
         )
     """)
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS schema_settings (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            table_name    TEXT UNIQUE NOT NULL,
+            description   TEXT NOT NULL DEFAULT '',
+            sort_order    INTEGER NOT NULL DEFAULT 100,
+            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS user_features (
             user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             feature_id   TEXT NOT NULL,
@@ -664,6 +674,16 @@ def _init_postgres():
             is_favorite  INTEGER NOT NULL DEFAULT 0,
             created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS schema_settings (
+            id            SERIAL PRIMARY KEY,
+            table_name    TEXT UNIQUE NOT NULL,
+            description   TEXT NOT NULL DEFAULT '',
+            sort_order    INTEGER NOT NULL DEFAULT 100,
+            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     cur.execute("""

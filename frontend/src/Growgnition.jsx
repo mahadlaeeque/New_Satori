@@ -6891,6 +6891,262 @@ const AuditLogPage = () => {
 // Three permission-gated workspace features + an admin-only User Management page.
 // `requiresFeature` maps to a feature_id in the backend FEATURE_CATALOG.
 // `adminOnly` items render only for admins, regardless of feature grants.
+// ─── Schema Settings (admin only) ───────────────────────────────────────────
+//
+// Lets admins curate per-table descriptions (column types, column meanings,
+// join hints) that get injected into every agent's system prompt. The
+// Auto-Detect Schema button pulls the live column metadata from BigQuery and
+// drops it into the description box; the admin can then add business context
+// (e.g. "Employee_Hierarchy = department", "JOIN on Resource_Name").
+const SchemaSettingsCard = () => {
+  const apiBase = import.meta.env.VITE_API_BASE || "";
+  const authH = () => ({ Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" });
+
+  const [rows, setRows] = useState([]);
+  const [availableTables, setAvailableTables] = useState([]);
+  const [addPicker, setAddPicker] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [autoBusy, setAutoBusy] = useState(null); // table_name currently auto-detecting
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  const reload = () => {
+    setLoading(true);
+    Promise.all([
+      fetch(`${apiBase}/api/admin/schema-settings`, { headers: authH() }).then(r => r.json()),
+      fetch(`${apiBase}/api/admin/schema-tables`, { headers: authH() }).then(r => r.json()),
+    ])
+      .then(([s, t]) => {
+        setRows((s.settings || []).map(r => ({ ...r })));
+        setAvailableTables(t.tables || []);
+      })
+      .catch(() => setError("Failed to load schema settings."))
+      .finally(() => setLoading(false));
+  };
+  useEffect(() => { reload(); /* eslint-disable-next-line */ }, []);
+
+  const updateRow = (idx, patch) => {
+    setRows(rows.map((r, i) => i === idx ? { ...r, ...patch } : r));
+  };
+
+  const removeRow = (idx) => {
+    setRows(rows.filter((_, i) => i !== idx));
+  };
+
+  const addRow = () => {
+    const name = (addPicker || "").trim();
+    if (!name) return;
+    if (rows.some(r => r.table_name === name)) {
+      setError(`"${name}" is already in the list.`);
+      return;
+    }
+    setRows([...rows, { table_name: name, description: "", sort_order: (rows.length + 1) * 10 }]);
+    setAddPicker("");
+  };
+
+  const autoDetect = async (idx) => {
+    const row = rows[idx];
+    if (!row?.table_name) return;
+    setAutoBusy(row.table_name); setError("");
+    try {
+      const res = await fetch(`${apiBase}/api/admin/schema-settings/auto-detect`, {
+        method: "POST", headers: authH(),
+        body: JSON.stringify({ table_name: row.table_name }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Auto-detect failed");
+      const data = await res.json();
+      // Preserve any user-written notes by appending the freshly-detected
+      // columns underneath if the box already has content; otherwise replace.
+      const next = row.description.trim()
+        ? `${row.description.trim()}\n\n--- Auto-detected ---\n${data.description}`
+        : data.description;
+      updateRow(idx, { description: next });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setAutoBusy(null);
+    }
+  };
+
+  const saveAll = async () => {
+    setSaving(true); setError(""); setSuccess("");
+    try {
+      const payload = rows.map((r, i) => ({
+        table_name: r.table_name,
+        description: r.description,
+        sort_order: r.sort_order || (i + 1) * 10,
+      }));
+      const res = await fetch(`${apiBase}/api/admin/schema-settings`, {
+        method: "PUT", headers: authH(),
+        body: JSON.stringify({ settings: payload }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Save failed");
+      setSuccess(`Saved ${rows.length} table${rows.length === 1 ? "" : "s"}.`);
+      setTimeout(() => setSuccess(""), 3000);
+    } catch (e) { setError(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const resetDefaults = async () => {
+    if (!confirm("Reset all schema settings to the TMC defaults? This wipes any custom descriptions you've added.")) return;
+    setResetting(true); setError(""); setSuccess("");
+    try {
+      const res = await fetch(`${apiBase}/api/admin/schema-settings/reset`, {
+        method: "POST", headers: authH(),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Reset failed");
+      reload();
+      setSuccess("Schema settings reset to defaults.");
+      setTimeout(() => setSuccess(""), 3000);
+    } catch (e) { setError(e.message); }
+    finally { setResetting(false); }
+  };
+
+  const unusedTables = availableTables.filter(t => !rows.some(r => r.table_name === t));
+
+  return (
+    <div style={{ background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "hidden", marginBottom: 24 }}>
+      <div style={{ padding: "16px 22px", borderBottom: `1px solid ${COLORS.border}`, background: "#FAFBFC" }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.textPrimary, display: "flex", alignItems: "center", gap: 8 }}>
+          <FileText size={16} color={COLORS.accent} />
+          Schema Settings
+        </div>
+        <div style={{ fontSize: 12, color: COLORS.textSecondary, marginTop: 3, lineHeight: 1.5 }}>
+          Tell Satori what each BigQuery table contains. The text you save here is injected into every AI agent (chat, dashboard builder, report builder) on every call — so describing columns, value types, and join keys makes the AI substantially smarter. Click <strong>Auto-Detect Schema</strong> to pull live column types, then add business context (what each column means, join hints, valid filter values).
+        </div>
+      </div>
+
+      {error && (
+        <div style={{ margin: 14, padding: "10px 14px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13 }}>{error}</div>
+      )}
+      {success && (
+        <div style={{ margin: 14, padding: "10px 14px", background: "#ECFDF5", border: "1px solid #6EE7B7", borderRadius: 10, color: "#065F46", fontSize: 13 }}>✓ {success}</div>
+      )}
+
+      <div style={{ padding: 18 }}>
+        {loading ? (
+          <div style={{ padding: 24, textAlign: "center", color: COLORS.textSecondary, fontSize: 13 }}>Loading…</div>
+        ) : (
+          <>
+            {rows.map((row, idx) => (
+              <div key={idx} style={{
+                padding: 14, marginBottom: 14, background: "#F8FAFC",
+                border: `1px solid ${COLORS.border}`, borderRadius: 12
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                  <input
+                    type="text"
+                    value={row.table_name}
+                    onChange={e => updateRow(idx, { table_name: e.target.value })}
+                    placeholder="Table_Name"
+                    style={{
+                      flex: 1, padding: "9px 12px", borderRadius: 8,
+                      border: `1px solid ${COLORS.border}`, fontSize: 13, fontWeight: 600,
+                      fontFamily: "monospace", background: "#fff",
+                    }}
+                  />
+                  <button
+                    onClick={() => autoDetect(idx)}
+                    disabled={autoBusy === row.table_name || !row.table_name}
+                    style={{
+                      padding: "9px 14px", borderRadius: 8, border: "none",
+                      background: autoBusy === row.table_name ? "#D1FAE5" : "#ECFDF5",
+                      color: "#15803D", fontSize: 12.5, fontWeight: 600,
+                      cursor: autoBusy === row.table_name ? "default" : "pointer", whiteSpace: "nowrap",
+                    }}
+                  >
+                    {autoBusy === row.table_name ? "Detecting…" : "Auto-Detect Schema"}
+                  </button>
+                  <button
+                    onClick={() => removeRow(idx)}
+                    title="Remove this table"
+                    style={{
+                      width: 32, height: 32, borderRadius: 8, border: "none",
+                      background: "#FEE2E2", color: "#DC2626", cursor: "pointer",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}
+                  >
+                    <X size={15} />
+                  </button>
+                </div>
+                <textarea
+                  value={row.description}
+                  onChange={e => updateRow(idx, { description: e.target.value })}
+                  placeholder="Describe what this table contains, the column types, and any join keys or filter-value caveats the AI should know."
+                  rows={5}
+                  style={{
+                    width: "100%", padding: 12, borderRadius: 8,
+                    border: `1px solid ${COLORS.border}`, background: "#fff",
+                    fontSize: 12.5, fontFamily: "monospace", lineHeight: 1.55,
+                    color: COLORS.textPrimary, resize: "vertical", boxSizing: "border-box",
+                  }}
+                />
+              </div>
+            ))}
+
+            {/* Add new table row */}
+            <div style={{
+              display: "flex", gap: 8, marginTop: 6, padding: 12,
+              border: `1px dashed ${COLORS.border}`, borderRadius: 12,
+              background: "#FAFBFC",
+            }}>
+              <select
+                value={addPicker}
+                onChange={e => setAddPicker(e.target.value)}
+                style={{
+                  flex: 1, padding: "8px 10px", borderRadius: 8,
+                  border: `1px solid ${COLORS.border}`, fontSize: 13, background: "#fff",
+                }}
+              >
+                <option value="">+ Add another table…</option>
+                {unusedTables.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+              <button
+                onClick={addRow}
+                disabled={!addPicker}
+                style={{
+                  padding: "8px 14px", borderRadius: 8, border: "none",
+                  background: addPicker ? COLORS.accent : "#E2E8F0",
+                  color: addPicker ? "#fff" : COLORS.textMuted,
+                  fontSize: 12.5, fontWeight: 600, cursor: addPicker ? "pointer" : "default",
+                }}
+              >Add</button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Footer buttons */}
+      <div style={{
+        padding: "14px 18px", borderTop: `1px solid ${COLORS.border}`,
+        display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: "#FAFBFC",
+      }}>
+        <button
+          onClick={resetDefaults}
+          disabled={resetting}
+          style={{
+            padding: "10px 18px", borderRadius: 9, border: "1px solid #FECACA",
+            background: "#FEF2F2", color: "#DC2626", fontSize: 13, fontWeight: 600,
+            cursor: resetting ? "default" : "pointer",
+          }}
+        >{resetting ? "Resetting…" : "Reset to Defaults"}</button>
+        <button
+          onClick={saveAll}
+          disabled={saving}
+          style={{
+            padding: "10px 22px", borderRadius: 9, border: "none",
+            background: saving ? "#9DD35A" : COLORS.accent, color: "#fff",
+            fontSize: 13, fontWeight: 600, cursor: saving ? "default" : "pointer",
+          }}
+        >{saving ? "Saving…" : "Save Settings"}</button>
+      </div>
+    </div>
+  );
+};
+
+
 // ─── System Settings Page (admin only) ──────────────────────────────────────
 //
 // Lets the admin enable / disable additional data-scope dimensions beyond the
@@ -7128,6 +7384,9 @@ const SystemSettingsPage = () => {
           </div>
         </div>
       </div>
+
+      {/* Schema settings - admin-curated per-table descriptions injected into agent prompts */}
+      <SchemaSettingsCard />
     </div>
   );
 };
