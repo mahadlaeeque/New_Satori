@@ -2406,32 +2406,64 @@ Conversation flow:
 1. User describes what they want.
 2. You ask 1-2 clarifying questions if needed (timeframe, grouping dimension, KPIs).
 3. Once clear, present a PROPOSED dashboard summary (KPIs, charts, filters) in plain language and ask the user to confirm with "generate".
-4. When the user says "generate", return ONLY the dashboard config as JSON:
-   {{"ready": true, "config": {{"version": 1, "title": "...", "description": "...", "filters": [...], "kpis": [...], "charts": [...]}}}}
+4. When the user says "generate", return ONLY the dashboard config as JSON (no prose, no markdown fence).
 
 """ + _DASHBOARD_SAP_SCHEMAS + """
 
 AVAILABLE DATA (use this knowledge internally — never show the user table/column names):
 {tables}
 
-DASHBOARD LIMITS & OPTIONS:
-- Supported chart types: bar (variants: vertical, horizontal, stacked), line, pie
-- Supported KPI formats: "number", "usd", "percent"
-- Supported KPI icons: Users, UserCheck, Briefcase, Calendar, Clock, TrendingUp, DollarSign, Target, Award, Activity
-- Supported KPI colors: primary, accent, info, danger, success, purple, teal
-- Maximum 6 KPIs, maximum 4 charts, maximum 5 filters per dashboard
+═══ DASHBOARD CONFIG SHAPE (every field matters — the frontend reads them directly) ═══
+{{"ready": true, "config": {{
+  "version": 1,
+  "title": "...",
+  "description": "...",
+  "filters": [
+    {{"field": "department", "label": "Department"}}
+  ],
+  "kpis": [
+    {{"id": "att_rate", "title": "Attendance rate", "format": "percent",
+      "icon": "Calendar", "color": "primary",
+      "sql": "SELECT ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1) AS value FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` WHERE attendance_date BETWEEN DATE_SUB(CURRENT_DATE(),INTERVAL 30 DAY) AND CURRENT_DATE() {{where}}"}}
+  ],
+  "charts": [
+    {{"id": "att_by_dept", "title": "Attendance rate by department",
+      "type": "bar", "variant": "horizontal",
+      "labelKey": "department",
+      "valueKeys": ["attendance_pct"],
+      "sql": "SELECT COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'Unspecified') AS department, ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1) AS attendance_pct FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` a JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` e ON CAST(e.Employee_Code AS STRING)=CAST(a.employee_id AS STRING) WHERE attendance_date BETWEEN DATE_SUB(CURRENT_DATE(),INTERVAL 30 DAY) AND CURRENT_DATE() {{where}} GROUP BY department ORDER BY attendance_pct DESC LIMIT 50"}}
+  ]
+}}}}
 
-CRITICAL SQL RULES:
+═══ CRITICAL — KPI + CHART CONTRACT ═══
+- Every KPI's SQL MUST select exactly ONE row and alias the metric AS `value`.
+  KPI display reads `rows[0]["value"]`.
+- Every CHART's `labelKey` MUST exactly match a column alias in its SQL (the x-axis / category).
+- Every CHART's `valueKeys` entries MUST each exactly match a column alias in the chart's SQL (the y-axis / numeric series).
+- DO NOT use generic aliases like `label` / `value` on charts unless you also list those exact strings in labelKey / valueKeys.
+- Always emit `id`, `title`, `format` for KPIs and `id`, `title`, `type`, `labelKey`, `valueKeys` for charts.
+
+═══ LIMITS & OPTIONS ═══
+- Chart types: "bar" (variants: "vertical" default, "horizontal", "stacked"), "line", "pie"
+- KPI formats: "number", "usd", "percent"
+- KPI icons (use these exact strings): Users, UserCheck, Briefcase, Calendar, Clock, TrendingUp, DollarSign, Target, Award, Activity
+- KPI colors: primary, accent, info, danger, success, purple, teal
+- Maximum 6 KPIs, maximum 4 charts, maximum 5 filters per dashboard.
+
+═══ SQL RULES (CRITICAL — SQL is executed verbatim against BigQuery) ═══
 - Fully qualify every table: `ai-vertex-mahad.Satori_Project.<table>`.
-- STRING-typed numerics (allocation_percent, TICKET_HOURS, Sales_* USD/visit fields, win-rate decimals) — SAFE_CAST AS FLOAT64 / INT64 first.
-- For attendance percentages: ROUND(100.0 * SUM(is_present) / NULLIF(COUNT(*),0), 1).
-- For allocation status: classify on MAX(allocation_percent) per employee.
-- For win rate display: multiply by 100.
-- For department grouping: COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified').
-- {{where}} placement: the runtime substitutes either `WHERE field='value' AND ...` or empty string. The outer query around {{where}} MUST NOT already contain its own WHERE — push base conditions into a CTE / subquery so the outer reads `FROM base {{where}} GROUP BY ...`.
+- Use ONLY the columns documented above. Never invent column names.
+- STRING-typed numerics (allocation_percent, TICKET_HOURS, all Sales_* USD/visit fields, Hist_Win_Rate decimals) — SAFE_CAST AS FLOAT64 / INT64 before any math.
+- Attendance %: ROUND(100.0 * SUM(is_present) / NULLIF(COUNT(*),0), 1).
+- Bench classify on MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per Employee_Code.
+- Win rate display: multiply Hist_Win_Rate by 100.
+- Department grouping: COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified') AS department.
+- Join keys: CAST-to-STRING on both sides — CAST(Employee_Code AS STRING)=CAST(employee_id AS STRING).
+- {{where}} placement: the runtime substitutes either `AND field='value' AND ...` or empty string into the spot where you wrote {{where}}. Your query MUST already have its own WHERE — write the placeholder as ` {{where}}` right after your last WHERE condition (with a leading space). If no filters apply at runtime, the placeholder becomes ''.
+- LIMIT every chart query to 50 rows.
 
-CRITICAL RULES:
-- NEVER expose technical details (table names, column names, SQL) to the user. Speak in business terms.
+═══ STYLE ═══
+- NEVER expose table names, column names, or SQL to the user in chat.
 - NEVER output the JSON until the user explicitly says "generate".
 - Be concise — max 3-4 sentences per message.
 """
@@ -2454,9 +2486,16 @@ The user wants to modify this dashboard. They may ask to add/remove/change KPIs,
 2. When user confirms — Return ONLY the FULL updated config JSON:
    {{"ready": true, "config": {{"version": 1, "title": "...", "description": "...", "filters": [...], "kpis": [...], "charts": [...]}}}}
 
-CRITICAL SQL RULES (same as the refine prompt — fully qualify, SAFE_CAST string numerics, classify on MAX(allocation_percent), multiply win-rate by 100, use the {{where}} placeholder correctly).
+CRITICAL — KPI + CHART CONTRACT (every field must match the SQL):
+- Every KPI's SQL MUST select exactly ONE row and alias the metric AS `value`.
+- Every CHART must include `labelKey` (one column alias from its SQL) and
+  `valueKeys` (an array of column aliases from its SQL — the numeric series).
+- Always include `id`, `title`, `type`, `labelKey`, `valueKeys`, `sql` on every chart.
+- Always include `id`, `title`, `format`, `sql` on every KPI.
 
-DASHBOARD LIMITS & OPTIONS: bar/line/pie; KPI formats number/usd/percent; max 6 KPIs / 4 charts / 5 filters.
+SQL RULES (same as the refine prompt — fully qualify with `ai-vertex-mahad.Satori_Project.<table>`, SAFE_CAST every STRING-typed numeric, multiply Hist_Win_Rate by 100, COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'Unspecified') for department, CAST-to-STRING joins, LIMIT 50, and place the {{where}} placeholder right after your last WHERE condition with a leading space so the runtime can append filters).
+
+DASHBOARD LIMITS & OPTIONS: bar (variants: vertical, horizontal, stacked) / line / pie; KPI formats number/usd/percent; KPI icons (Users, UserCheck, Briefcase, Calendar, Clock, TrendingUp, DollarSign, Target, Award, Activity); max 6 KPIs / 4 charts / 5 filters.
 
 CRITICAL RULES:
 - NEVER expose technical details (table names, column names, SQL) to the user.
@@ -2714,30 +2753,92 @@ def dashboard_refine(body: dict, user: dict = Depends(get_current_user)):
     return {"reply": text}
 
 
+def _infer_chart_keys(columns: list, rows: list, chart_cfg: dict):
+    """When the AI's chart config didn't specify labelKey + valueKeys (or
+    specified ones that don't exist in the SQL result), infer sensible
+    defaults from the actual result columns: first non-numeric column = label,
+    every numeric column = value series."""
+    if not columns:
+        return chart_cfg.get("labelKey") or "label", chart_cfg.get("valueKeys") or ["value"]
+
+    label_key = chart_cfg.get("labelKey")
+    if not label_key or label_key not in columns:
+        # First column that isn't numeric in the first row.
+        numeric_cols = set(_infer_numeric_columns(rows, columns))
+        non_numeric = [c for c in columns if c not in numeric_cols]
+        label_key = (non_numeric[0] if non_numeric else columns[0])
+
+    value_keys = chart_cfg.get("valueKeys") or []
+    # Filter out any that don't actually exist in the result.
+    value_keys = [v for v in value_keys if v in columns]
+    if not value_keys:
+        numeric_cols = _infer_numeric_columns(rows, columns)
+        value_keys = [c for c in numeric_cols if c != label_key] or [c for c in columns if c != label_key][:1]
+        if not value_keys:
+            value_keys = [columns[-1]]
+    return label_key, value_keys
+
+
+def _substitute_where(sql: str, user_filters: dict) -> str:
+    """Substitute the `{where}` placeholder. Supports two contracts:
+
+    A) Older shape — `FROM t {where} GROUP BY ...`. We inject `WHERE f='v' AND ...`.
+    B) Newer shape — `... WHERE attendance_date BETWEEN ... {where} GROUP BY ...`.
+       We inject `AND f='v' AND ...`.
+
+    If no filters apply the placeholder becomes ''.
+    """
+    if "{where}" not in sql:
+        return sql
+    parts = []
+    for f, v in (user_filters or {}).items():
+        if v is None or str(v).strip() == "":
+            continue
+        safe_v = str(v).replace("'", "\\'")
+        parts.append(f"{f} = '{safe_v}'")
+    if not parts:
+        return sql.replace("{where}", "")
+
+    import re as _re
+    idx = sql.find("{where}")
+    before = sql[:idx]
+    # Heuristic: does the chunk preceding {where} already contain a WHERE
+    # clause for the same SELECT? Walk back to last unmatched `(` — if we
+    # find a WHERE before that boundary, we're in contract B.
+    depth = 0
+    has_where = False
+    for ch_i in range(idx - 1, -1, -1):
+        ch = before[ch_i]
+        if ch == ')':
+            depth += 1
+        elif ch == '(':
+            if depth == 0:
+                break
+            depth -= 1
+    scope = before[ch_i + 1:] if ch_i >= 0 else before
+    if _re.search(r"\bWHERE\b", scope, _re.IGNORECASE):
+        has_where = True
+
+    clause = (" AND " + " AND ".join(parts)) if has_where else ("WHERE " + " AND ".join(parts))
+    return sql.replace("{where}", clause)
+
+
 @app.post("/api/dashboard/run")
 def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
     """Execute a dashboard config against TMC BigQuery.
     Body: { config: {kpis, charts}, filters: {field: value} }.
+    Returns { kpis: [{id, value, format, title, icon, color, error?}],
+              charts: [{id, title, type, variant, labelKey, valueKeys,
+                        data, columns, error?}] }
     """
     config = body.get("config") or {}
     user_filters = body.get("filters") or {}
 
-    def _where():
-        if not user_filters:
-            return ""
-        parts = []
-        for f, v in user_filters.items():
-            if v is None or str(v).strip() == "":
-                continue
-            safe_v = str(v).replace("'", "\\'")
-            parts.append(f"{f} = '{safe_v}'")
-        return ("WHERE " + " AND ".join(parts)) if parts else ""
-
     def _exec(sql_template, tag):
         if not sql_template or not sql_template.strip():
-            print(f"[dashboard] {tag}: no sql")
+            print(f"[dashboard] {tag}: no sql in config")
             return {"error": "no sql"}
-        sql = sql_template.replace("{where}", _where())
+        sql = _substitute_where(sql_template, user_filters)
         # Strip fenced code blocks if the model left them.
         sql_s = sql.strip()
         if sql_s.startswith("```"):
@@ -2745,7 +2846,7 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
             if sql_s.endswith("```"):
                 sql_s = sql_s[:-3].strip()
             sql = sql_s
-        print(f"[dashboard] {tag}: {sql[:200]}{'...' if len(sql) > 200 else ''}")
+        print(f"[dashboard] {tag}: {sql[:240]}{'...' if len(sql) > 240 else ''}")
         r = bq_run_query(sql, max_rows=200)
         if "error" in r:
             print(f"[dashboard]   {tag} ERROR: {r['error']}")
@@ -2757,26 +2858,51 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
     for i, k in enumerate((config.get("kpis") or [])[:6]):
         kid = k.get("id") or f"kpi{i}"
         r = _exec(k.get("sql"), f"kpi[{kid}]")
+        # Always carry the display config through so the frontend can render
+        # the card even when the data fetch fails.
+        card = {
+            "id":       kid,
+            "title":    k.get("title") or kid,
+            "format":   k.get("format") or "number",
+            "icon":     k.get("icon"),
+            "color":    k.get("color"),
+            "subtitle": k.get("subtitle"),
+            "value":    None,
+        }
         if "error" in r:
-            kpis_out.append({"id": kid, "value": None, "error": r["error"]})
-            continue
-        rows = r.get("rows") or []
-        if rows and r.get("columns"):
-            first_col = r["columns"][0]
-            kpis_out.append({"id": kid, "value": rows[0].get(first_col)})
+            card["error"] = r["error"]
         else:
-            kpis_out.append({"id": kid, "value": None})
+            rows = r.get("rows") or []
+            cols = r.get("columns") or []
+            if rows and cols:
+                # Prefer a column literally named "value", else fall back to
+                # the first column.
+                col = "value" if "value" in cols else cols[0]
+                card["value"] = rows[0].get(col)
+        kpis_out.append(card)
 
     charts_out = []
     for i, c in enumerate((config.get("charts") or [])[:4]):
         cid = c.get("id") or f"chart{i}"
         r = _exec(c.get("sql"), f"chart[{cid}]")
+        rows = r.get("rows") or []
+        cols = r.get("columns") or []
+        label_key, value_keys = _infer_chart_keys(cols, rows, c)
+        card = {
+            "id":        cid,
+            "title":     c.get("title") or cid,
+            "type":      c.get("type") or "bar",
+            "variant":   c.get("variant"),
+            "labelKey":  label_key,
+            "valueKeys": value_keys,
+            "data":      rows,
+            "columns":   cols,
+        }
         if "error" in r:
-            charts_out.append({"id": cid, "rows": [], "error": r["error"]})
-            continue
-        charts_out.append({"id": cid, "rows": r.get("rows", []), "columns": r.get("columns", [])})
+            card["error"] = r["error"]
+        charts_out.append(card)
 
-    return {"kpis": kpis_out, "charts": charts_out}
+    return {"kpis": kpis_out, "charts": charts_out, "filterOptions": {}}
 
 
 @app.get("/api/dashboards")
