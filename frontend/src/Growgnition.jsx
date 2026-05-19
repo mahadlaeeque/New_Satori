@@ -4362,8 +4362,33 @@ const DashboardRenderer = ({ spec, onBack }) => {
   };
 
   const renderChart = (chart, idx) => {
-    const { title, data: chartData, type, labelKey = "label", valueKeys = ["value"], variant } = chart;
+    const { title, data: chartData, type, labelKey = "label", valueKeys = ["value"], variant, error } = chart;
     const colors = COLORS.chartColors;
+
+    if (error || !chartData || chartData.length === 0) {
+      return (
+        <ChartCard key={idx} title={title}>
+          <div style={{
+            height: 240, display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center", textAlign: "center",
+            color: error ? COLORS.danger : COLORS.textSecondary, padding: 24, fontSize: 13
+          }}>
+            {error ? (
+              <>
+                <AlertTriangle size={20} style={{ marginBottom: 8 }} />
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>Query failed</div>
+                <div style={{ fontFamily: "monospace", fontSize: 11.5, maxWidth: 360, lineHeight: 1.4 }}>{error}</div>
+              </>
+            ) : (
+              <>
+                <div style={{ marginBottom: 4 }}>No data for the chosen scope.</div>
+                <div style={{ fontSize: 11.5, color: COLORS.textMuted }}>Try clearing filters or editing the dashboard.</div>
+              </>
+            )}
+          </div>
+        </ChartCard>
+      );
+    }
 
     if (type === "pie") {
       const pieData = compactPieData(chartData, labelKey, valueKeys[0]);
@@ -4525,21 +4550,56 @@ const DashboardRenderer = ({ spec, onBack }) => {
             </div>
           )}
 
+          {/* Diagnostic banner — surfaces BQ errors so empty dashboards are debuggable */}
+          {(() => {
+            const issues = [
+              ...((data.kpis || []).filter((k) => k.error).map((k) => ({ kind: "KPI", title: k.title, error: k.error, sql: k.sql }))),
+              ...((data.charts || []).filter((c) => c.error).map((c) => ({ kind: "Chart", title: c.title, error: c.error, sql: c.sql }))),
+            ];
+            if (issues.length === 0) return null;
+            return (
+              <details style={{
+                marginBottom: 16, padding: "10px 14px", borderRadius: 10,
+                background: "#FEF3C7", border: "1px solid #FCD34D", fontSize: 12.5, color: "#92400E"
+              }}>
+                <summary style={{ cursor: "pointer", fontWeight: 600 }}>
+                  <AlertTriangle size={13} style={{ verticalAlign: "middle", marginRight: 6 }} />
+                  {issues.length} {issues.length === 1 ? "query" : "queries"} returned an error — click to see details
+                </summary>
+                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+                  {issues.map((iss, ix) => (
+                    <div key={ix} style={{ padding: 10, background: "#fff", borderRadius: 8, border: "1px solid #FCD34D" }}>
+                      <div style={{ fontWeight: 600, marginBottom: 4 }}>{iss.kind}: {iss.title}</div>
+                      <div style={{ fontFamily: "monospace", fontSize: 11.5, color: "#7C2D12" }}>{iss.error}</div>
+                      {iss.sql && (
+                        <pre style={{
+                          marginTop: 6, padding: 8, background: "#F9FAFB", borderRadius: 6,
+                          fontSize: 11, color: "#374151", overflow: "auto", maxHeight: 140, whiteSpace: "pre-wrap"
+                        }}>{iss.sql}</pre>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            );
+          })()}
+
           {/* KPI grid */}
           {data.kpis?.length > 0 && (
             <div style={{ display: "grid", gridTemplateColumns: `repeat(${kpiCols}, 1fr)`, gap: 16, marginBottom: 24 }}>
               {data.kpis.map((kpi, i) => {
                 const IconComp = ICON_MAP[kpi.icon] || Activity;
+                const hasValue = kpi.value !== null && kpi.value !== undefined && kpi.value !== "" && !kpi.error;
                 return (
                   <KPICard
                     key={i}
                     title={kpi.title}
-                    value={formatValue(kpi.value, kpi.format)}
+                    value={hasValue ? formatValue(kpi.value, kpi.format) : (kpi.error ? "—" : "0")}
                     icon={IconComp}
                     color={COLORS.chartColors[i % COLORS.chartColors.length]}
                     change={kpi.change}
                     changeType={kpi.changeType}
-                    subtitle={kpi.subtitle}
+                    subtitle={kpi.error ? `Error — see banner above` : (kpi.subtitle || (hasValue ? null : "No matching data"))}
                   />
                 );
               })}

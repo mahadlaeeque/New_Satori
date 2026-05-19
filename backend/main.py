@@ -2837,29 +2837,44 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
     def _exec(sql_template, tag):
         if not sql_template or not sql_template.strip():
             print(f"[dashboard] {tag}: no sql in config")
-            return {"error": "no sql"}
+            return {"error": "No SQL was saved for this widget.", "sql": ""}
+        # Strip fenced code blocks before substitution.
+        sql_template = sql_template.strip()
+        if sql_template.startswith("```"):
+            sql_template = sql_template.strip("`").lstrip("sql").strip()
+            if sql_template.endswith("```"):
+                sql_template = sql_template[:-3].strip()
         sql = _substitute_where(sql_template, user_filters)
-        # Strip fenced code blocks if the model left them.
-        sql_s = sql.strip()
-        if sql_s.startswith("```"):
-            sql_s = sql_s.strip("`").lstrip("sql").strip()
-            if sql_s.endswith("```"):
-                sql_s = sql_s[:-3].strip()
-            sql = sql_s
-        print(f"[dashboard] {tag}: {sql[:240]}{'...' if len(sql) > 240 else ''}")
+        print(f"[dashboard] {tag}: {sql[:300]}{'...' if len(sql) > 300 else ''}")
         r = bq_run_query(sql, max_rows=200)
+        r["sql"] = sql  # always include the substituted SQL so the frontend can show it on error
         if "error" in r:
             print(f"[dashboard]   {tag} ERROR: {r['error']}")
         else:
             print(f"[dashboard]   {tag} ok — {len(r.get('rows') or [])} rows, cols={r.get('columns')}")
         return r
 
+    def _pick_kpi_value(rows: list, cols: list):
+        """The AI is told to alias the metric AS `value`. But it doesn't always
+        follow the rule — try a few sensible fallbacks before giving up."""
+        if not rows or not cols:
+            return None
+        row0 = rows[0]
+        # 1) explicit `value` column
+        if "value" in cols and row0.get("value") is not None:
+            return row0["value"]
+        # 2) first column with a non-null value
+        for c in cols:
+            v = row0.get(c)
+            if v is not None and v != "":
+                return v
+        # 3) fall back to the literal first cell (might be null — still better than crash)
+        return row0.get(cols[0])
+
     kpis_out = []
     for i, k in enumerate((config.get("kpis") or [])[:6]):
         kid = k.get("id") or f"kpi{i}"
         r = _exec(k.get("sql"), f"kpi[{kid}]")
-        # Always carry the display config through so the frontend can render
-        # the card even when the data fetch fails.
         card = {
             "id":       kid,
             "title":    k.get("title") or kid,
@@ -2868,17 +2883,12 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
             "color":    k.get("color"),
             "subtitle": k.get("subtitle"),
             "value":    None,
+            "sql":      r.get("sql", ""),  # exposed so frontend banner can show it
         }
         if "error" in r:
             card["error"] = r["error"]
         else:
-            rows = r.get("rows") or []
-            cols = r.get("columns") or []
-            if rows and cols:
-                # Prefer a column literally named "value", else fall back to
-                # the first column.
-                col = "value" if "value" in cols else cols[0]
-                card["value"] = rows[0].get(col)
+            card["value"] = _pick_kpi_value(r.get("rows") or [], r.get("columns") or [])
         kpis_out.append(card)
 
     charts_out = []
@@ -2897,6 +2907,7 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
             "valueKeys": value_keys,
             "data":      rows,
             "columns":   cols,
+            "sql":       r.get("sql", ""),
         }
         if "error" in r:
             card["error"] = r["error"]
@@ -3562,4 +3573,4 @@ else:
         return {
             "ok": True,
             "message": "Satori v2 backend up. React frontend not built into this container.",
-        }
+        }
