@@ -2733,32 +2733,48 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
             parts.append(f"{f} = '{safe_v}'")
         return ("WHERE " + " AND ".join(parts)) if parts else ""
 
-    def _exec(sql_template):
-        if not sql_template:
+    def _exec(sql_template, tag):
+        if not sql_template or not sql_template.strip():
+            print(f"[dashboard] {tag}: no sql")
             return {"error": "no sql"}
         sql = sql_template.replace("{where}", _where())
-        return bq_run_query(sql, max_rows=200)
+        # Strip fenced code blocks if the model left them.
+        sql_s = sql.strip()
+        if sql_s.startswith("```"):
+            sql_s = sql_s.strip("`").lstrip("sql").strip()
+            if sql_s.endswith("```"):
+                sql_s = sql_s[:-3].strip()
+            sql = sql_s
+        print(f"[dashboard] {tag}: {sql[:200]}{'...' if len(sql) > 200 else ''}")
+        r = bq_run_query(sql, max_rows=200)
+        if "error" in r:
+            print(f"[dashboard]   {tag} ERROR: {r['error']}")
+        else:
+            print(f"[dashboard]   {tag} ok — {len(r.get('rows') or [])} rows, cols={r.get('columns')}")
+        return r
 
     kpis_out = []
-    for k in (config.get("kpis") or [])[:6]:
-        r = _exec(k.get("sql"))
+    for i, k in enumerate((config.get("kpis") or [])[:6]):
+        kid = k.get("id") or f"kpi{i}"
+        r = _exec(k.get("sql"), f"kpi[{kid}]")
         if "error" in r:
-            kpis_out.append({"id": k.get("id"), "value": None, "error": r["error"]})
+            kpis_out.append({"id": kid, "value": None, "error": r["error"]})
             continue
         rows = r.get("rows") or []
         if rows and r.get("columns"):
             first_col = r["columns"][0]
-            kpis_out.append({"id": k.get("id"), "value": rows[0].get(first_col)})
+            kpis_out.append({"id": kid, "value": rows[0].get(first_col)})
         else:
-            kpis_out.append({"id": k.get("id"), "value": None})
+            kpis_out.append({"id": kid, "value": None})
 
     charts_out = []
-    for c in (config.get("charts") or [])[:4]:
-        r = _exec(c.get("sql"))
+    for i, c in enumerate((config.get("charts") or [])[:4]):
+        cid = c.get("id") or f"chart{i}"
+        r = _exec(c.get("sql"), f"chart[{cid}]")
         if "error" in r:
-            charts_out.append({"id": c.get("id"), "rows": [], "error": r["error"]})
+            charts_out.append({"id": cid, "rows": [], "error": r["error"]})
             continue
-        charts_out.append({"id": c.get("id"), "rows": r.get("rows", []), "columns": r.get("columns", [])})
+        charts_out.append({"id": cid, "rows": r.get("rows", []), "columns": r.get("columns", [])})
 
     return {"kpis": kpis_out, "charts": charts_out}
 
@@ -2851,14 +2867,9 @@ def delete_dashboard(dashboard_id: int, user: dict = Depends(get_current_user)):
 #  REPORT BUILDER  ──  AI-assisted creation + render to PDF/Excel
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_REPORT_SYSTEM_PROMPT = """You are Satori AI, a smart business analyst building TMC workforce + sales reports.
+_REPORT_SYSTEM_PROMPT = """You are Satori AI, a smart business analyst at TMC. You help users design tabular reports from the TMC workforce + sales BigQuery warehouse.
 
-A report is a structured document of SECTIONS. Each section has:
-  - id: short slug
-  - title: short heading
-  - kind: 'narrative' (just text) or 'table' (a SQL-backed table)
-  - sql: (only if kind='table') a BigQuery SELECT against ai-vertex-mahad.Satori_Project.<table>
-  - text: (only if kind='narrative') the paragraph text
+A report = ONE BigQuery SELECT that produces ONE clean table of rows. The frontend renders that table directly, with optional column show/hide and totals row.
 
 ═══ TMC SCHEMA (these are the ONLY tables / columns that exist — do not invent others) ═══
 
@@ -2866,28 +2877,27 @@ WORKFORCE TABLES:
 - `ai-vertex-mahad.Satori_Project.Employee_Data`
     Employee_Code, Resource_Name, Employee_Position, Employee_Hierarchy (= department),
     Employee_Location, Employee_Type, Joining_Date, Gender.
-    "Active employees" filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
+    Active employees filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
 
 - `ai-vertex-mahad.Satori_Project.Attendance_Data`
     attendance_date (DATE), employee_id, employee_name,
-    attendance_status_text (e.g. 'Present', 'Absent', 'Late', 'On Leave'),
+    attendance_status_text ('Present' / 'Absent' / 'Late' / 'On Leave' / 'Weekend' / 'Holiday' / 'Remote'),
     is_present, is_absent, is_on_leave, is_remote  (each 0/1 INTEGER).
-    'Late' = LOWER(attendance_status_text) = 'late'.
     Attendance rate = ROUND(100.0 * SUM(is_present) / NULLIF(COUNT(*),0), 1).
+    `employee_id` here = `Employee_Code` in Employee_Data.
 
 - `ai-vertex-mahad.Satori_Project.Allocation_data`
-    project_id, employee_id, allocation_percent (STRING — SAFE_CAST AS FLOAT64),
+    project_id, employee_id (= Employee_Code), allocation_percent (STRING — SAFE_CAST AS FLOAT64),
     emp_competency, Flag, Start_Date, End_Date.
-    Bench = employees whose MAX(allocation_percent) per project is 0 or NULL.
+    Bench = employees with MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per Employee_Code = 0 or NULL.
 
 - `ai-vertex-mahad.Satori_Project.Timesheet_Data`
-    TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64),
+    TICKET_USER_ID (= Employee_Code), TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST),
     TICKET_STATUS, DATE_KEY (DATE).
 
-SALES TABLES (USD/visit columns are STRING → SAFE_CAST AS FLOAT64; ratios already decimal):
+SALES TABLES (USD/visit numbers stored as STRING → SAFE_CAST AS FLOAT64; win-rate already decimal 0-1):
 - `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard`
-    VP, AM, Role, City,
-    col_2026_Target, Q1_ACH, Open_Pipeline, Hist_Win_Rate.
+    VP, AM, Role, City, col_2026_Target, Q1_ACH, Open_Pipeline, Hist_Win_Rate.
 - `ai-vertex-mahad.Satori_Project.Sales_Pipeline_Health`
     AM, City, Open_Pipeline, Q1_ACH, Hist_Win_Rate.
 - `ai-vertex-mahad.Satori_Project.Sales_Plan_vs_Pipeline`
@@ -2897,38 +2907,42 @@ SALES TABLES (USD/visit columns are STRING → SAFE_CAST AS FLOAT64; ratios alre
 - `ai-vertex-mahad.Satori_Project.Sales_Hunting_Gap`
     AM, City, Hunting_Target, Hunting_Achieved, Hunting_Gap.
 
-⚠️ Forbidden: anything with 'plant', 'storage_location', 'material', 'purchase_order',
-'receipts', 'issues', or other SAP/MRP terms. This is workforce + sales data only.
+This dataset DOES NOT contain SAP/MRP concepts (plant, storage_location, material, purchase_order, receipts, issues). Never reference those.
 
 ═══ CONVERSATION FLOW ═══
 1. User describes the report they want.
-2. Ask 1-2 clarifying questions if scope is unclear (timeframe, departments, AMs).
-3. Once clear, present the PROPOSED outline in plain language: list each
-   section's title + what it shows. Ask the user to confirm with "generate".
-4. When the user says "generate", return ONLY this JSON (no prose around it):
-   {"ready": true, "config": {"title": "...", "subtitle": "...", "sections": [
-     {"id": "kpis", "title": "Headline metrics", "kind": "table",
-      "sql": "SELECT department, ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1) AS attendance_pct FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` a JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` e ON e.Employee_Code = a.employee_id WHERE attendance_date BETWEEN DATE_SUB(CURRENT_DATE(),INTERVAL 30 DAY) AND CURRENT_DATE() GROUP BY department ORDER BY attendance_pct DESC LIMIT 50"},
-     {"id": "intro", "title": "Overview", "kind": "narrative",
-      "text": "This report covers the last 30 days of attendance ..."}
-   ]}}
+2. Ask 1-2 short business questions if scope is unclear (timeframe, departments, AMs).
+3. Once clear, present a 3-4 line PROPOSED outline in plain language: title + what columns/dimensions it'll show + scope. Ask the user to confirm with "generate".
+4. When the user says "generate" (or "go", "yes", "looks good"), reply with ONLY this JSON (no prose around it, no markdown fence):
+   {"ready": true, "config": {
+     "title": "Mahad Laeeque's March 2026 Attendance Report",
+     "description": "Daily attendance status for Mahad Laeeque in March 2026.",
+     "sql": "SELECT attendance_date, employee_name, attendance_status_text, is_present, is_absent, is_on_leave FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` WHERE LOWER(employee_name) LIKE '%mahad%' AND attendance_date BETWEEN DATE '2026-03-01' AND DATE '2026-03-31' ORDER BY attendance_date LIMIT 200",
+     "numeric_columns": ["is_present","is_absent","is_on_leave"],
+     "total_columns": ["is_present","is_absent","is_on_leave"]
+   }}
 
-═══ SQL RULES (CRITICAL — every section's SQL is executed verbatim) ═══
+═══ SQL RULES (CRITICAL — the SQL is executed verbatim against BigQuery) ═══
 - Fully qualify every table with backticks: `ai-vertex-mahad.Satori_Project.<table>`.
-- Use ONLY the columns listed above. If a column you want doesn't exist, pick a
-  different angle — never invent column names.
-- SAFE_CAST all STRING-typed numerics (allocation_percent, TICKET_HOURS,
-  col_2026_Target, Q1_ACH, Open_Pipeline) → FLOAT64 / INT64 before doing math.
-- LIMIT every query to 50 rows max.
+- Use ONLY the columns listed above. If a column you want doesn't exist, pick a different angle or join — never invent column names.
+- SAFE_CAST every STRING-typed numeric (allocation_percent, TICKET_HOURS, col_2026_Target, Q1_ACH, Open_Pipeline) to FLOAT64 / INT64 before SUM / AVG.
+- Joins: Employee_Data.Employee_Code = Attendance_Data.employee_id = Allocation_data.employee_id = Timesheet_Data.TICKET_USER_ID.
+- For department grouping: COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified').
+- For fuzzy name match (e.g. user types "Mahad"): WHERE LOWER(employee_name) LIKE '%mahad%' (or Resource_Name on Employee_Data).
+- LIMIT every query to 200 rows max.
 - Use ROUND() for percentages and currency.
-- Department grouping: COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified').
-- Always include at least one TABLE section that actually returns rows — a
-  narrative-only report is useless.
+- Always alias columns with readable names (AS attendance_pct, AS employee, …). The frontend uses the column names AS-IS.
+- The result MUST have at least one row for the user-supplied scope — pick filters loose enough that real data comes back.
+
+═══ JSON FIELDS ═══
+- title         (required) — short report title.
+- description   (optional) — 1-line summary.
+- sql           (required) — the BigQuery SELECT. Will be executed.
+- numeric_columns (optional) — list of column aliases that should be right-aligned + tabular-nums.
+- total_columns   (optional) — list of column aliases that should be SUM'd in a footer totals row.
 
 ═══ STYLE ═══
-- Short clean section titles.
-- Plain English narrative (no markdown headers).
-- NEVER show table names, column names, or SQL to the user in chat.
+- Plain English in chat. NEVER show SQL, table names, or raw column names to the user in chat.
 - NEVER emit the JSON until the user explicitly says "generate".
 - Be concise — max 3-4 sentences per chat turn.
 """
@@ -3057,13 +3071,9 @@ def _extract_ready_config(reply_text: str):
         repaired = _try_repair_json(candidate)
         if isinstance(repaired, dict) and repaired.get("ready") and isinstance(repaired.get("config"), dict):
             cfg = repaired["config"]
-            # Drop any sections/charts/kpis that look obviously broken (no sql
-            # or empty title) so the runtime doesn't blow up on them.
-            if isinstance(cfg.get("sections"), list):
-                cfg["sections"] = [s for s in cfg["sections"]
-                                   if isinstance(s, dict)
-                                   and s.get("title")
-                                   and (s.get("kind") != "table" or s.get("sql"))]
+            # Drop dashboard kpis/charts that lost their SQL during truncation.
+            # NOTE: do NOT touch the top-level `sql` field on report configs —
+            # the single-SQL report shape carries `sql` directly on `cfg`.
             for key in ("kpis", "charts"):
                 if isinstance(cfg.get(key), list):
                     cfg[key] = [x for x in cfg[key] if isinstance(x, dict) and x.get("sql")]
@@ -3126,56 +3136,97 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
         return {"reply": f"Sorry, I ran into an error: {e}"}
 
 
+def _infer_numeric_columns(rows: list, columns: list) -> list:
+    """Detect which columns hold numbers (for right-align + tabular-nums) by
+    looking at the first non-null sample value per column."""
+    out = []
+    for c in columns:
+        for r in rows:
+            v = r.get(c)
+            if v is None or v == "":
+                continue
+            try:
+                # Accept ints, floats, and stringified numbers.
+                float(str(v).replace(",", ""))
+                out.append(c)
+            except Exception:
+                pass
+            break
+    return out
+
+
 def _run_report_config(config: dict) -> dict:
-    """Execute every table section's SQL. Returns rendered sections.
+    """Execute the config's single SQL and return the table the frontend renders.
 
-    Failures (BQ errors, empty results, missing SQL) are surfaced explicitly so
-    the rendered report shows a clear placeholder instead of looking silently
-    empty.
+    Expected config shape:
+        {title, description, sql, columns?, numeric_columns?, total_columns?}
+    Returns:
+        {title, description, sql, columns, all_columns, rows, total_rows,
+         numeric_columns, total_columns, error?}
     """
-    out_sections = []
-    for s in (config.get("sections") or [])[:20]:
-        sec = {"id": s.get("id"), "title": s.get("title", ""), "kind": s.get("kind", "narrative")}
-        if sec["kind"] == "narrative":
-            sec["text"] = s.get("text", "") or "(no narrative provided)"
-            out_sections.append(sec)
-            continue
+    title       = (config.get("title") or "Satori Report").strip()
+    description = (config.get("description") or config.get("subtitle") or "").strip()
+    sql         = (config.get("sql") or "").strip()
+    # Strip fenced ```sql ... ``` if the model left it in.
+    if sql.startswith("```"):
+        sql = sql.strip("`").lstrip("sql").strip()
+        if sql.endswith("```"):
+            sql = sql[:-3].strip()
 
-        sql = (s.get("sql") or "").strip()
-        if not sql:
-            print(f"[report] section {sec['id']} has no sql — skipping")
-            sec["error"] = "No SQL was generated for this section."
-            sec["columns"] = []
-            sec["rows"] = []
-            out_sections.append(sec)
-            continue
+    if not sql:
+        print("[report] no SQL in config — returning empty payload")
+        return {
+            "title": title,
+            "description": description,
+            "sql": "",
+            "columns": [],
+            "all_columns": [],
+            "rows": [],
+            "total_rows": 0,
+            "numeric_columns": [],
+            "total_columns": [],
+            "error": "No SQL was generated. Re-confirm the report design and say 'generate' again.",
+        }
 
-        # Strip BigQuery code fences / leading 'sql' tokens the model sometimes
-        # leaves behind.
-        if sql.startswith("```"):
-            sql = sql.strip("`").lstrip("sql").strip()
+    print(f"[report] running SQL: {sql[:220]}{'...' if len(sql) > 220 else ''}")
+    r = bq_run_query(sql, max_rows=200)
+    if "error" in r:
+        print(f"[report]   ERROR: {r['error']}")
+        return {
+            "title": title,
+            "description": description,
+            "sql": sql,
+            "columns": [],
+            "all_columns": [],
+            "rows": [],
+            "total_rows": 0,
+            "numeric_columns": [],
+            "total_columns": [],
+            "error": r["error"],
+        }
 
-        print(f"[report] running section '{sec['id']}': {sql[:160]}{'...' if len(sql) > 160 else ''}")
-        r = bq_run_query(sql, max_rows=50)
-        if "error" in r:
-            print(f"[report]   ERROR: {r['error']}")
-            sec["error"] = r["error"]
-            sec["columns"] = []
-            sec["rows"] = []
-        else:
-            sec["columns"] = r.get("columns", [])
-            sec["rows"] = r.get("rows", [])
-            print(f"[report]   ok — {len(sec['rows'])} rows, cols={sec['columns']}")
-            if not sec["rows"]:
-                # Mark zero-row sections so the PDF/Excel/preview render a
-                # clear placeholder ("no data for the chosen filters") instead
-                # of an empty space.
-                sec["note"] = "No matching data for the chosen scope."
-        out_sections.append(sec)
+    all_columns = r.get("columns") or []
+    rows        = r.get("rows") or []
+    # Visible columns: prefer the AI's hint, else all of them.
+    visible = config.get("columns") or all_columns
+    visible = [c for c in visible if c in all_columns] or all_columns
+
+    numeric_columns = config.get("numeric_columns") or _infer_numeric_columns(rows, all_columns)
+    numeric_columns = [c for c in numeric_columns if c in all_columns]
+    total_columns   = config.get("total_columns") or []
+    total_columns   = [c for c in total_columns if c in numeric_columns]
+
+    print(f"[report]   ok — {len(rows)} rows, cols={all_columns}")
     return {
-        "title":    config.get("title", "Satori Report"),
-        "subtitle": config.get("subtitle", ""),
-        "sections": out_sections,
+        "title": title,
+        "description": description,
+        "sql": sql,
+        "columns": visible,
+        "all_columns": all_columns,
+        "rows": rows,
+        "total_rows": r.get("total_rows") or len(rows),
+        "numeric_columns": numeric_columns,
+        "total_columns": total_columns,
     }
 
 
@@ -3185,94 +3236,160 @@ def report_preview(body: dict, user: dict = Depends(get_current_user)):
     return _run_report_config(config)
 
 
+def _coerce_num(v):
+    if v is None or v == "":
+        return None
+    try:
+        return float(str(v).replace(",", ""))
+    except Exception:
+        return None
+
+
 @app.post("/api/report/generate")
 def report_generate(body: dict, user: dict = Depends(get_current_user)):
-    """Render a report to PDF or Excel and return as a download."""
+    """Render the report to PDF or Excel and return as a download."""
     config = body.get("config") or {}
     fmt = (body.get("format") or "pdf").lower()
+    if fmt in ("excel", "xls"):
+        fmt = "xlsx"
     rendered = _run_report_config(config)
+
+    title       = rendered.get("title", "Report")
+    description = rendered.get("description", "")
+    columns     = (body.get("config") or {}).get("columns") or rendered.get("columns") or []
+    # Defensive: only keep visible columns that actually exist in the result.
+    all_cols    = rendered.get("all_columns") or []
+    columns     = [c for c in columns if c in all_cols] or all_cols
+    rows        = rendered.get("rows") or []
+    numeric_cols = set(rendered.get("numeric_columns") or [])
+    total_cols   = set(rendered.get("total_columns") or [])
+
+    # Build totals row if any total_columns specified.
+    totals = {}
+    for c in total_cols:
+        s = 0.0
+        any_n = False
+        for r in rows:
+            n = _coerce_num(r.get(c))
+            if n is not None:
+                s += n
+                any_n = True
+        if any_n:
+            totals[c] = s
+
+    filename_base = title.replace(" ", "_").replace("/", "_") or "satori-report"
 
     if fmt == "xlsx":
         try:
             from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment
             from io import BytesIO
             wb = Workbook()
-            ws0 = wb.active
-            ws0.title = "Summary"
-            ws0.append([rendered.get("title", "Report")])
-            ws0.append([rendered.get("subtitle", "")])
-            ws0.append([])
-            for sec in rendered.get("sections", []):
-                ws0.append([sec.get("title", "")])
-                if sec.get("kind") == "narrative":
-                    ws0.append([sec.get("text", "")])
-                else:
-                    cols = sec.get("columns") or []
-                    rows = sec.get("rows") or []
-                    if sec.get("error"):
-                        ws0.append([f"(query error: {sec['error']})"])
-                    elif not rows:
-                        ws0.append([sec.get("note") or "(no data)"])
+            ws = wb.active
+            ws.title = "Report"
+            ws.append([title])
+            ws["A1"].font = Font(bold=True, size=14)
+            if description:
+                ws.append([description])
+                ws.append([])
+            else:
+                ws.append([])
+            # Header row.
+            ws.append(columns)
+            header_row = ws.max_row
+            for col_idx in range(1, len(columns) + 1):
+                cell = ws.cell(row=header_row, column=col_idx)
+                cell.font = Font(bold=True, color="FFFFFFFF")
+                cell.fill = PatternFill("solid", fgColor="FF1F2D3D")
+                cell.alignment = Alignment(horizontal="center")
+            # Data rows.
+            for r in rows:
+                ws.append([r.get(c, "") for c in columns])
+            # Totals row.
+            if totals:
+                row_vals = []
+                for c in columns:
+                    if c in totals:
+                        row_vals.append(totals[c])
+                    elif c == columns[0]:
+                        row_vals.append("TOTAL")
                     else:
-                        ws0.append(cols)
-                        for row in rows:
-                            ws0.append([row.get(c, "") for c in cols])
-                ws0.append([])
+                        row_vals.append("")
+                ws.append(row_vals)
+                tr = ws.max_row
+                for col_idx in range(1, len(columns) + 1):
+                    ws.cell(row=tr, column=col_idx).font = Font(bold=True)
             buf = BytesIO()
             wb.save(buf)
             buf.seek(0)
             return Response(
                 content=buf.read(),
                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                headers={"Content-Disposition": 'attachment; filename="satori-report.xlsx"'},
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename_base}.xlsx"',
+                    "X-Report-Filename": f"{filename_base}.xlsx",
+                },
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Excel export failed: {e}")
 
-    # PDF (default format)
+    # PDF (default)
     try:
-        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.pagesizes import letter, landscape
         from reportlab.lib import colors
         from reportlab.lib.styles import getSampleStyleSheet
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
         from io import BytesIO
         buf = BytesIO()
-        doc = SimpleDocTemplate(buf, pagesize=letter)
+        # Wide tables fit better on landscape letter.
+        doc = SimpleDocTemplate(buf, pagesize=landscape(letter) if len(columns) > 6 else letter)
         styles = getSampleStyleSheet()
-        elements = [Paragraph(rendered.get("title", "Report"), styles["Title"])]
-        if rendered.get("subtitle"):
-            elements.append(Paragraph(rendered["subtitle"], styles["Italic"]))
-        elements.append(Spacer(1, 16))
-        for sec in rendered.get("sections", []):
-            elements.append(Paragraph(sec.get("title", ""), styles["Heading2"]))
-            if sec.get("kind") == "narrative":
-                elements.append(Paragraph(sec.get("text", ""), styles["BodyText"]))
-            else:
-                cols = sec.get("columns") or []
-                rows = sec.get("rows") or []
-                if sec.get("error"):
-                    elements.append(Paragraph(f"<i>Query error: {sec['error']}</i>", styles["BodyText"]))
-                elif not rows or not cols:
-                    elements.append(Paragraph(sec.get("note") or "(no data for the chosen scope)", styles["BodyText"]))
-                else:
-                    data = [cols] + [[str(row.get(c, "")) for c in cols] for row in rows[:30]]
-                    t = Table(data, repeatRows=1)
-                    t.setStyle(TableStyle([
-                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1F2D3D')),
-                        ('TEXTCOLOR',  (0, 0), (-1, 0), colors.white),
-                        ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
-                        ('FONTSIZE',   (0, 0), (-1, -1), 8),
-                        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-                        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F4F6F8')]),
-                    ]))
-                    elements.append(t)
-            elements.append(Spacer(1, 12))
+        elements = [Paragraph(title, styles["Title"])]
+        if description:
+            elements.append(Paragraph(description, styles["Italic"]))
+        elements.append(Spacer(1, 14))
+
+        if rendered.get("error"):
+            elements.append(Paragraph(f"<i>Query error: {rendered['error']}</i>", styles["BodyText"]))
+        elif not rows or not columns:
+            elements.append(Paragraph("(no data for the chosen scope)", styles["BodyText"]))
+        else:
+            data = [columns] + [[str(r.get(c, "")) for c in columns] for r in rows[:200]]
+            if totals:
+                trow = []
+                for c in columns:
+                    if c in totals:
+                        trow.append(f"{totals[c]:,.2f}" if not float(totals[c]).is_integer() else f"{int(totals[c]):,}")
+                    elif c == columns[0]:
+                        trow.append("TOTAL")
+                    else:
+                        trow.append("")
+                data.append(trow)
+            t = Table(data, repeatRows=1)
+            style = [
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1F2D3D')),
+                ('TEXTCOLOR',  (0, 0), (-1, 0), colors.white),
+                ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE',   (0, 0), (-1, -1), 8),
+                ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1 if not totals else -2),
+                                   [colors.white, colors.HexColor('#F4F6F8')]),
+            ]
+            if totals:
+                style.append(('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#E8F5E9')))
+                style.append(('FONTNAME',   (0, -1), (-1, -1), 'Helvetica-Bold'))
+            t.setStyle(TableStyle(style))
+            elements.append(t)
+
         doc.build(elements)
         buf.seek(0)
         return Response(
             content=buf.read(),
             media_type="application/pdf",
-            headers={"Content-Disposition": 'attachment; filename="satori-report.pdf"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename_base}.pdf"',
+                "X-Report-Filename": f"{filename_base}.pdf",
+            },
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF export failed: {e}")
