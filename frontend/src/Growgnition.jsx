@@ -59,9 +59,9 @@ const TMCLogo = ({ height = 40, light = false }) => (
 // ─── Utility Components ───
 const KPICard = ({ title, value, change, changeType, icon: Icon, color, subtitle }) => (
   <div style={{
-    background: "#fff", borderRadius: 16, padding: "20px 24px",
+    background: COLORS.surface, borderRadius: 16, padding: "20px 24px",
     boxShadow: "0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04)",
-    border: "1px solid #F1F5F9", position: "relative", overflow: "hidden",
+    border: `1px solid ${COLORS.border}`, position: "relative", overflow: "hidden",
     transition: "all 0.2s", cursor: "default"
   }}
   onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.08)"; e.currentTarget.style.transform = "translateY(-2px)"; }}
@@ -92,8 +92,8 @@ const KPICard = ({ title, value, change, changeType, icon: Icon, color, subtitle
 
 const ChartCard = ({ title, subtitle, children, style = {} }) => (
   <div style={{
-    background: "#fff", borderRadius: 16, padding: 24,
-    boxShadow: "0 1px 3px rgba(0,0,0,0.06)", border: "1px solid #F1F5F9", ...style
+    background: COLORS.surface, borderRadius: 16, padding: 24,
+    boxShadow: "0 1px 3px rgba(0,0,0,0.06)", border: `1px solid ${COLORS.border}`, ...style
   }}>
     <div style={{ marginBottom: 16 }}>
       <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.textPrimary }}>{title}</div>
@@ -309,9 +309,9 @@ const ChatAgent = ({ isOpen, onClose, dashboardContext }) => {
   return (
     <div style={{
       position: "fixed", bottom: 20, right: 20, width: 400, height: 540,
-      background: "#fff", borderRadius: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.15)",
+      background: COLORS.surface, borderRadius: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.15)",
       display: "flex", flexDirection: "column", zIndex: 1000, overflow: "hidden",
-      border: "1px solid #E2E8F0"
+      border: `1px solid ${COLORS.border}`
     }}>
       {/* Header */}
       <div style={{
@@ -347,7 +347,7 @@ const ChatAgent = ({ isOpen, onClose, dashboardContext }) => {
         ))}
         {isTyping && (
           <div style={{ display: "flex", justifyContent: "flex-start" }}>
-            <div style={{ background: "#F1F5F9", padding: "10px 14px", borderRadius: "16px 16px 16px 4px", fontSize: 13 }}>
+            <div style={{ background: COLORS.surfaceAlt, padding: "10px 14px", borderRadius: "16px 16px 16px 4px", fontSize: 13 }}>
               <span style={{ display: "inline-flex", gap: 4 }}>
                 {[0, 1, 2].map(i => (
                   <span key={i} style={{
@@ -364,15 +364,15 @@ const ChatAgent = ({ isOpen, onClose, dashboardContext }) => {
       </div>
 
       {/* Input */}
-      <div style={{ padding: "12px 16px", borderTop: "1px solid #F1F5F9", display: "flex", gap: 8 }}>
+      <div style={{ padding: "12px 16px", borderTop: `1px solid ${COLORS.border}`, display: "flex", gap: 8 }}>
         <input
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => e.key === "Enter" && handleSend()}
           placeholder="Ask about your dashboard data..."
           style={{
-            flex: 1, border: "1px solid #E2E8F0", borderRadius: 12, padding: "10px 14px",
-            fontSize: 13, outline: "none", background: "#F8FAFC"
+            flex: 1, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: "10px 14px",
+            fontSize: 13, outline: "none", background: COLORS.surfaceAlt
           }}
         />
         <button onClick={handleSend} style={{
@@ -486,6 +486,14 @@ const VoiceModal = ({ open, onClose }) => {
       }
 
       if (data.toolCall?.functionCalls?.length) {
+        // Voice agent UX: tell the user we heard them and are now looking up
+        // the answer in BigQuery. Also mark "busy" so the mic capture loop
+        // stops sending audio — prevents the agent from hearing its own
+        // status message or background chatter and barging in on itself.
+        isSpeakingRef.current = true;  // doubles as a "busy" lock for capture
+        setState("speaking");
+        setStatusText("Satori is consulting BigQuery\u2026");
+
         const responses = [];
         for (const fc of data.toolCall.functionCalls) {
           try {
@@ -501,6 +509,9 @@ const VoiceModal = ({ open, onClose }) => {
           }
         }
         ws.send(JSON.stringify({ toolResponse: { functionResponses: responses } }));
+        // Keep "busy" flag on until the model actually starts producing audio
+        // (which flips it on again) or signals turnComplete (which clears it).
+        setStatusText("Working on your answer\u2026");
         return;
       }
 
@@ -547,6 +558,11 @@ const VoiceModal = ({ open, onClose }) => {
     const captureSR = captureCtxRef.current.sampleRate;
     processorRef.current.onaudioprocess = (e) => {
       if (!ws || ws.readyState !== WebSocket.OPEN || !setupDoneRef.current) return;
+      // Voice agent gating: while the agent is busy (speaking, consulting
+      // BigQuery, or otherwise mid-turn) DROP captured audio. This guarantees
+      // the agent only listens for the next prompt AFTER the current one
+      // wraps up — prevents barge-in and self-hearing through the speaker.
+      if (isSpeakingRef.current) return;
       const input = e.inputBuffer.getChannelData(0);
       const pcm16 = new Int16Array(input.length);
       for (let i = 0; i < input.length; i++) pcm16[i] = Math.max(-32768, Math.min(32767, Math.round(input[i] * 32767)));
@@ -713,7 +729,7 @@ const FabButtons = () => {
         <div style={{
           position: "fixed", bottom: 110, right: 28, zIndex: 900,
           width: 360, maxHeight: 520, borderRadius: 16, overflow: "hidden",
-          background: "#fff", border: `1px solid ${COLORS.border}`,
+          background: COLORS.surface, border: `1px solid ${COLORS.border}`,
           boxShadow: "0 24px 60px rgba(0,0,0,0.18)",
           display: "flex", flexDirection: "column",
         }}>
@@ -739,7 +755,7 @@ const FabButtons = () => {
                 onKeyDown={(e) => { if (e.key === "Enter" && helpQuestion.trim()) askHelp(helpQuestion.trim()); }}
                 style={{
                   flex: 1, padding: "8px 10px", borderRadius: 8,
-                  border: `1px solid ${COLORS.border}`, fontSize: 12.5, background: "#fff",
+                  border: `1px solid ${COLORS.border}`, fontSize: 12.5, background: COLORS.surface,
                 }}
               />
               <button
@@ -765,7 +781,7 @@ const FabButtons = () => {
             {!helpBusy && helpAnswer && (
               <>
                 <div style={{
-                  padding: 10, background: "#F8FAFC", borderRadius: 10,
+                  padding: 10, background: COLORS.surfaceAlt, borderRadius: 10,
                   fontSize: 11.5, fontStyle: "italic", color: COLORS.textSecondary, marginBottom: 6,
                 }}>
                   Q: {helpQuestion}
@@ -786,7 +802,7 @@ const FabButtons = () => {
                   <button key={t} onClick={() => askHelp(t)} style={{
                     display: "block", width: "100%", textAlign: "left",
                     padding: "8px 12px", borderRadius: 8, border: "none",
-                    background: "#F8FAFC", color: COLORS.textPrimary, fontSize: 12, cursor: "pointer",
+                    background: COLORS.surfaceAlt, color: COLORS.textPrimary, fontSize: 12, cursor: "pointer",
                     transition: "all 0.15s",
                   }}
                   onMouseEnter={(e) => { e.currentTarget.style.background = `${COLORS.accent}15`; e.currentTarget.style.color = COLORS.accent; }}
@@ -838,7 +854,7 @@ const BoardDashboard = () => (
           {boardData.health.map((item, i) => (
             <div key={i} style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <div style={{ width: 90, fontSize: 12, fontWeight: 500, color: COLORS.textSecondary }}>{item.function}</div>
-              <div style={{ flex: 1, height: 8, background: "#F1F5F9", borderRadius: 4, overflow: "hidden" }}>
+              <div style={{ flex: 1, height: 8, background: COLORS.surfaceAlt, borderRadius: 4, overflow: "hidden" }}>
                 <div style={{
                   width: `${item.score}%`, height: "100%", borderRadius: 4,
                   background: item.score >= 85 ? `linear-gradient(90deg, ${COLORS.success}, ${COLORS.accent})` : `linear-gradient(90deg, ${COLORS.warning}, #FBBF24)`
@@ -860,7 +876,7 @@ const BoardDashboard = () => (
         { label: "Employee Retention", value: "96.1%", target: "95%", status: "healthy" },
       ].map((item, i) => (
         <div key={i} style={{
-          background: "#fff", borderRadius: 16, padding: 20, border: "1px solid #F1F5F9",
+          background: COLORS.surface, borderRadius: 16, padding: 20, border: `1px solid ${COLORS.border}`,
           boxShadow: "0 1px 3px rgba(0,0,0,0.04)"
         }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -993,7 +1009,7 @@ const ProcurementDashboard = () => (
                 <td style={{ padding: "10px 12px", fontSize: 13, fontWeight: 500, borderRadius: "8px 0 0 8px" }}>{v.name}</td>
                 <td style={{ padding: "10px 12px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <div style={{ width: 60, height: 6, background: "#F1F5F9", borderRadius: 3, overflow: "hidden" }}>
+                    <div style={{ width: 60, height: 6, background: COLORS.surfaceAlt, borderRadius: 3, overflow: "hidden" }}>
                       <div style={{ width: `${v.score}%`, height: "100%", borderRadius: 3, background: v.score >= 90 ? COLORS.success : v.score >= 80 ? COLORS.warning : COLORS.danger }} />
                     </div>
                     <span style={{ fontSize: 12, fontWeight: 600 }}>{v.score}</span>
@@ -1763,7 +1779,7 @@ const AgentPage = () => {
                   { title: "Bench List",       prompt: "List all employees currently on the bench with their position and competencies.",  icon: Users },
                 ].map((item, i) => (
                   <button key={i} onClick={() => { setInput(item.prompt); }} style={{
-                    padding: "16px 18px", background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 14,
+                    padding: "16px 18px", background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14,
                     cursor: "pointer", textAlign: "left", transition: "all 0.15s",
                     display: "flex", gap: 12, alignItems: "flex-start"
                   }}
@@ -1800,7 +1816,7 @@ const AgentPage = () => {
 
           {isTyping && (
             <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 16 }}>
-              <div style={{ background: "#fff", border: `1px solid ${COLORS.border}`, padding: "14px 18px", borderRadius: "16px 16px 16px 4px", display: "flex", gap: 6, alignItems: "center" }}>
+              <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, padding: "14px 18px", borderRadius: "16px 16px 16px 4px", display: "flex", gap: 6, alignItems: "center" }}>
                 <div style={{ display: "flex", gap: 4 }}>
                   {[0, 1, 2].map(j => (
                     <div key={j} style={{ width: 7, height: 7, borderRadius: "50%", background: COLORS.accent, animation: `bounce 1.2s ${j * 0.15}s infinite` }} />
@@ -1814,7 +1830,7 @@ const AgentPage = () => {
         </div>
 
         {/* Input Area */}
-        <div style={{ padding: "16px 32px 20px", borderTop: `1px solid ${COLORS.border}`, background: "#fff", flexShrink: 0 }}>
+        <div style={{ padding: "16px 32px 20px", borderTop: `1px solid ${COLORS.border}`, background: COLORS.surface, flexShrink: 0 }}>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
             <div style={{ flex: 1, position: "relative" }}>
               <textarea
@@ -1824,7 +1840,7 @@ const AgentPage = () => {
                 rows={2}
                 style={{
                   width: "100%", padding: "12px 18px", border: `1px solid ${COLORS.border}`, borderRadius: 14,
-                  fontSize: 14, outline: "none", background: "#F8FAFC", transition: "all 0.2s", boxSizing: "border-box",
+                  fontSize: 14, outline: "none", background: COLORS.surfaceAlt, transition: "all 0.2s", boxSizing: "border-box",
                   resize: "none", fontFamily: "inherit", lineHeight: 1.5, display: "block", margin: 0
                 }}
                 onFocus={e => { e.target.style.borderColor = COLORS.accent; e.target.style.background = "#fff"; }}
@@ -1843,7 +1859,7 @@ const AgentPage = () => {
             {/* Voice agent button */}
             <button onClick={startVoiceSession} title="Start voice agent" style={{
               width: 46, height: 46, borderRadius: 14, border: `1px solid ${COLORS.border}`, cursor: "pointer",
-              background: "#fff", display: "flex", alignItems: "center", justifyContent: "center",
+              background: COLORS.surface, display: "flex", alignItems: "center", justifyContent: "center",
               transition: "all 0.2s", flexShrink: 0, alignSelf: "flex-end", marginBottom: 0
             }}
             onMouseEnter={e => { e.currentTarget.style.borderColor = COLORS.accent; e.currentTarget.style.background = "#F8FAF5"; }}
@@ -1858,7 +1874,7 @@ const AgentPage = () => {
         {voiceStatus !== "idle" && (
           <div style={{
             position: "absolute", bottom: 16, left: 24, right: 24, zIndex: 50,
-            background: "#fff", borderRadius: 20, padding: "18px 24px",
+            background: COLORS.surface, borderRadius: 20, padding: "18px 24px",
             boxShadow: "0 8px 32px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.06)",
             border: `1px solid ${COLORS.border}`,
             animation: "fadeIn 0.25s ease",
@@ -1902,7 +1918,7 @@ const AgentPage = () => {
                 </div>
 
                 {/* Language toggle */}
-                <div style={{ display: "flex", gap: 2, background: "#F1F5F9", borderRadius: 8, padding: 2, flexShrink: 0 }}>
+                <div style={{ display: "flex", gap: 2, background: COLORS.surfaceAlt, borderRadius: 8, padding: 2, flexShrink: 0 }}>
                   {[{ code: "ur", label: "اردو" }, { code: "en", label: "EN" }].map(l => (
                     <button key={l.code} onClick={() => {
                       stopVoice();
@@ -1940,7 +1956,7 @@ const AgentPage = () => {
 
       {/* ─── Right Sidebar ─── */}
       <div style={{
-        width: 340, borderLeft: `1px solid ${COLORS.border}`, background: "#FAFBFC",
+        width: 340, borderLeft: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt,
         display: "flex", flexDirection: "column", overflowY: "auto", flexShrink: 0
       }}>
         {/* Sample Prompts */}
@@ -1964,7 +1980,7 @@ const AgentPage = () => {
           <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 280, overflowY: "auto" }}>
             {getFilteredPrompts().slice(0, 8).map((p, i) => (
               <button key={i} onClick={() => setInput(p.prompt)} style={{
-                padding: "10px 12px", background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 10,
+                padding: "10px 12px", background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 10,
                 cursor: "pointer", textAlign: "left", transition: "all 0.15s", width: "100%"
               }}
               onMouseEnter={e => { e.currentTarget.style.borderColor = COLORS.accent; e.currentTarget.style.background = `${COLORS.accent}08`; }}
@@ -2254,7 +2270,7 @@ const ReportChatPanel = ({
   const showEmptyState = messages.length === 0 && !existingConfig;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#fff", minHeight: 0 }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: COLORS.surface, minHeight: 0 }}>
       {onClose && (
         <div style={{
           padding: "12px 16px", borderBottom: `1px solid ${COLORS.border}`,
@@ -2292,7 +2308,7 @@ const ReportChatPanel = ({
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, maxWidth: 460, margin: "0 auto" }}>
               {suggestedPrompts.map((p, i) => (
                 <button key={i} onClick={() => setInput(p)} style={{
-                  padding: "12px 14px", background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 12,
+                  padding: "12px 14px", background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12,
                   cursor: "pointer", textAlign: "left", fontSize: 12.5, fontWeight: 500, color: COLORS.textPrimary,
                   transition: "all 0.15s"
                 }}
@@ -2360,7 +2376,7 @@ const ReportChatPanel = ({
           <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 14 }}>
             <div style={{
               padding: "12px 16px", borderRadius: "14px 14px 14px 4px",
-              background: "#fff", border: `1px solid ${COLORS.border}`, boxShadow: "0 1px 3px rgba(0,0,0,0.06)"
+              background: COLORS.surface, border: `1px solid ${COLORS.border}`, boxShadow: "0 1px 3px rgba(0,0,0,0.06)"
             }}>
               <div style={{ display: "flex", gap: 4 }}>
                 {[0, 1, 2].map((d) => (
@@ -2378,7 +2394,7 @@ const ReportChatPanel = ({
       </div>
 
       <div style={{
-        padding: "12px 16px", borderTop: `1px solid ${COLORS.border}`, background: "#fff",
+        padding: "12px 16px", borderTop: `1px solid ${COLORS.border}`, background: COLORS.surface,
         display: "flex", gap: 8, alignItems: "center", flexShrink: 0
       }}>
         <input
@@ -2547,7 +2563,7 @@ const ReportPreview = ({ config, configRev, onConfigChange, onSaveMeta, isReadOn
     <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
       <div style={{
         display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10,
-        padding: "12px 16px", borderBottom: `1px solid ${COLORS.border}`, background: "#fff", flexShrink: 0
+        padding: "12px 16px", borderBottom: `1px solid ${COLORS.border}`, background: COLORS.surface, flexShrink: 0
       }}>
         <div style={{ fontSize: 12.5, color: COLORS.textSecondary }}>
           {loading ? "Loading preview…" : `${data.rows?.length || 0} of ${data.total_rows || 0} rows · ${data.columns?.length || 0} columns`}
@@ -2684,7 +2700,7 @@ const HiddenColumnsMenu = ({ hidden, onAdd }) => {
     <div ref={ref} style={{ position: "relative" }}>
       <button onClick={() => setOpen((v) => !v)} style={{
         padding: "8px 12px", borderRadius: 8, border: `1px solid ${COLORS.border}`,
-        background: "#fff", cursor: "pointer", color: COLORS.textPrimary, fontSize: 12.5, fontWeight: 600,
+        background: COLORS.surface, cursor: "pointer", color: COLORS.textPrimary, fontSize: 12.5, fontWeight: 600,
         display: "flex", alignItems: "center", gap: 6
       }}>
         <Plus size={13} /> Add column
@@ -2692,7 +2708,7 @@ const HiddenColumnsMenu = ({ hidden, onAdd }) => {
       {open && (
         <div style={{
           position: "absolute", top: "calc(100% + 4px)", right: 0,
-          background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 10,
+          background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 10,
           boxShadow: "0 8px 24px rgba(0,0,0,0.12)", minWidth: 200, maxHeight: 320, overflowY: "auto", zIndex: 100
         }}>
           {hidden.map((col) => (
@@ -2962,7 +2978,7 @@ const ReportsPage = () => {
       <div style={{ height: "100%", padding: 24, boxSizing: "border-box" }}>
         <div style={{
           height: "100%", display: "flex", flexDirection: "column",
-          background: "#fff", borderRadius: 16, border: `1px solid ${COLORS.border}`, overflow: "hidden"
+          background: COLORS.surface, borderRadius: 16, border: `1px solid ${COLORS.border}`, overflow: "hidden"
         }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -2994,7 +3010,7 @@ const ReportsPage = () => {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, gap: 12, flexShrink: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0 }}>
             <button onClick={backToList} title="Back to reports" style={{
-              background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 8,
+              background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
               padding: "6px 10px", cursor: "pointer", display: "flex", alignItems: "center", color: COLORS.textSecondary, flexShrink: 0
             }}>
               <ChevronLeft size={16} />
@@ -3012,7 +3028,7 @@ const ReportsPage = () => {
                 style={{
                   fontSize: 20, fontWeight: 700, color: COLORS.textPrimary,
                   border: `1px solid ${COLORS.accent}`, borderRadius: 6, padding: "3px 8px", outline: "none",
-                  background: "#fff", flex: 1, maxWidth: 480
+                  background: COLORS.surface, flex: 1, maxWidth: 480
                 }}
               />
             ) : (
@@ -3055,7 +3071,7 @@ const ReportsPage = () => {
                   <Star size={15} fill={activeFavorite ? COLORS.warning : "none"} />
                 </button>
                 <button onClick={() => setShareOpen(true)} title="Share with people in your company" style={{
-                  background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 8,
+                  background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
                   padding: "8px 14px", cursor: "pointer", color: COLORS.textPrimary,
                   fontSize: 13, fontWeight: 600,
                   display: "flex", alignItems: "center", gap: 6
@@ -3083,7 +3099,7 @@ const ReportsPage = () => {
             )}
             <div ref={menuRef} style={{ position: "relative" }}>
               <button onClick={() => setMenuOpen((v) => !v)} title="More" style={{
-                background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 8,
+                background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
                 padding: "8px 10px", cursor: "pointer", color: COLORS.textSecondary,
                 display: "flex", alignItems: "center"
               }}>
@@ -3092,7 +3108,7 @@ const ReportsPage = () => {
               {menuOpen && (
                 <div style={{
                   position: "absolute", top: "calc(100% + 4px)", right: 0,
-                  background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 10,
+                  background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 10,
                   boxShadow: "0 8px 24px rgba(0,0,0,0.12)", minWidth: 200, zIndex: 100, overflow: "hidden"
                 }}>
                   {!activeIsShared && (
@@ -3111,7 +3127,7 @@ const ReportsPage = () => {
         <div style={{ flex: 1, display: "flex", gap: 16, minHeight: 0 }}>
           <div style={{
             flex: chatOpen ? "1 1 60%" : "1 1 100%",
-            background: "#fff", borderRadius: 16, border: `1px solid ${COLORS.border}`,
+            background: COLORS.surface, borderRadius: 16, border: `1px solid ${COLORS.border}`,
             overflow: "hidden", minWidth: 0, transition: "flex 0.2s ease",
             display: "flex", flexDirection: "column"
           }}>
@@ -3125,7 +3141,7 @@ const ReportsPage = () => {
           </div>
           {chatOpen && !activeIsShared && (
             <div style={{
-              flex: "0 0 40%", maxWidth: 480, background: "#fff",
+              flex: "0 0 40%", maxWidth: 480, background: COLORS.surface,
               border: `1px solid ${COLORS.border}`, borderRadius: 16, overflow: "hidden",
               display: "flex", flexDirection: "column", minHeight: 0
             }}>
@@ -3186,7 +3202,7 @@ const ReportsPage = () => {
       )}
 
       {!loading && reports.length === 0 && (
-        <div style={{ textAlign: "center", padding: 80, background: "#fff", borderRadius: 16, border: `1px dashed ${COLORS.border}` }}>
+        <div style={{ textAlign: "center", padding: 80, background: COLORS.surface, borderRadius: 16, border: `1px dashed ${COLORS.border}` }}>
           <div style={{
             width: 72, height: 72, borderRadius: 22, background: COLORS.surfaceAlt,
             display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px"
@@ -3241,7 +3257,7 @@ const ReportCard = ({ report, onOpen, onDelete, onDuplicate, onRemoveFromList })
 
   return (
     <div onClick={onOpen} style={{
-      background: "#fff", borderRadius: 14, padding: 18, border: `1px solid ${COLORS.border}`,
+      background: COLORS.surface, borderRadius: 14, padding: 18, border: `1px solid ${COLORS.border}`,
       boxShadow: "0 1px 3px rgba(0,0,0,0.06)", cursor: "pointer",
       display: "flex", flexDirection: "column", transition: "all 0.18s",
       position: "relative", minHeight: 160
@@ -3266,7 +3282,7 @@ const ReportCard = ({ report, onOpen, onDelete, onDuplicate, onRemoveFromList })
           {menuOpen && (
             <div style={{
               position: "absolute", top: "calc(100% + 4px)", right: 0,
-              background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 10,
+              background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 10,
               boxShadow: "0 8px 24px rgba(0,0,0,0.12)", minWidth: 200, zIndex: 100, overflow: "hidden"
             }}>
               {!isShared && (
@@ -3423,7 +3439,7 @@ const RulesEnginePage = () => {
       {/* ─── Left: Rules List ─── */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
         {/* Action Bar */}
-        <div style={{ padding: "16px 28px", borderBottom: `1px solid ${COLORS.border}`, background: "#fff", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
+        <div style={{ padding: "16px 28px", borderBottom: `1px solid ${COLORS.border}`, background: COLORS.surface, display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <button onClick={() => { setShowModal(true); setModalStep(1); setNewRule({ name: "", metric: "", operator: "gt", value: "", unit: "", channels: [], recipients: {}, schedule: "realtime", message: "" }); }} style={{
               display: "flex", alignItems: "center", gap: 8, padding: "10px 20px", borderRadius: 12, border: "none", cursor: "pointer",
@@ -3460,7 +3476,7 @@ const RulesEnginePage = () => {
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {rules.map(rule => (
                 <div key={rule.id} style={{
-                  padding: "18px 20px", background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 14,
+                  padding: "18px 20px", background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14,
                   transition: "all 0.15s", cursor: "pointer", position: "relative"
                 }}
                 onMouseEnter={e => { e.currentTarget.style.borderColor = amber.primary; e.currentTarget.style.boxShadow = "0 2px 12px rgba(245,158,11,0.12)"; e.currentTarget.style.background = amber.light; }}
@@ -3474,7 +3490,7 @@ const RulesEnginePage = () => {
                       background: rule.enabled ? amber.primary : "#D1D5DB", transition: "all 0.2s", padding: 0
                     }}>
                       <div style={{
-                        width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 3,
+                        width: 18, height: 18, borderRadius: "50%", background: COLORS.surface, position: "absolute", top: 3,
                         left: rule.enabled ? 23 : 3, transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.15)"
                       }} />
                     </button>
@@ -3530,7 +3546,7 @@ const RulesEnginePage = () => {
           <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 240, overflowY: "auto" }}>
             {filteredTemplates.map(tpl => (
               <div key={tpl.id} onClick={() => openFromTemplate(tpl)} style={{
-                padding: "12px 14px", background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 10,
+                padding: "12px 14px", background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 10,
                 cursor: "pointer", transition: "all 0.15s"
               }}
               onMouseEnter={e => { e.currentTarget.style.borderColor = amber.primary; e.currentTarget.style.background = amber.light; }}
@@ -3570,7 +3586,7 @@ const RulesEnginePage = () => {
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 200, overflowY: "auto" }}>
             {filteredExecs.map(ex => (
-              <div key={ex.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 10px", background: "#fff", borderRadius: 8, border: `1px solid ${COLORS.border}` }}>
+              <div key={ex.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 10px", background: COLORS.surface, borderRadius: 8, border: `1px solid ${COLORS.border}` }}>
                 <div style={{ width: 7, height: 7, borderRadius: "50%", background: ex.status === "success" ? COLORS.success : COLORS.danger, marginTop: 5, flexShrink: 0 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.textPrimary, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ex.ruleName}</div>
@@ -3594,7 +3610,7 @@ const RulesEnginePage = () => {
               { label: "Active", value: activeCount, color: COLORS.success },
               { label: "Triggered", value: "24", color: amber.primary },
             ].map(s => (
-              <div key={s.label} style={{ textAlign: "center", padding: "10px 8px", background: "#fff", borderRadius: 10, border: `1px solid ${COLORS.border}` }}>
+              <div key={s.label} style={{ textAlign: "center", padding: "10px 8px", background: COLORS.surface, borderRadius: 10, border: `1px solid ${COLORS.border}` }}>
                 <div style={{ fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
                 <div style={{ fontSize: 9, color: COLORS.textMuted, fontWeight: 500 }}>{s.label}</div>
               </div>
@@ -3606,7 +3622,7 @@ const RulesEnginePage = () => {
       {/* ─── Rule Creation Modal ─── */}
       {showModal && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }} onClick={() => setShowModal(false)}>
-          <div onClick={e => e.stopPropagation()} style={{ width: 560, maxHeight: "80vh", background: "#fff", borderRadius: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.2)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: 560, maxHeight: "80vh", background: COLORS.surface, borderRadius: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.2)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
             {/* Modal Header */}
             <div style={{ padding: "20px 28px 16px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.textPrimary }}>Create New Rule</div>
@@ -3646,7 +3662,7 @@ const RulesEnginePage = () => {
                   <label style={{ fontSize: 11, fontWeight: 600, color: COLORS.textSecondary, marginBottom: 6, display: "block" }}>Metric</label>
                   <div style={{ position: "relative", marginBottom: 14 }}>
                     <button onClick={() => setMetricDropdownOpen(!metricDropdownOpen)} style={{
-                      width: "100%", padding: "10px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 10, background: "#F8FAFC",
+                      width: "100%", padding: "10px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 10, background: COLORS.surfaceAlt,
                       fontSize: 13, color: newRule.metric ? COLORS.textPrimary : COLORS.textMuted, cursor: "pointer", textAlign: "left",
                       display: "flex", justifyContent: "space-between", alignItems: "center"
                     }}>
@@ -3654,7 +3670,7 @@ const RulesEnginePage = () => {
                       <ChevronDown size={14} color={COLORS.textMuted} />
                     </button>
                     {metricDropdownOpen && (
-                      <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,0.1)", zIndex: 10, maxHeight: 220, overflowY: "auto", marginTop: 4 }}>
+                      <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,0.1)", zIndex: 10, maxHeight: 220, overflowY: "auto", marginTop: 4 }}>
                         {RULE_METRICS.map(g => (
                           <div key={g.group}>
                             <div style={{ padding: "8px 14px 4px", fontSize: 9, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>{g.group}</div>
@@ -3677,7 +3693,7 @@ const RulesEnginePage = () => {
                     <div style={{ flex: 1 }}>
                       <label style={{ fontSize: 11, fontWeight: 600, color: COLORS.textSecondary, marginBottom: 6, display: "block" }}>Condition</label>
                       <select value={newRule.operator} onChange={e => setNewRule(p => ({ ...p, operator: e.target.value }))} style={{
-                        width: "100%", padding: "10px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 10, background: "#F8FAFC", fontSize: 13, color: COLORS.textPrimary, cursor: "pointer"
+                        width: "100%", padding: "10px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 10, background: COLORS.surfaceAlt, fontSize: 13, color: COLORS.textPrimary, cursor: "pointer"
                       }}>
                         {RULE_OPERATORS.map(o => <option key={o.id} value={o.id}>{o.label} ({o.desc})</option>)}
                       </select>
@@ -3685,13 +3701,13 @@ const RulesEnginePage = () => {
                     <div style={{ flex: 1 }}>
                       <label style={{ fontSize: 11, fontWeight: 600, color: COLORS.textSecondary, marginBottom: 6, display: "block" }}>Value</label>
                       <input value={newRule.value} onChange={e => setNewRule(p => ({ ...p, value: e.target.value }))} placeholder="e.g. 500000" style={{
-                        width: "100%", padding: "10px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 10, background: "#F8FAFC", fontSize: 13, outline: "none", boxSizing: "border-box"
+                        width: "100%", padding: "10px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 10, background: COLORS.surfaceAlt, fontSize: 13, outline: "none", boxSizing: "border-box"
                       }} />
                     </div>
                     <div style={{ width: 80 }}>
                       <label style={{ fontSize: 11, fontWeight: 600, color: COLORS.textSecondary, marginBottom: 6, display: "block" }}>Unit</label>
                       <input value={newRule.unit} onChange={e => setNewRule(p => ({ ...p, unit: e.target.value }))} placeholder="$, %, etc." style={{
-                        width: "100%", padding: "10px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 10, background: "#F8FAFC", fontSize: 13, outline: "none", boxSizing: "border-box"
+                        width: "100%", padding: "10px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 10, background: COLORS.surfaceAlt, fontSize: 13, outline: "none", boxSizing: "border-box"
                       }} />
                     </div>
                   </div>
@@ -3741,7 +3757,7 @@ const RulesEnginePage = () => {
                         </label>
                         <input value={newRule.recipients[chId] || ""} onChange={e => setNewRule(p => ({ ...p, recipients: { ...p.recipients, [chId]: e.target.value } }))}
                           placeholder={chId === "email" ? "email@company.com" : chId === "slack" ? "#channel-name" : chId === "webhook" ? "https://..." : "+971 50 xxx xxxx"}
-                          style={{ width: "100%", padding: "10px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 10, background: "#F8FAFC", fontSize: 12, outline: "none", boxSizing: "border-box" }}
+                          style={{ width: "100%", padding: "10px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 10, background: COLORS.surfaceAlt, fontSize: 12, outline: "none", boxSizing: "border-box" }}
                         />
                       </div>
                     );
@@ -3781,7 +3797,7 @@ const RulesEnginePage = () => {
                   {/* Rule Name */}
                   <label style={{ fontSize: 11, fontWeight: 600, color: COLORS.textSecondary, marginBottom: 6, display: "block" }}>Rule Name</label>
                   <input value={newRule.name} onChange={e => setNewRule(p => ({ ...p, name: e.target.value }))} placeholder={`${newRule.metric || "Custom"} Alert`} style={{
-                    width: "100%", padding: "10px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 10, background: "#F8FAFC", fontSize: 13, outline: "none", marginBottom: 16, boxSizing: "border-box"
+                    width: "100%", padding: "10px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 10, background: COLORS.surfaceAlt, fontSize: 13, outline: "none", marginBottom: 16, boxSizing: "border-box"
                   }} />
                   {/* Summary */}
                   <div style={{ background: "#F9FAFB", borderRadius: 12, padding: "16px 18px", border: `1px solid ${COLORS.border}` }}>
@@ -3812,7 +3828,7 @@ const RulesEnginePage = () => {
             {/* Modal Footer */}
             <div style={{ padding: "14px 28px 20px", borderTop: `1px solid ${COLORS.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <button onClick={() => modalStep === 1 ? setShowModal(false) : setModalStep(s => s - 1)} style={{
-                padding: "10px 20px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "#fff",
+                padding: "10px 20px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: COLORS.surface,
                 fontSize: 13, fontWeight: 500, color: COLORS.textSecondary, cursor: "pointer"
               }}>{modalStep === 1 ? "Cancel" : "Back"}</button>
               <button onClick={() => modalStep === 4 ? createRule() : setModalStep(s => s + 1)}
@@ -3858,7 +3874,7 @@ const FilterDropdown = ({ label, options, value, onChange }) => {
       </div>
       {open && (
         <div style={{
-          position: "absolute", top: "100%", left: 0, marginTop: 4, background: "#fff", border: `1px solid ${COLORS.border}`,
+          position: "absolute", top: "100%", left: 0, marginTop: 4, background: COLORS.surface, border: `1px solid ${COLORS.border}`,
           borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.12)", zIndex: 100, maxHeight: 240, overflowY: "auto", minWidth: 180,
         }}>
           <div onClick={() => { onChange(null); setOpen(false); }} style={{
@@ -4989,7 +5005,7 @@ const DashboardRenderer = ({ spec, onBack }) => {
                 </summary>
                 <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
                   {problems.map((w, ix) => (
-                    <div key={ix} style={{ padding: 10, background: "#fff", borderRadius: 8, border: "1px solid #FCD34D" }}>
+                    <div key={ix} style={{ padding: 10, background: COLORS.surface, borderRadius: 8, border: "1px solid #FCD34D" }}>
                       <div style={{ fontWeight: 600, marginBottom: 4, display: "flex", justifyContent: "space-between", gap: 8 }}>
                         <span>{w.kind}: {w.title}</span>
                         <span style={{
@@ -5236,7 +5252,7 @@ const DashboardChatPanel = ({
   const showEmptyState = messages.length === 0 && !existingConfig;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#fff", minHeight: 0 }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: COLORS.surface, minHeight: 0 }}>
       {onClose && (
         <div style={{
           padding: "12px 16px", borderBottom: `1px solid ${COLORS.border}`,
@@ -5274,7 +5290,7 @@ const DashboardChatPanel = ({
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, maxWidth: 460, margin: "0 auto" }}>
               {suggestedPrompts.map((p, i) => (
                 <button key={i} onClick={() => setInput(p)} style={{
-                  padding: "12px 14px", background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 12,
+                  padding: "12px 14px", background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12,
                   cursor: "pointer", textAlign: "left", fontSize: 12.5, fontWeight: 500, color: COLORS.textPrimary,
                   transition: "all 0.15s"
                 }}
@@ -5342,7 +5358,7 @@ const DashboardChatPanel = ({
           <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 14 }}>
             <div style={{
               padding: "12px 16px", borderRadius: "14px 14px 14px 4px",
-              background: "#fff", border: `1px solid ${COLORS.border}`, boxShadow: "0 1px 3px rgba(0,0,0,0.06)"
+              background: COLORS.surface, border: `1px solid ${COLORS.border}`, boxShadow: "0 1px 3px rgba(0,0,0,0.06)"
             }}>
               <div style={{ display: "flex", gap: 4 }}>
                 {[0, 1, 2].map((d) => (
@@ -5360,7 +5376,7 @@ const DashboardChatPanel = ({
       </div>
 
       <div style={{
-        padding: "12px 16px", borderTop: `1px solid ${COLORS.border}`, background: "#fff",
+        padding: "12px 16px", borderTop: `1px solid ${COLORS.border}`, background: COLORS.surface,
         display: "flex", gap: 8, alignItems: "center", flexShrink: 0
       }}>
         <input
@@ -5530,7 +5546,7 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
       animation: "fadeIn 0.15s ease",
     }}>
       <div onClick={(e) => e.stopPropagation()} style={{
-        width: "100%", maxWidth: 520, maxHeight: "85vh", background: "#fff", borderRadius: 16,
+        width: "100%", maxWidth: 520, maxHeight: "85vh", background: COLORS.surface, borderRadius: 16,
         boxShadow: "0 20px 50px rgba(0,0,0,0.25)", display: "flex", flexDirection: "column",
         overflow: "hidden",
       }}>
@@ -5729,7 +5745,7 @@ const DashboardCard = ({ dashboard, onOpen, onDelete, onDuplicate, onRemoveFromL
 
   return (
     <div onClick={onOpen} style={{
-      background: "#fff", borderRadius: 14, padding: 18, border: `1px solid ${COLORS.border}`,
+      background: COLORS.surface, borderRadius: 14, padding: 18, border: `1px solid ${COLORS.border}`,
       boxShadow: "0 1px 3px rgba(0,0,0,0.06)", cursor: "pointer",
       display: "flex", flexDirection: "column", transition: "all 0.18s",
       position: "relative", minHeight: 160
@@ -5754,7 +5770,7 @@ const DashboardCard = ({ dashboard, onOpen, onDelete, onDuplicate, onRemoveFromL
           {menuOpen && (
             <div style={{
               position: "absolute", top: "calc(100% + 4px)", right: 0,
-              background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 10,
+              background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 10,
               boxShadow: "0 8px 24px rgba(0,0,0,0.12)", minWidth: 200, zIndex: 100, overflow: "hidden"
             }}>
               {!isShared && (
@@ -6019,7 +6035,7 @@ const DashboardsPage = () => {
       <div style={{ height: "100%", padding: 24, boxSizing: "border-box" }}>
         <div style={{
           height: "100%", display: "flex", flexDirection: "column",
-          background: "#fff", borderRadius: 16, border: `1px solid ${COLORS.border}`, overflow: "hidden"
+          background: COLORS.surface, borderRadius: 16, border: `1px solid ${COLORS.border}`, overflow: "hidden"
         }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -6051,7 +6067,7 @@ const DashboardsPage = () => {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, gap: 12, flexShrink: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0 }}>
             <button onClick={backToList} title="Back to dashboards" style={{
-              background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 8,
+              background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
               padding: "6px 10px", cursor: "pointer", display: "flex", alignItems: "center", color: COLORS.textSecondary, flexShrink: 0
             }}>
               <ChevronLeft size={16} />
@@ -6069,7 +6085,7 @@ const DashboardsPage = () => {
                 style={{
                   fontSize: 20, fontWeight: 700, color: COLORS.textPrimary,
                   border: `1px solid ${COLORS.accent}`, borderRadius: 6, padding: "3px 8px", outline: "none",
-                  background: "#fff", flex: 1, maxWidth: 480
+                  background: COLORS.surface, flex: 1, maxWidth: 480
                 }}
               />
             ) : (
@@ -6112,7 +6128,7 @@ const DashboardsPage = () => {
                   <Star size={15} fill={activeFavorite ? COLORS.warning : "none"} />
                 </button>
                 <button onClick={() => setShareOpen(true)} title="Share with people in your company" style={{
-                  background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 8,
+                  background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
                   padding: "8px 14px", cursor: "pointer", color: COLORS.textPrimary,
                   fontSize: 13, fontWeight: 600,
                   display: "flex", alignItems: "center", gap: 6
@@ -6140,7 +6156,7 @@ const DashboardsPage = () => {
             )}
             <div ref={menuRef} style={{ position: "relative" }}>
               <button onClick={() => setMenuOpen((v) => !v)} title="More" style={{
-                background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 8,
+                background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
                 padding: "8px 10px", cursor: "pointer", color: COLORS.textSecondary,
                 display: "flex", alignItems: "center"
               }}>
@@ -6149,7 +6165,7 @@ const DashboardsPage = () => {
               {menuOpen && (
                 <div style={{
                   position: "absolute", top: "calc(100% + 4px)", right: 0,
-                  background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 10,
+                  background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 10,
                   boxShadow: "0 8px 24px rgba(0,0,0,0.12)", minWidth: 200, zIndex: 100, overflow: "hidden"
                 }}>
                   {!activeIsShared && (
@@ -6168,14 +6184,14 @@ const DashboardsPage = () => {
         <div style={{ flex: 1, display: "flex", gap: 16, minHeight: 0 }}>
           <div style={{
             flex: chatOpen ? "1 1 60%" : "1 1 100%",
-            background: "#fff", borderRadius: 16, border: `1px solid ${COLORS.border}`,
+            background: COLORS.surface, borderRadius: 16, border: `1px solid ${COLORS.border}`,
             padding: 20, overflowY: "auto", minWidth: 0, transition: "flex 0.2s ease"
           }}>
             <DashboardRenderer key={renderKey} spec={activeConfig} />
           </div>
           {chatOpen && !activeIsShared && (
             <div style={{
-              flex: "0 0 40%", maxWidth: 480, background: "#fff",
+              flex: "0 0 40%", maxWidth: 480, background: COLORS.surface,
               border: `1px solid ${COLORS.border}`, borderRadius: 16, overflow: "hidden",
               display: "flex", flexDirection: "column", minHeight: 0
             }}>
@@ -6236,7 +6252,7 @@ const DashboardsPage = () => {
       )}
 
       {!loading && dashboards.length === 0 && (
-        <div style={{ textAlign: "center", padding: 80, background: "#fff", borderRadius: 16, border: `1px dashed ${COLORS.border}` }}>
+        <div style={{ textAlign: "center", padding: 80, background: COLORS.surface, borderRadius: 16, border: `1px dashed ${COLORS.border}` }}>
           <div style={{
             width: 72, height: 72, borderRadius: 22, background: COLORS.surfaceAlt,
             display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px"
@@ -6402,11 +6418,11 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
       )}
 
       {/* Table */}
-      <div style={{ background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "visible" }}>
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "visible" }}>
         <div style={{
           display: "grid",
           gridTemplateColumns: "2fr 1.5fr 1fr 1fr 1fr 1.2fr 60px",
-          padding: "14px 20px", background: "#FAFBFC", borderBottom: `1px solid ${COLORS.border}`,
+          padding: "14px 20px", background: COLORS.surfaceAlt, borderBottom: `1px solid ${COLORS.border}`,
           fontSize: 11, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase", letterSpacing: "0.5px",
         }}>
           <div>User</div><div>Email</div><div>Role</div><div>Status</div><div>Features</div><div>Last Login</div><div></div>
@@ -6492,7 +6508,7 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
                 {openMenuId === u.id && (
                   <div style={{
                     position: "absolute", right: 0, top: "100%", marginTop: 4,
-                    background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 10,
+                    background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 10,
                     boxShadow: "0 8px 24px rgba(0,0,0,0.12)", minWidth: 180, zIndex: 50, overflow: "hidden",
                   }}>
                     {[
@@ -6595,7 +6611,7 @@ const ModalShell = ({ title, subtitle, onClose, children, footer, width = 520 })
     <div
       onClick={(e) => e.stopPropagation()}
       style={{
-        background: "#fff", borderRadius: 16, width, maxWidth: "92vw", maxHeight: "88vh",
+        background: COLORS.surface, borderRadius: 16, width, maxWidth: "92vw", maxHeight: "88vh",
         display: "flex", flexDirection: "column", boxShadow: "0 24px 48px rgba(0,0,0,0.18)",
       }}
     >
@@ -6625,7 +6641,7 @@ const ModalShell = ({ title, subtitle, onClose, children, footer, width = 520 })
 const _inputStyle = {
   width: "100%", padding: "10px 12px", border: `1px solid ${COLORS.border}`,
   borderRadius: 10, fontSize: 13, outline: "none", boxSizing: "border-box",
-  background: "#FAFBFC",
+  background: COLORS.surfaceAlt,
 };
 const _labelStyle = { display: "block", fontSize: 12, fontWeight: 600, color: COLORS.textSecondary, marginBottom: 6 };
 
@@ -6720,7 +6736,7 @@ const AddUserModal = ({ features, onClose, onCreated }) => {
       width={580}
       footer={
         <>
-          <button onClick={onClose} disabled={busy} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: "#fff", fontSize: 13, fontWeight: 600, color: COLORS.textSecondary, cursor: "pointer" }}>Cancel</button>
+          <button onClick={onClose} disabled={busy} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: COLORS.surface, fontSize: 13, fontWeight: 600, color: COLORS.textSecondary, cursor: "pointer" }}>Cancel</button>
           <button onClick={submit} disabled={busy} style={{ padding: "9px 18px", borderRadius: 9, border: "none", background: COLORS.primary, color: "#fff", fontSize: 13, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.7 : 1 }}>
             {busy ? "Creating…" : "Create user"}
           </button>
@@ -6805,7 +6821,7 @@ const ManageFeaturesModal = ({ user, features, onClose, onSaved }) => {
       width={580}
       footer={
         <>
-          <button onClick={onClose} disabled={busy} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: "#fff", fontSize: 13, fontWeight: 600, color: COLORS.textSecondary, cursor: "pointer" }}>Cancel</button>
+          <button onClick={onClose} disabled={busy} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: COLORS.surface, fontSize: 13, fontWeight: 600, color: COLORS.textSecondary, cursor: "pointer" }}>Cancel</button>
           <button onClick={submit} disabled={busy || loading} style={{ padding: "9px 18px", borderRadius: 9, border: "none", background: COLORS.accent, color: "#fff", fontSize: 13, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.7 : 1 }}>
             {busy ? "Saving…" : "Save changes"}
           </button>
@@ -6875,7 +6891,7 @@ const ManageScopeModal = ({ user, onClose, onSaved }) => {
       width={520}
       footer={
         <>
-          <button onClick={onClose} disabled={busy} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: "#fff", fontSize: 13, fontWeight: 600, color: COLORS.textSecondary, cursor: "pointer" }}>Cancel</button>
+          <button onClick={onClose} disabled={busy} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: COLORS.surface, fontSize: 13, fontWeight: 600, color: COLORS.textSecondary, cursor: "pointer" }}>Cancel</button>
           <button onClick={submit} disabled={busy || loading} style={{ padding: "9px 18px", borderRadius: 9, border: "none", background: COLORS.primary, color: "#fff", fontSize: 13, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.7 : 1 }}>
             {busy ? "Saving…" : "Save"}
           </button>
@@ -6905,7 +6921,7 @@ const ManageScopeModal = ({ user, onClose, onSaved }) => {
               >
                 <div style={{
                   position: "absolute", top: 2, left: enforced ? 22 : 2, width: 20, height: 20,
-                  borderRadius: "50%", background: "#fff", transition: "left 0.2s",
+                  borderRadius: "50%", background: COLORS.surface, transition: "left 0.2s",
                   boxShadow: "0 1px 4px rgba(0,0,0,0.15)",
                 }} />
               </div>
@@ -6996,7 +7012,7 @@ const EditUserModal = ({ user, isSelf, onClose, onSaved }) => {
       width={460}
       footer={
         <>
-          <button onClick={onClose} disabled={busy} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: "#fff", fontSize: 13, fontWeight: 600, color: COLORS.textSecondary, cursor: "pointer" }}>Cancel</button>
+          <button onClick={onClose} disabled={busy} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: COLORS.surface, fontSize: 13, fontWeight: 600, color: COLORS.textSecondary, cursor: "pointer" }}>Cancel</button>
           <button onClick={submit} disabled={busy} style={{ padding: "9px 18px", borderRadius: 9, border: "none", background: COLORS.primary, color: "#fff", fontSize: 13, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.7 : 1 }}>
             {busy ? "Saving…" : "Save"}
           </button>
@@ -7057,7 +7073,7 @@ const ResetPasswordModal = ({ user, onClose, onSaved }) => {
       width={420}
       footer={
         <>
-          <button onClick={onClose} disabled={busy} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: "#fff", fontSize: 13, fontWeight: 600, color: COLORS.textSecondary, cursor: "pointer" }}>Cancel</button>
+          <button onClick={onClose} disabled={busy} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: COLORS.surface, fontSize: 13, fontWeight: 600, color: COLORS.textSecondary, cursor: "pointer" }}>Cancel</button>
           <button onClick={submit} disabled={busy || done} style={{ padding: "9px 18px", borderRadius: 9, border: "none", background: COLORS.danger, color: "#fff", fontSize: 13, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy || done ? 0.7 : 1 }}>
             {done ? "Done!" : busy ? "Resetting…" : "Reset password"}
           </button>
@@ -7253,12 +7269,12 @@ const AuditLogPage = () => {
         </div>
       )}
       {!loading && !error && events.length === 0 && (
-        <div style={{ padding: 60, textAlign: "center", color: COLORS.textSecondary, background: "#fff", borderRadius: 12, border: `1px dashed ${COLORS.border}` }}>
+        <div style={{ padding: 60, textAlign: "center", color: COLORS.textSecondary, background: COLORS.surface, borderRadius: 12, border: `1px dashed ${COLORS.border}` }}>
           No events match this filter yet.
         </div>
       )}
       {!loading && events.length > 0 && (
-        <div style={{ background: "#fff", borderRadius: 12, border: `1px solid ${COLORS.border}`, overflow: "hidden" }}>
+        <div style={{ background: COLORS.surface, borderRadius: 12, border: `1px solid ${COLORS.border}`, overflow: "hidden" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
             <thead>
               <tr style={{ background: COLORS.primary, color: "#fff" }}>
@@ -7410,8 +7426,8 @@ const SchemaSettingsCard = () => {
   const unusedTables = availableTables.filter(t => !rows.some(r => r.table_name === t));
 
   return (
-    <div style={{ background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "hidden", marginBottom: 24 }}>
-      <div style={{ padding: "16px 22px", borderBottom: `1px solid ${COLORS.border}`, background: "#FAFBFC" }}>
+    <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "hidden", marginBottom: 24 }}>
+      <div style={{ padding: "16px 22px", borderBottom: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.textPrimary, display: "flex", alignItems: "center", gap: 8 }}>
           <FileText size={16} color={COLORS.accent} />
           Schema Settings
@@ -7435,7 +7451,7 @@ const SchemaSettingsCard = () => {
           <>
             {rows.map((row, idx) => (
               <div key={idx} style={{
-                padding: 14, marginBottom: 14, background: "#F8FAFC",
+                padding: 14, marginBottom: 14, background: COLORS.surfaceAlt,
                 border: `1px solid ${COLORS.border}`, borderRadius: 12
               }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
@@ -7447,7 +7463,7 @@ const SchemaSettingsCard = () => {
                     style={{
                       flex: 1, padding: "9px 12px", borderRadius: 8,
                       border: `1px solid ${COLORS.border}`, fontSize: 13, fontWeight: 600,
-                      fontFamily: "monospace", background: "#fff",
+                      fontFamily: "monospace", background: COLORS.surface,
                     }}
                   />
                   <button
@@ -7481,7 +7497,7 @@ const SchemaSettingsCard = () => {
                   rows={5}
                   style={{
                     width: "100%", padding: 12, borderRadius: 8,
-                    border: `1px solid ${COLORS.border}`, background: "#fff",
+                    border: `1px solid ${COLORS.border}`, background: COLORS.surface,
                     fontSize: 12.5, fontFamily: "monospace", lineHeight: 1.55,
                     color: COLORS.textPrimary, resize: "vertical", boxSizing: "border-box",
                   }}
@@ -7493,14 +7509,14 @@ const SchemaSettingsCard = () => {
             <div style={{
               display: "flex", gap: 8, marginTop: 6, padding: 12,
               border: `1px dashed ${COLORS.border}`, borderRadius: 12,
-              background: "#FAFBFC",
+              background: COLORS.surfaceAlt,
             }}>
               <select
                 value={addPicker}
                 onChange={e => setAddPicker(e.target.value)}
                 style={{
                   flex: 1, padding: "8px 10px", borderRadius: 8,
-                  border: `1px solid ${COLORS.border}`, fontSize: 13, background: "#fff",
+                  border: `1px solid ${COLORS.border}`, fontSize: 13, background: COLORS.surface,
                 }}
               >
                 <option value="">+ Add another table…</option>
@@ -7524,7 +7540,7 @@ const SchemaSettingsCard = () => {
       {/* Footer buttons */}
       <div style={{
         padding: "14px 18px", borderTop: `1px solid ${COLORS.border}`,
-        display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: "#FAFBFC",
+        display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: COLORS.surfaceAlt,
       }}>
         <button
           onClick={resetDefaults}
@@ -7649,8 +7665,8 @@ const SystemSettingsPage = () => {
       )}
 
       {/* Data Scope Dimensions card */}
-      <div style={{ background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "hidden", marginBottom: 24 }}>
-        <div style={{ padding: "16px 22px", borderBottom: `1px solid ${COLORS.border}`, background: "#FAFBFC" }}>
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "hidden", marginBottom: 24 }}>
+        <div style={{ padding: "16px 22px", borderBottom: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.textPrimary, display: "flex", alignItems: "center", gap: 8 }}>
             <Shield size={16} color={COLORS.accent} />
             Data Scope Dimensions
@@ -7707,7 +7723,7 @@ const SystemSettingsPage = () => {
                   >
                     <div style={{
                       position: "absolute", top: 2, left: info.enabled ? 22 : 2, width: 20, height: 20,
-                      borderRadius: "50%", background: "#fff", transition: "left 0.2s",
+                      borderRadius: "50%", background: COLORS.surface, transition: "left 0.2s",
                       boxShadow: "0 1px 4px rgba(0,0,0,0.15)",
                     }} />
                   </div>
@@ -7724,8 +7740,8 @@ const SystemSettingsPage = () => {
       </div>
 
       {/* Security card */}
-      <div style={{ background: "#fff", border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "hidden", marginBottom: 24 }}>
-        <div style={{ padding: "16px 22px", borderBottom: `1px solid ${COLORS.border}`, background: "#FAFBFC" }}>
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "hidden", marginBottom: 24 }}>
+        <div style={{ padding: "16px 22px", borderBottom: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.textPrimary, display: "flex", alignItems: "center", gap: 8 }}>
             <Lock size={16} color={COLORS.accent} />
             Security
@@ -8021,7 +8037,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
 
   return (
     <div style={{
-      minHeight: "100vh", display: "flex", background: "#F8FAFC",
+      minHeight: "100vh", display: "flex", background: COLORS.surfaceAlt,
       fontFamily: "'Red Hat Display', 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif"
     }}>
       {/* Left Panel — TMC Branding */}
@@ -8042,7 +8058,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           {Array.from({ length: 15 }, (_, i) => (
             <div key={`d${i}`} style={{
               position: "absolute", width: 2, height: 160,
-              background: "#fff", transform: "rotate(-15deg)",
+              background: COLORS.surface, transform: "rotate(-15deg)",
               top: `${20 + (i % 4) * 20}%`, left: `${i * 7}%`,
             }} />
           ))}
@@ -8116,8 +8132,8 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                     type="email" value={email} onChange={e => setEmail(e.target.value)}
                     placeholder="name@company.com" autoComplete="email" autoFocus
                     style={{
-                      width: "100%", padding: "12px 14px 12px 44px", border: "1px solid #E2E8F0",
-                      borderRadius: 12, fontSize: 14, outline: "none", background: "#F8FAFC",
+                      width: "100%", padding: "12px 14px 12px 44px", border: `1px solid ${COLORS.border}`,
+                      borderRadius: 12, fontSize: 14, outline: "none", background: COLORS.surfaceAlt,
                       transition: "all 0.2s", boxSizing: "border-box"
                     }}
                     onFocus={e => { e.target.style.borderColor = COLORS.primary; e.target.style.background = "#fff"; }}
@@ -8133,8 +8149,8 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                     type="password" value={password} onChange={e => setPassword(e.target.value)}
                     placeholder="Enter your password" autoComplete="current-password"
                     style={{
-                      width: "100%", padding: "12px 14px 12px 44px", border: "1px solid #E2E8F0",
-                      borderRadius: 12, fontSize: 14, outline: "none", background: "#F8FAFC",
+                      width: "100%", padding: "12px 14px 12px 44px", border: `1px solid ${COLORS.border}`,
+                      borderRadius: 12, fontSize: 14, outline: "none", background: COLORS.surfaceAlt,
                       transition: "all 0.2s", boxSizing: "border-box"
                     }}
                     onFocus={e => { e.target.style.borderColor = COLORS.primary; e.target.style.background = "#fff"; }}
@@ -8178,7 +8194,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
             </div>
             <div style={{ display: "flex", gap: 18, alignItems: "flex-start", marginBottom: 20 }}>
               {setupQr ? (
-                <img src={setupQr} alt="2FA QR code" style={{ width: 168, height: 168, borderRadius: 12, border: `1px solid ${COLORS.border}`, padding: 8, background: "#fff", flexShrink: 0 }} />
+                <img src={setupQr} alt="2FA QR code" style={{ width: 168, height: 168, borderRadius: 12, border: `1px solid ${COLORS.border}`, padding: 8, background: COLORS.surface, flexShrink: 0 }} />
               ) : (
                 <div style={{ width: 168, height: 168, borderRadius: 12, border: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt, display: "flex", alignItems: "center", justifyContent: "center" }}>
                   <Activity size={24} style={{ animation: "spin 1s linear infinite" }} />
@@ -8203,8 +8219,8 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                   value={code} onChange={(e) => setCode(sanitizeTotp(e.target.value))}
                   placeholder="123456" maxLength={6}
                   style={{
-                    width: "100%", padding: "14px 16px", border: "1px solid #E2E8F0",
-                    borderRadius: 12, fontSize: 22, outline: "none", background: "#F8FAFC",
+                    width: "100%", padding: "14px 16px", border: `1px solid ${COLORS.border}`,
+                    borderRadius: 12, fontSize: 22, outline: "none", background: COLORS.surfaceAlt,
                     boxSizing: "border-box", letterSpacing: 8, textAlign: "center",
                     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
                   }}
@@ -8253,14 +8269,14 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
               fontSize: 14, color: COLORS.textPrimary
             }}>
               {backupCodes.map((c, i) => (
-                <div key={i} style={{ padding: "6px 8px", background: "#fff", borderRadius: 6, textAlign: "center", letterSpacing: 1 }}>
+                <div key={i} style={{ padding: "6px 8px", background: COLORS.surface, borderRadius: 6, textAlign: "center", letterSpacing: 1 }}>
                   {c}
                 </div>
               ))}
             </div>
             <button onClick={downloadBackupCodes} style={{
               padding: "10px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 10,
-              background: "#fff", cursor: "pointer", color: COLORS.textPrimary, fontSize: 13, fontWeight: 600,
+              background: COLORS.surface, cursor: "pointer", color: COLORS.textPrimary, fontSize: 13, fontWeight: 600,
               display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 16
             }}>
               <Download size={14} /> Download as .txt
@@ -8299,8 +8315,8 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                 placeholder={useBackupCode ? "XXXX-XXXX" : "123456"}
                 maxLength={useBackupCode ? 9 : 6}
                 style={{
-                  width: "100%", padding: "16px 16px", border: "1px solid #E2E8F0",
-                  borderRadius: 12, fontSize: 22, outline: "none", background: "#F8FAFC",
+                  width: "100%", padding: "16px 16px", border: `1px solid ${COLORS.border}`,
+                  borderRadius: 12, fontSize: 22, outline: "none", background: COLORS.surfaceAlt,
                   boxSizing: "border-box", letterSpacing: useBackupCode ? 4 : 8, textAlign: "center",
                   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
                   textTransform: useBackupCode ? "uppercase" : "none",
@@ -8601,10 +8617,10 @@ export default function App() {
   if (!isLoggedIn) return <LoginPage onLogin={handleLogin} expiredMsg={sessionExpiredMsg} />;
 
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#F8FAFC", fontFamily: "'Red Hat Display', 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif" }}>
+    <div style={{ display: "flex", height: "100vh", background: COLORS.surfaceAlt, fontFamily: "'Red Hat Display', 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif" }}>
       {/* Sidebar */}
       <div style={{
-        width: sidebarCollapsed ? 72 : 260, background: "#fff", borderRight: "1px solid #F1F5F9",
+        width: sidebarCollapsed ? 72 : 260, background: COLORS.surface, borderRight: `1px solid ${COLORS.border}`,
         display: "flex", flexDirection: "column", transition: "width 0.3s ease",
         boxShadow: "2px 0 8px rgba(0,0,0,0.02)", zIndex: 10, overflow: "hidden",
         flexShrink: 0
@@ -8612,7 +8628,7 @@ export default function App() {
         {/* Sidebar Header */}
         <div style={{
           padding: sidebarCollapsed ? "0 16px" : "0 24px",
-          borderBottom: "1px solid #F1F5F9", display: "flex", alignItems: "center",
+          borderBottom: `1px solid ${COLORS.border}`, display: "flex", alignItems: "center",
           gap: 12, height: 64
         }}>
           {sidebarCollapsed ? (
@@ -8664,13 +8680,13 @@ export default function App() {
         </nav>
 
         {/* Sidebar Footer */}
-        <div style={{ padding: "12px", borderTop: "1px solid #F1F5F9" }}>
+        <div style={{ padding: "12px", borderTop: `1px solid ${COLORS.border}` }}>
           <button
             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
             style={{
               width: "100%", display: "flex", alignItems: "center", gap: 8,
               padding: "8px 12px", justifyContent: sidebarCollapsed ? "center" : "flex-start",
-              borderRadius: 8, border: "none", cursor: "pointer", background: "#F8FAFC",
+              borderRadius: 8, border: "none", cursor: "pointer", background: COLORS.surfaceAlt,
               color: COLORS.textMuted, fontSize: 12
             }}
           >
@@ -8683,7 +8699,7 @@ export default function App() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         {/* Top Bar */}
         <header style={{
-          height: 64, background: "#fff", borderBottom: "1px solid #F1F5F9",
+          height: 64, background: COLORS.surface, borderBottom: `1px solid ${COLORS.border}`,
           display: "flex", alignItems: "center", justifyContent: "space-between",
           padding: "0 16px 0 32px", flexShrink: 0
         }}>
@@ -8710,7 +8726,7 @@ export default function App() {
               onClick={() => setDarkMode(!darkMode)}
               title={darkMode ? "Switch to light mode" : "Switch to dark mode"}
               style={{
-                width: 38, height: 38, borderRadius: 10, border: "1px solid #E2E8F0",
+                width: 38, height: 38, borderRadius: 10, border: `1px solid ${COLORS.border}`,
                 background: darkMode ? "#1F2937" : "#fff", cursor: "pointer",
                 display: "flex", alignItems: "center", justifyContent: "center",
                 color: darkMode ? "#FBBF24" : "#475569", transition: "all 0.15s",
@@ -8747,7 +8763,7 @@ export default function App() {
                   <div onClick={() => setProfileMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 99 }} />
                   <div style={{
                     position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 100,
-                    width: 220, background: "#fff", borderRadius: 12, border: `1px solid ${COLORS.border}`,
+                    width: 220, background: COLORS.surface, borderRadius: 12, border: `1px solid ${COLORS.border}`,
                     boxShadow: "0 8px 24px rgba(0,0,0,0.12)", overflow: "hidden",
                     animation: "fadeIn 0.15s ease"
                   }}>
@@ -8808,7 +8824,7 @@ export default function App() {
 
           {/* Footer */}
           <div style={{
-            marginTop: 32, padding: "20px 0", borderTop: "1px solid #F1F5F9",
+            marginTop: 32, padding: "20px 0", borderTop: `1px solid ${COLORS.border}`,
             display: activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" || activePage === "users" || activePage === "audit" ? "none" : "flex", justifyContent: "space-between", alignItems: "center"
           }}>
             <div style={{ fontSize: 12, color: COLORS.textMuted }}>

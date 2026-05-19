@@ -1578,7 +1578,19 @@ def chat(body: ChatRequest, request: Request, user: dict = Depends(get_current_u
                     "--- END SCOPE RESTRICTION ---"
                 )
 
-    system_prompt_final = (VOICE_SYSTEM_PROMPT_URDU if body.voice_mode else SYSTEM_PROMPT) + _build_date_context() + scope_addon + "\n\n" + _load_schema_settings_block() + "\n\n" + live_schema.render_context_block()
+    # Build the system prompt defensively — if the schema-settings DB read or
+    # the live-schema snapshot fails, we still want chat to work.
+    try:
+        _schema_notes = _load_schema_settings_block()
+    except Exception as _e:
+        print(f"[chat] schema-settings load failed (continuing): {_e}")
+        _schema_notes = ""
+    try:
+        _live_snap = live_schema.render_context_block()
+    except Exception as _e:
+        print(f"[chat] live-schema render failed (continuing): {_e}")
+        _live_snap = ""
+    system_prompt_final = (VOICE_SYSTEM_PROMPT_URDU if body.voice_mode else SYSTEM_PROMPT) + _build_date_context() + scope_addon + "\n\n" + _schema_notes + "\n\n" + _live_snap
 
     try:
         # Voice mode stays simple (no tools) — the voice WS has its own tool path
@@ -1770,9 +1782,14 @@ def chat(body: ChatRequest, request: Request, user: dict = Depends(get_current_u
             )
             reply = summary_response.text or reply
         # Persist this turn so the user can re-open the conversation later.
-        # We pass the ORIGINAL (un-redacted) user message because the chat
-        # history is the user's own data, not third-party data flow.
-        new_conv_id = _save_chat_turn(uid, body.conversation_id, body.message, reply)
+        # If the chat_conversations table is missing on the deployed DB the
+        # save will throw — never let that bubble up and break the actual
+        # chat response.
+        try:
+            new_conv_id = _save_chat_turn(uid, body.conversation_id, body.message, reply)
+        except Exception as _e:
+            print(f"[chat] conversation save failed (continuing): {_e}")
+            new_conv_id = body.conversation_id
         return {"reply": reply, "conversation_id": new_conv_id}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
@@ -1837,7 +1854,11 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                     "--- END SCOPE RESTRICTION ---"
                 )
 
-    system_prompt_final = SYSTEM_PROMPT + _build_date_context() + scope_addon_stream + "\n\n" + _load_schema_settings_block() + "\n\n" + live_schema.render_context_block()
+    try:    _schema_notes_s = _load_schema_settings_block()
+    except: _schema_notes_s = ""
+    try:    _live_snap_s = live_schema.render_context_block()
+    except: _live_snap_s = ""
+    system_prompt_final = SYSTEM_PROMPT + _build_date_context() + scope_addon_stream + "\n\n" + _schema_notes_s + "\n\n" + _live_snap_s
 
     def generate():
         try:
@@ -4402,6 +4423,10 @@ def health_check():
     }
 
 
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+_FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
