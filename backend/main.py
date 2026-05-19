@@ -2925,6 +2925,102 @@ def _autofix_dashboard_sql(sql: str) -> str:
     )
     sql = join_key_re2.sub(lambda m: f"{_norm_key(m.group(1))} = {_norm_key(m.group(2))}", sql)
 
+    # Fix 6 — Swap the digit-normalized Employee_Code/employee_id join for a
+    # name-based join. The diagnostic snapshot showed only 1/1199 rows match
+    # on digit-stripped IDs, but Resource_Name <-> employee_name overlaps for
+    # almost every employee. Same for Allocation_data.emp_name.
+    name_join_re = _re.compile(
+        r"LTRIM\(REGEXP_REPLACE\(CAST\(([A-Za-z_][A-Za-z0-9_]*)\.Employee_Code\s+AS\s+STRING\),\s*r'\[\^0-9\]',\s*''\),\s*'0'\)"
+        r"\s*=\s*"
+        r"LTRIM\(REGEXP_REPLACE\(CAST\(([A-Za-z_][A-Za-z0-9_]*)\.(employee_id|TICKET_USER_ID)\s+AS\s+STRING\),\s*r'\[\^0-9\]',\s*''\),\s*'0'\)",
+        _re.IGNORECASE,
+    )
+    def _to_name_join(m):
+        e_alias = m.group(1)
+        a_alias = m.group(2)
+        a_col = m.group(3)
+        # employee_id -> employee_name; TICKET_USER_ID has no name -> fallback to digit join
+        name_col = {"employee_id": "employee_name", "TICKET_USER_ID": None}.get(a_col)
+        if not name_col:
+            # No name column on the other side — keep the original digit match.
+            return m.group(0)
+        return f"UPPER(TRIM({e_alias}.Resource_Name)) = UPPER(TRIM({a_alias}.{name_col}))"
+    sql = name_join_re.sub(_to_name_join, sql)
+    # Reverse order
+    name_join_re2 = _re.compile(
+        r"LTRIM\(REGEXP_REPLACE\(CAST\(([A-Za-z_][A-Za-z0-9_]*)\.(employee_id|TICKET_USER_ID)\s+AS\s+STRING\),\s*r'\[\^0-9\]',\s*''\),\s*'0'\)"
+        r"\s*=\s*"
+        r"LTRIM\(REGEXP_REPLACE\(CAST\(([A-Za-z_][A-Za-z0-9_]*)\.Employee_Code\s+AS\s+STRING\),\s*r'\[\^0-9\]',\s*''\),\s*'0'\)",
+        _re.IGNORECASE,
+    )
+    def _to_name_join2(m):
+        a_alias = m.group(1)
+        a_col = m.group(2)
+        e_alias = m.group(3)
+        name_col = {"employee_id": "employee_name", "TICKET_USER_ID": None}.get(a_col)
+        if not name_col:
+            return m.group(0)
+        return f"UPPER(TRIM({a_alias}.{name_col})) = UPPER(TRIM({e_alias}.Resource_Name))"
+    sql = name_join_re2.sub(_to_name_join2, sql)
+
+    # Also rewrite plain CAST-based joins (in case Fix 5 didn't catch them) the
+    # same way. Pre-Fix-5 dashboards had `CAST(e.Employee_Code AS STRING) = CAST(a.employee_id AS STRING)`
+    # which Fix 5 would normalize; if the user is on a stale config from before
+    # Fix 5 we still want to handle it. Belt-and-braces.
+    cast_join_re = _re.compile(
+        r"CAST\(\s*([A-Za-z_][A-Za-z0-9_]*)\.Employee_Code\s+AS\s+STRING\s*\)"
+        r"\s*=\s*"
+        r"CAST\(\s*([A-Za-z_][A-Za-z0-9_]*)\.(employee_id|TICKET_USER_ID)\s+AS\s+STRING\s*\)",
+        _re.IGNORECASE,
+    )
+    def _to_name_cast(m):
+        e_alias = m.group(1)
+        a_alias = m.group(2)
+        a_col = m.group(3)
+        name_col = {"employee_id": "employee_name", "TICKET_USER_ID": None}.get(a_col)
+        if not name_col:
+            return m.group(0)
+        return f"UPPER(TRIM({e_alias}.Resource_Name)) = UPPER(TRIM({a_alias}.{name_col}))"
+    sql = cast_join_re.sub(_to_name_cast, sql)
+
+    # Fix 7 — There is no 'Late' attendance_status_text. The Late filter the
+    # AI keeps emitting returns 0 rows. Replace it with 'missing punch', which
+    # is the closest real status. (If the user wants something different they
+    # can edit the dashboard with AI.)
+    sql = _re.sub(
+        r"LOWER\(([^)]*attendance_status_text[^)]*)\)\s*=\s*'late'",
+        r"LOWER(\1) = 'missing punch'",
+        sql, flags=_re.IGNORECASE,
+    )
+    sql = _re.sub(
+        r"LOWER\(([^)]*attendance_status_text[^)]*)\)\s+IN\s*\(\s*'late'\s*\)",
+        r"LOWER(\1) IN ('missing punch')",
+        sql, flags=_re.IGNORECASE,
+    )
+
+    # Fix 8 — Allocation_data.Flag values are 'Allocated' / 'Bench', NOT
+    # 'Actual' / 'Forecast'. Rewrite IN-list filters that include 'Actual'
+    # or 'Forecast' to use 'Allocated' / 'Bench' instead.
+    def _fix_flag_in(m):
+        prefix = m.group(1) or ""
+        values_raw = m.group(2)
+        # Map old terms to new
+        if _re.search(r"'\s*Actual\s*'", values_raw, _re.IGNORECASE) or _re.search(r"'\s*Forecast\s*'", values_raw, _re.IGNORECASE):
+            return f"{prefix}Flag IN ('Allocated','Bench')"
+        return m.group(0)
+    sql = _re.sub(
+        r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*\.)?Flag\s+IN\s*\(([^)]+)\)",
+        _fix_flag_in, sql, flags=_re.IGNORECASE,
+    )
+    sql = _re.sub(
+        r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*\.)?Flag\s*=\s*'Actual'",
+        lambda m: f"{m.group(1) or ''}Flag = 'Allocated'", sql, flags=_re.IGNORECASE,
+    )
+    sql = _re.sub(
+        r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*\.)?Flag\s*=\s*'Forecast'",
+        lambda m: f"{m.group(1) or ''}Flag = 'Bench'", sql, flags=_re.IGNORECASE,
+    )
+
     return sql
 
 
