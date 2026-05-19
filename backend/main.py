@@ -1112,9 +1112,18 @@ SALES TABLES
 10. `Sales_KPI_Scorecard` — KPI definitions (reference only).
     Also: `Sales_Dormant_Accounts` (~21 rows), `Sales_Workload_Feasibility` (AM field-day capacity).
 
-JOINS:
-- Employee → Attendance / Allocation: CAST(Employee_Code AS STRING) = CAST(employee_id AS STRING).
-- Employee → Timesheet: CAST(Employee_Code AS STRING) = CAST(TICKET_USER_ID AS STRING).
+JOINS — CRITICAL JOIN-KEY NORMALIZATION:
+- Employee_Code is stored like "E-2141"; employee_id / TICKET_USER_ID are stored as bare numbers ("2141") or zero-padded. A direct CAST-to-STRING comparison returns ZERO matches and the join silently drops every row.
+- ALWAYS normalize both sides: strip non-digits and leading zeros before comparing. Use this exact pattern:
+    LTRIM(REGEXP_REPLACE(CAST(<col> AS STRING), r'[^0-9]', ''), '0')
+- Employee_Data → Attendance_Data:
+    LEFT JOIN Attendance_Data a
+      ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
+       = LTRIM(REGEXP_REPLACE(CAST(a.employee_id   AS STRING), r'[^0-9]', ''), '0')
+- Employee_Data → Allocation_data: same pattern, on a.employee_id.
+- Employee_Data → Timesheet_Data: same pattern, on t.TICKET_USER_ID.
+- Always use LEFT JOIN (not INNER) so attendance rows aren't dropped when the lookup table doesn't have a matching row.
+- Employee_Hierarchy is the DEPARTMENT field. Group by COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''), 'Unspecified') AS department.
 - Sales tables: share `AM` (Sales_Pipeline_Health uses `Salesperson` ≈ AM).
 
 DATA QUALITY:
@@ -2465,7 +2474,11 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
 - Bench classify on MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per Employee_Code.
 - Win rate display: multiply Hist_Win_Rate by 100.
 - Department grouping: COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified') AS department.
-- Join keys: CAST-to-STRING on both sides — CAST(Employee_Code AS STRING)=CAST(employee_id AS STRING).
+- Join keys (CRITICAL — direct CAST-to-STRING returns 0 matches because Employee_Code is stored like 'E-2141' while employee_id is '2141'). Use LTRIM(REGEXP_REPLACE(CAST(<col> AS STRING), r'[^0-9]', ''), '0') on BOTH sides:
+    LEFT JOIN ... e ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
+                     = LTRIM(REGEXP_REPLACE(CAST(a.employee_id   AS STRING), r'[^0-9]', ''), '0')
+  And ALWAYS use LEFT JOIN (not plain JOIN) so attendance rows survive even if Employee_Data has no matching row.
+- Employee_Hierarchy is the DEPARTMENT — never call it anything else.
 - 📅 Date scope: today's date is May 2026. When the user says "last month" you mean April 2026; "this month" means May 2026. If they name a month (e.g. "March 2026"), use that exact month's first/last day.
 - {{where}} placement: the runtime substitutes either `AND field='value' AND ...` or empty string into the spot where you wrote {{where}}. Your query MUST already have its own WHERE — write the placeholder as ` {{where}}` right after your last WHERE condition (with a leading space). If no filters apply at runtime, the placeholder becomes ''.
 - LIMIT every chart query to 50 rows.
@@ -2881,6 +2894,33 @@ def _autofix_dashboard_sql(sql: str) -> str:
         else:
             sql = sql.replace(m.group(0), "LEFT JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` " + alias + " ON " + on_clause)
 
+    # Fix 5 — Normalize the Employee_Code ↔ employee_id join key.
+    # The two columns are stored in different formats: Employee_Code looks like
+    # "E-2141" while employee_id is the numeric "2141" (or zero-padded). The
+    # CAST-to-STRING join used by the AI doesn't bridge that gap, so every join
+    # returns zero matches and Employee_Hierarchy comes back NULL → 'Unspecified'.
+    # Rewrite the comparison to strip non-digits + leading zeros on both sides.
+    def _norm_key(col_expr):
+        return f"LTRIM(REGEXP_REPLACE(CAST({col_expr} AS STRING), r'[^0-9]', ''), '0')"
+
+    # CAST(<x>.Employee_Code AS STRING) = CAST(<y>.<id_col> AS STRING)
+    # (or the reverse order). Match either side that mentions Employee_Code.
+    join_key_re = _re.compile(
+        r"CAST\(\s*([A-Za-z_][A-Za-z0-9_]*\.Employee_Code)\s+AS\s+STRING\s*\)"
+        r"\s*=\s*"
+        r"CAST\(\s*([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\s+AS\s+STRING\s*\)",
+        _re.IGNORECASE,
+    )
+    sql = join_key_re.sub(lambda m: f"{_norm_key(m.group(1))} = {_norm_key(m.group(2))}", sql)
+    # Reverse order: CAST(employee_id...) = CAST(Employee_Code...)
+    join_key_re2 = _re.compile(
+        r"CAST\(\s*([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\s+AS\s+STRING\s*\)"
+        r"\s*=\s*"
+        r"CAST\(\s*([A-Za-z_][A-Za-z0-9_]*\.Employee_Code)\s+AS\s+STRING\s*\)",
+        _re.IGNORECASE,
+    )
+    sql = join_key_re2.sub(lambda m: f"{_norm_key(m.group(1))} = {_norm_key(m.group(2))}", sql)
+
     return sql
 
 
@@ -3169,7 +3209,7 @@ This dataset DOES NOT contain SAP/MRP concepts (plant, storage_location, materia
 - Fully qualify every table with backticks: `ai-vertex-mahad.Satori_Project.<table>`.
 - Use ONLY the columns listed above. If a column you want doesn't exist, pick a different angle or join — never invent column names.
 - SAFE_CAST every STRING-typed numeric (allocation_percent, TICKET_HOURS, col_2026_Target, Q1_ACH, Open_Pipeline) to FLOAT64 / INT64 before SUM / AVG.
-- Joins: Employee_Data.Employee_Code = Attendance_Data.employee_id = Allocation_data.employee_id = Timesheet_Data.TICKET_USER_ID.
+- Joins: Employee_Code is stored like 'E-2141'; employee_id / TICKET_USER_ID are bare numbers. Use LTRIM(REGEXP_REPLACE(CAST(<col> AS STRING), r'[^0-9]', ''), '0') on both sides. Always LEFT JOIN, never plain JOIN. Employee_Hierarchy = department.
 - For department grouping: COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified').
 - For fuzzy name match (e.g. user types "Mahad"): WHERE LOWER(employee_name) LIKE '%mahad%' (or Resource_Name on Employee_Data).
 - LIMIT every query to 200 rows max.
