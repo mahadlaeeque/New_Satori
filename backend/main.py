@@ -2454,11 +2454,19 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
 - Fully qualify every table: `ai-vertex-mahad.Satori_Project.<table>`.
 - Use ONLY the columns documented above. Never invent column names.
 - STRING-typed numerics (allocation_percent, TICKET_HOURS, all Sales_* USD/visit fields, Hist_Win_Rate decimals) — SAFE_CAST AS FLOAT64 / INT64 before any math.
+- 🚨 CASE-SENSITIVITY: Every string-comparison filter MUST wrap the column in LOWER() and lowercase the literal — these column values are stored in mixed case and a direct equals/IN filter throws away every row:
+    LOWER(e.Employee_Type) IN ('mto','permanent','probation')      ✅
+    e.Employee_Type IN ('MTO','Permanent','Probation')             ❌ NEVER
+    LOWER(a.attendance_status_text) = 'late'                       ✅
+    a.attendance_status_text = 'Late'                              ❌ NEVER
+- Active employees filter (use EXACTLY this): LOWER(e.Employee_Type) IN ('mto','permanent','probation').
+- Late filter (use EXACTLY this): LOWER(a.attendance_status_text) = 'late'.
 - Attendance %: ROUND(100.0 * SUM(is_present) / NULLIF(COUNT(*),0), 1).
 - Bench classify on MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per Employee_Code.
 - Win rate display: multiply Hist_Win_Rate by 100.
 - Department grouping: COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified') AS department.
 - Join keys: CAST-to-STRING on both sides — CAST(Employee_Code AS STRING)=CAST(employee_id AS STRING).
+- 📅 Date scope: today's date is May 2026. When the user says "last month" you mean April 2026; "this month" means May 2026. If they name a month (e.g. "March 2026"), use that exact month's first/last day.
 - {{where}} placement: the runtime substitutes either `AND field='value' AND ...` or empty string into the spot where you wrote {{where}}. Your query MUST already have its own WHERE — write the placeholder as ` {{where}}` right after your last WHERE condition (with a leading space). If no filters apply at runtime, the placeholder becomes ''.
 - LIMIT every chart query to 50 rows.
 
@@ -2779,6 +2787,62 @@ def _infer_chart_keys(columns: list, rows: list, chart_cfg: dict):
     return label_key, value_keys
 
 
+def _autofix_dashboard_sql(sql: str) -> str:
+    """Patch the most common AI mistakes before sending SQL to BigQuery.
+
+    The Gemini-generated dashboard SQL has consistently failed in three
+    predictable ways even when the prompt forbids them. Rather than
+    re-deploying every time we hit a new variant, we silently rewrite
+    them here so existing saved dashboards heal themselves on next load.
+
+    Auto-fixes applied:
+    1. `(any.)Employee_Type IN ('MTO','Permanent','Probation')` →
+       `LOWER((any.)Employee_Type) IN ('mto','permanent','probation')`.
+       The data is stored lowercase; case-sensitive IN matches throw out
+       every row.
+    2. `(any.)attendance_status_text = 'Late'` (or similar status strings)
+       → `LOWER((any.)attendance_status_text) = 'late'`.
+    3. Strip stray double-spaces around the {where} placeholder remnants.
+    """
+    if not sql:
+        return sql
+    import re as _re
+
+    # Fix 1 — Employee_Type IN ('Foo','Bar') → LOWER(Employee_Type) IN ('foo','bar')
+    def _wrap_employee_type(m):
+        prefix = m.group(1) or ""   # e.g. "e." or ""
+        values = m.group(2)
+        # Lowercase every quoted literal inside the IN list.
+        lowered = _re.sub(r"'([^']*)'", lambda mm: f"'{mm.group(1).lower()}'", values)
+        return f"LOWER({prefix}Employee_Type) IN ({lowered})"
+    sql = _re.sub(
+        r"(?<!LOWER\()(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*\.)?Employee_Type\s+IN\s*\(([^)]+)\)",
+        _wrap_employee_type, sql, flags=_re.IGNORECASE,
+    )
+    # Same for direct equality.
+    sql = _re.sub(
+        r"(?<!LOWER\()(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*\.)?Employee_Type\s*=\s*'([^']*)'",
+        lambda m: f"LOWER({m.group(1) or ''}Employee_Type) = '{m.group(2).lower()}'",
+        sql, flags=_re.IGNORECASE,
+    )
+
+    # Fix 2 — attendance_status_text = 'Foo' (or IN) → LOWER(...) = 'foo' / IN ('foo',...)
+    sql = _re.sub(
+        r"(?<!LOWER\()(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*\.)?attendance_status_text\s+IN\s*\(([^)]+)\)",
+        lambda m: f"LOWER({m.group(1) or ''}attendance_status_text) IN ({_re.sub(chr(39)+'([^'+chr(39)+']*)'+chr(39), lambda mm: chr(39)+mm.group(1).lower()+chr(39), m.group(2))})",
+        sql, flags=_re.IGNORECASE,
+    )
+    sql = _re.sub(
+        r"(?<!LOWER\()(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*\.)?attendance_status_text\s*=\s*'([^']*)'",
+        lambda m: f"LOWER({m.group(1) or ''}attendance_status_text) = '{m.group(2).lower()}'",
+        sql, flags=_re.IGNORECASE,
+    )
+
+    # Fix 3 — collapse runs of internal whitespace introduced by empty {where}
+    sql = _re.sub(r"  +", " ", sql)
+    return sql
+
+
 def _substitute_where(sql: str, user_filters: dict) -> str:
     """Substitute the `{where}` placeholder. Supports two contracts:
 
@@ -2845,6 +2909,7 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
             if sql_template.endswith("```"):
                 sql_template = sql_template[:-3].strip()
         sql = _substitute_where(sql_template, user_filters)
+        sql = _autofix_dashboard_sql(sql)
         print(f"[dashboard] {tag}: {sql[:300]}{'...' if len(sql) > 300 else ''}")
         r = bq_run_query(sql, max_rows=200)
         r["sql"] = sql  # always include the substituted SQL so the frontend can show it on error
@@ -3573,4 +3638,4 @@ else:
         return {
             "ok": True,
             "message": "Satori v2 backend up. React frontend not built into this container.",
-        }
+        }
