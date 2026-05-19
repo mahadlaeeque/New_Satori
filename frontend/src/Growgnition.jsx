@@ -1057,6 +1057,9 @@ const AgentPage = () => {
   const [voiceTranscript, setVoiceTranscript] = useState("");
   const [voiceLang, setVoiceLang] = useState("ur"); // "ur" or "en"
   const [recentQueries, setRecentQueries] = useState([]);
+  const [conversations, setConversations] = useState([]);
+  const [conversationId, setConversationId] = useState(null);
+  const [historyOpen, setHistoryOpen] = useState(true);
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
@@ -1079,6 +1082,62 @@ const AgentPage = () => {
   };
 
   useEffect(() => { fetchRecentQueries(); }, []);
+
+  // Fetch saved conversations for the chat-history sidebar.
+  const fetchConversations = async () => {
+    const token = localStorage.getItem("token");
+    if (!token) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/chat/conversations?limit=50`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setConversations(data.conversations || []);
+      }
+    } catch {}
+  };
+  useEffect(() => { fetchConversations(); }, []);
+
+  const startNewConversation = () => {
+    setMessages([]);
+    setConversationId(null);
+    setInput("");
+  };
+
+  const loadConversation = async (convId) => {
+    const token = localStorage.getItem("token");
+    try {
+      const res = await fetch(`${API_BASE}/api/chat/conversations/${convId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const loaded = (data.messages || []).map(m => ({
+        role: m.role,
+        text: m.content,
+        timestamp: new Date(m.created_at + (m.created_at?.endsWith?.('Z') ? '' : 'Z')),
+      }));
+      setMessages(loaded);
+      setConversationId(convId);
+    } catch {}
+  };
+
+  const deleteConversation = async (convId, e) => {
+    e?.stopPropagation?.();
+    if (!confirm("Delete this conversation? This can't be undone.")) return;
+    const token = localStorage.getItem("token");
+    try {
+      const res = await fetch(`${API_BASE}/api/chat/conversations/${convId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        if (convId === conversationId) startNewConversation();
+        fetchConversations();
+      }
+    } catch {}
+  };
 
   const [voiceStatus, setVoiceStatus] = useState("idle"); // idle, connecting, listening, speaking
   const wsRef = useRef(null);
@@ -1310,10 +1369,13 @@ const AgentPage = () => {
     const history = messages.map(m => ({ role: m.role, text: m.text }));
 
     try {
-      const res = await fetch(`${API_BASE}/api/chat/stream`, {
+      // Use /api/chat (non-stream) so we get conversation_id back for the
+      // chat-history sidebar. Streaming UX still feels responsive because the
+      // typing indicator stays up until the full reply arrives.
+      const res = await fetch(`${API_BASE}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-        body: JSON.stringify({ message: trimmed, history }),
+        body: JSON.stringify({ message: trimmed, history, conversation_id: conversationId }),
       });
 
       if (!res.ok) {
@@ -1323,43 +1385,12 @@ const AgentPage = () => {
         return;
       }
 
-      // Stream the response
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let assistantText = "";
+      const data = await res.json();
       setIsTyping(false);
-      setMessages(prev => [...prev, { role: "assistant", text: "", timestamp: new Date(), streaming: true }]);
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n").filter(l => l.startsWith("data: "));
-        for (const line of lines) {
-          const data = line.slice(6);
-          if (data === "[DONE]") break;
-          try {
-            const parsed = JSON.parse(data);
-            if (parsed.error) {
-              assistantText += `\nError: ${parsed.error}`;
-            } else if (parsed.text) {
-              assistantText += parsed.text;
-            }
-            setMessages(prev => {
-              const updated = [...prev];
-              updated[updated.length - 1] = { ...updated[updated.length - 1], text: assistantText };
-              return updated;
-            });
-          } catch {}
-        }
-      }
-      // Mark streaming complete
-      setMessages(prev => {
-        const updated = [...prev];
-        updated[updated.length - 1] = { ...updated[updated.length - 1], streaming: false };
-        return updated;
-      });
+      setMessages(prev => [...prev, { role: "assistant", text: data.reply || "(no reply)", timestamp: new Date() }]);
+      if (data.conversation_id) setConversationId(data.conversation_id);
       fetchRecentQueries();
+      fetchConversations();
     } catch (err) {
       setMessages(prev => [...prev, { role: "assistant", text: "Unable to connect to the AI service. Please check that the backend is running.", timestamp: new Date() }]);
       setIsTyping(false);
@@ -1612,31 +1643,69 @@ const AgentPage = () => {
           </div>
         </div>
 
-        {/* Recent Queries */}
-        <div style={{ padding: "20px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 }}>
-            <Clock size={14} color={COLORS.accent} /> Recent Queries
+        {/* Chat History */}
+        <div style={{ padding: "16px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.textPrimary, display: "flex", alignItems: "center", gap: 6 }}>
+              <Clock size={14} color={COLORS.accent} /> Chat History
+            </div>
+            <button
+              onClick={startNewConversation}
+              title="Start a new conversation"
+              style={{
+                padding: "5px 9px", borderRadius: 7, border: "none",
+                background: COLORS.accent, color: "#fff", fontSize: 11, fontWeight: 600,
+                cursor: "pointer", display: "flex", alignItems: "center", gap: 4,
+              }}
+            >
+              <Plus size={11} /> New
+            </button>
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {recentQueries.length === 0 ? (
-              <div style={{ fontSize: 11, color: COLORS.textMuted, padding: "8px 10px" }}>No queries yet — ask your first question!</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 360, overflowY: "auto" }}>
+            {conversations.length === 0 ? (
+              <div style={{ fontSize: 11, color: COLORS.textMuted, padding: "8px 10px" }}>No saved conversations yet.</div>
             ) : (
-              recentQueries.map(item => {
-                // Relative time
-                const diff = Date.now() - new Date(item.time + "Z").getTime();
+              conversations.map(conv => {
+                const isActive = conv.id === conversationId;
+                const ts = conv.updated_at || conv.created_at;
+                const diff = ts ? (Date.now() - new Date(ts + (ts.endsWith?.("Z") ? "" : "Z")).getTime()) : 0;
                 const mins = Math.floor(diff / 60000);
                 const timeAgo = mins < 1 ? "Just now" : mins < 60 ? `${mins}m ago` : mins < 1440 ? `${Math.floor(mins / 60)}h ago` : `${Math.floor(mins / 1440)}d ago`;
                 return (
-                  <button key={item.id} onClick={() => setInput(item.query)} style={{
-                    padding: "8px 10px", background: "transparent", border: "none", borderRadius: 8,
-                    cursor: "pointer", textAlign: "left", transition: "all 0.15s", width: "100%"
-                  }}
-                  onMouseEnter={e => { e.currentTarget.style.background = "#fff"; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}
+                  <div
+                    key={conv.id}
+                    onClick={() => loadConversation(conv.id)}
+                    style={{
+                      padding: "9px 10px",
+                      background: isActive ? `${COLORS.accent}1a` : "transparent",
+                      border: isActive ? `1px solid ${COLORS.accent}66` : "1px solid transparent",
+                      borderRadius: 8, cursor: "pointer", transition: "all 0.15s",
+                      display: "flex", alignItems: "center", gap: 6,
+                    }}
+                    onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = "#fff"; }}
+                    onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
                   >
-                    <div style={{ fontSize: 11, fontWeight: 500, color: COLORS.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 240, marginBottom: 2 }}>{item.query}</div>
-                    <span style={{ fontSize: 9, color: COLORS.textMuted }}>{timeAgo}</span>
-                  </button>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 11.5, fontWeight: 500, color: COLORS.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2 }}>{conv.title || "(untitled)"}</div>
+                      <div style={{ fontSize: 9.5, color: COLORS.textMuted, display: "flex", gap: 6 }}>
+                        <span>{timeAgo}</span>
+                        {conv.message_count ? <span>· {conv.message_count} msgs</span> : null}
+                      </div>
+                    </div>
+                    <button
+                      onClick={(e) => deleteConversation(conv.id, e)}
+                      title="Delete this conversation"
+                      style={{
+                        width: 22, height: 22, padding: 0, borderRadius: 6, border: "none",
+                        background: "transparent", color: COLORS.textMuted, cursor: "pointer",
+                        display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.background = "#FEE2E2"; e.currentTarget.style.color = COLORS.danger; }}
+                      onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = COLORS.textMuted; }}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
                 );
               })
             )}

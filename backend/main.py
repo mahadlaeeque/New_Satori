@@ -1323,6 +1323,7 @@ class ChatRequest(BaseModel):
     message: str
     history: list[ChatMessage] = []
     voice_mode: bool = False
+    conversation_id: int | None = None
 
 
 _CHAT_SQL_TOOL = genai.types.Tool(function_declarations=[
@@ -1768,7 +1769,11 @@ def chat(body: ChatRequest, request: Request, user: dict = Depends(get_current_u
                 ),
             )
             reply = summary_response.text or reply
-        return {"reply": reply}
+        # Persist this turn so the user can re-open the conversation later.
+        # We pass the ORIGINAL (un-redacted) user message because the chat
+        # history is the user's own data, not third-party data flow.
+        new_conv_id = _save_chat_turn(uid, body.conversation_id, body.message, reply)
+        return {"reply": reply, "conversation_id": new_conv_id}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
 
@@ -2033,6 +2038,107 @@ def get_chat_history(user: dict = Depends(get_current_user), limit: int = 20):
             for r in rows
         ]
     }
+
+
+# ── Chat conversations: list / load / delete saved chats ──
+@app.get("/api/chat/conversations")
+def list_chat_conversations(user: dict = Depends(get_current_user), limit: int = 50):
+    """List the current user's conversations, newest first."""
+    uid = int(user["sub"])
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT c.id, c.title, c.created_at, c.updated_at,
+                   (SELECT COUNT(*) FROM chat_messages m WHERE m.conversation_id = c.id) AS message_count
+            FROM chat_conversations c
+            WHERE c.user_id = ?
+            ORDER BY c.updated_at DESC
+            LIMIT ?
+            """,
+            (uid, limit),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[/api/chat/conversations] error: {e}")
+        rows = []
+    db.close()
+    return {"conversations": rows}
+
+
+@app.get("/api/chat/conversations/{conv_id}")
+def get_chat_conversation(conv_id: int, user: dict = Depends(get_current_user)):
+    """Return all messages in a conversation in chronological order."""
+    uid = int(user["sub"])
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT id, title, created_at FROM chat_conversations WHERE id = ? AND user_id = ?", (conv_id, uid))
+    conv = cur.fetchone()
+    if not conv:
+        db.close()
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    cur.execute(
+        "SELECT id, role, content, created_at FROM chat_messages WHERE conversation_id = ? ORDER BY id ASC",
+        (conv_id,),
+    )
+    msgs = [dict(r) for r in cur.fetchall()]
+    db.close()
+    return {"conversation": dict(conv), "messages": msgs}
+
+
+@app.delete("/api/chat/conversations/{conv_id}")
+def delete_chat_conversation(conv_id: int, user: dict = Depends(get_current_user)):
+    """Delete a conversation and all its messages."""
+    uid = int(user["sub"])
+    db = get_db(); cur = db.cursor()
+    cur.execute("DELETE FROM chat_messages WHERE conversation_id IN (SELECT id FROM chat_conversations WHERE id = ? AND user_id = ?)", (conv_id, uid))
+    cur.execute("DELETE FROM chat_conversations WHERE id = ? AND user_id = ?", (conv_id, uid))
+    db.commit(); db.close()
+    return {"ok": True}
+
+
+def _save_chat_turn(user_id: int, conv_id, user_message: str, ai_reply: str) -> int:
+    """Persist a (user, assistant) turn to chat_conversations + chat_messages.
+    If conv_id is None or 0, creates a fresh conversation. Returns the
+    conv_id used (so the frontend can adopt it for subsequent turns)."""
+    from database import USE_POSTGRES
+    db = get_db(); cur = db.cursor()
+    try:
+        if not conv_id:
+            # Build a 60-char title from the first user message.
+            title = (user_message or "New conversation").strip().split("\n")[0][:60]
+            if USE_POSTGRES:
+                cur.execute(
+                    "INSERT INTO chat_conversations (user_id, title) VALUES (?, ?) RETURNING id",
+                    (user_id, title),
+                )
+                row = cur.fetchone()
+                conv_id = row["id"] if isinstance(row, dict) else row[0]
+            else:
+                cur.execute(
+                    "INSERT INTO chat_conversations (user_id, title) VALUES (?, ?)",
+                    (user_id, title),
+                )
+                conv_id = cur.lastrowid
+        else:
+            # Touch updated_at so list ordering reflects most-recent activity.
+            cur.execute(
+                "UPDATE chat_conversations SET updated_at = " + ("NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP") + " WHERE id = ? AND user_id = ?",
+                (conv_id, user_id),
+            )
+        cur.execute(
+            "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, ?, ?)",
+            (conv_id, "user", user_message or ""),
+        )
+        cur.execute(
+            "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, ?, ?)",
+            (conv_id, "assistant", ai_reply or ""),
+        )
+        db.commit()
+    except Exception as e:
+        print(f"[_save_chat_turn] error: {e}")
+    finally:
+        db.close()
+    return conv_id
 
 
 @app.get("/api/tables")
@@ -4152,6 +4258,10 @@ def health_check():
     }
 
 
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+_FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
