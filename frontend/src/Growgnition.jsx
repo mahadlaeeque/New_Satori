@@ -1729,8 +1729,23 @@ const AgentPage = () => {
       });
 
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: "Request failed" }));
-        setMessages(prev => [...prev, { role: "assistant", text: `Error: ${err.detail || "Something went wrong"}`, timestamp: new Date() }]);
+        // Surface the real failure to the user so debug doesn't need server
+        // logs. Reads status + content-type + first few hundred chars of
+        // body so a 502/HTML page from Cloud Run shows up clearly instead
+        // of disguising as "Request failed".
+        let detail = `HTTP ${res.status}`;
+        try {
+          const ct = res.headers.get("content-type") || "";
+          if (ct.includes("application/json")) {
+            const err = await res.json();
+            detail = err?.detail || JSON.stringify(err).slice(0, 400) || detail;
+          } else {
+            const txt = await res.text();
+            detail = (txt || "(empty)").slice(0, 400);
+          }
+        } catch (e) { detail += " (could not read body)"; }
+        console.error("[/api/chat]", res.status, detail);
+        setMessages(prev => [...prev, { role: "assistant", text: `Error (${res.status}): ${detail}`, timestamp: new Date() }]);
         setIsTyping(false);
         return;
       }
@@ -1742,7 +1757,8 @@ const AgentPage = () => {
       fetchRecentQueries();
       fetchConversations();
     } catch (err) {
-      setMessages(prev => [...prev, { role: "assistant", text: "Unable to connect to the AI service. Please check that the backend is running.", timestamp: new Date() }]);
+      console.error("[/api/chat] network error", err);
+      setMessages(prev => [...prev, { role: "assistant", text: `Network error: ${err?.message || "fetch failed"}`, timestamp: new Date() }]);
       setIsTyping(false);
     }
   };
@@ -8491,7 +8507,42 @@ export default function App() {
   });
   useEffect(() => {
     try { localStorage.setItem("satori_dark", darkMode ? "1" : "0"); } catch {}
-    document.documentElement.setAttribute("data-satori-theme", darkMode ? "dark" : "light");
+    const root = document.documentElement;
+    root.setAttribute("data-satori-theme", darkMode ? "dark" : "light");
+    // Belt-and-braces: also set the CSS variables directly on the root style
+    // declaration so even if our injected <style> CSS doesn't apply for some
+    // reason (e.g. cached old build, specificity issue), the variables still
+    // resolve. var(--c-…) inline styles will pick these up.
+    const tokens = darkMode ? {
+      "--c-primary":         "#F1F5F9",
+      "--c-primary-light":   "#CBD5E1",
+      "--c-primary-dark":    "#FFFFFF",
+      "--c-surface":         "#1E293B",
+      "--c-surface-alt":     "#0F172A",
+      "--c-border":          "#334155",
+      "--c-text-primary":    "#F1F5F9",
+      "--c-text-secondary":  "#CBD5E1",
+      "--c-text-muted":      "#94A3B8",
+      "--c-page-bg":         "#0B1220",
+      "--c-input-bg":        "#1E293B",
+    } : {
+      "--c-primary":         "#333333",
+      "--c-primary-light":   "#676767",
+      "--c-primary-dark":    "#1a1a1a",
+      "--c-surface":         "#FFFFFF",
+      "--c-surface-alt":     "#F8FAF5",
+      "--c-border":          "#E6E7E8",
+      "--c-text-primary":    "#333333",
+      "--c-text-secondary":  "#676767",
+      "--c-text-muted":      "#B3B2B3",
+      "--c-page-bg":         "#F7F9FA",
+      "--c-input-bg":        "#FFFFFF",
+    };
+    for (const [k, v] of Object.entries(tokens)) root.style.setProperty(k, v);
+    // Final fallback: directly mutate the body background + color so the
+    // page never gets stuck on white when dark mode is on.
+    document.body.style.background = darkMode ? "#0B1220" : "";
+    document.body.style.color      = darkMode ? "#F1F5F9" : "";
   }, [darkMode]);
   // Shown on the login page when redirected due to token expiry
   const [sessionExpiredMsg, setSessionExpiredMsg] = useState("");
