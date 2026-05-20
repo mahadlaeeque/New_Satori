@@ -4813,6 +4813,51 @@ const DashboardRenderer = ({ spec, onBack }) => {
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState({ kpis: [], charts: [], filterOptions: {} });
   const [filterValues, setFilterValues] = useState({});
+  // Drill-down modal state. `drill` is null when closed; otherwise carries the
+  // chart metadata + clicked value + (eventually) fetched rows/columns.
+  const [drill, setDrill] = useState(null);
+
+  // Open drill-down modal for a clicked chart segment. We fetch the per-row
+  // breakdown from the backend, which uses Gemini Flash to write the SQL.
+  const openDrill = useCallback(async (chart, clickedLabel) => {
+    if (!chart || clickedLabel == null || clickedLabel === "") return;
+    const token = localStorage.getItem("token");
+    const base = import.meta.env.VITE_API_BASE || "";
+    setDrill({
+      loading: true,
+      title: `${chart.title} — ${clickedLabel}`,
+      label: clickedLabel,
+      parentTitle: chart.title,
+      rows: [],
+      columns: [],
+    });
+    try {
+      const res = await fetch(`${base}/api/dashboard/drill`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          parent_sql:   chart.sql,
+          parent_title: chart.title,
+          parent_type:  chart.type,
+          label_key:    chart.labelKey,
+          label_value:  clickedLabel,
+          value_keys:   chart.valueKeys,
+        }),
+      });
+      const result = await res.json();
+      setDrill((prev) => prev && ({
+        ...prev,
+        loading: false,
+        rows: result.rows || [],
+        columns: result.columns || [],
+        error: result.error || null,
+        sql: result.sql || "",
+      }));
+    } catch (err) {
+      setDrill((prev) => prev && ({ ...prev, loading: false, error: String(err) }));
+    }
+  }, []);
+  const closeDrill = useCallback(() => setDrill(null), []);
 
   const ICON_MAP = { Package, Layers, Users, FileText, DollarSign, TrendingUp, Factory, Globe, Truck, Warehouse };
 
@@ -4929,6 +4974,13 @@ const DashboardRenderer = ({ spec, onBack }) => {
       );
     }
 
+    // Hint shown under every drillable chart so users know to click.
+    const drillHint = (
+      <div style={{ fontSize: 11, color: COLORS.textMuted, textAlign: "center", marginTop: 4 }}>
+        Click any {type === "pie" ? "slice" : type === "line" ? "point" : "bar"} to see the breakdown
+      </div>
+    );
+
     if (type === "pie") {
       const pieData = compactPieData(chartData, labelKey, valueKeys[0]);
       return (
@@ -4943,6 +4995,8 @@ const DashboardRenderer = ({ spec, onBack }) => {
                 cy="50%"
                 outerRadius={100}
                 label={(entry) => clipLabel(entry?.[labelKey], 18)}
+                onClick={(d) => openDrill(chart, d?.[labelKey] ?? d?.name)}
+                style={{ cursor: "pointer" }}
               >
                 {pieData.map((_, i) => <Cell key={i} fill={colors[i % colors.length]} />)}
               </Pie>
@@ -4950,6 +5004,7 @@ const DashboardRenderer = ({ spec, onBack }) => {
               <Legend />
             </PieChart>
           </ResponsiveContainer>
+          {drillHint}
         </ChartCard>
       );
     }
@@ -4958,22 +5013,36 @@ const DashboardRenderer = ({ spec, onBack }) => {
       return (
         <ChartCard key={idx} title={title}>
           <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={chartData}>
+            <LineChart
+              data={chartData}
+              onClick={(state) => {
+                const lbl = state?.activeLabel ?? state?.activePayload?.[0]?.payload?.[labelKey];
+                if (lbl != null) openDrill(chart, lbl);
+              }}
+              style={{ cursor: "pointer" }}
+            >
               <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
               <XAxis dataKey={labelKey} tick={{ fontSize: 11 }} />
               <YAxis tick={{ fontSize: 11 }} tickFormatter={fmtAxisShort} width={56} />
               <Tooltip formatter={(v) => fmtTooltip(v)} />
               <Legend />
               {valueKeys.map((vk, vi) => (
-                <Line key={vk} type="monotone" dataKey={vk} stroke={colors[vi % colors.length]} strokeWidth={2} dot={{ r: 3 }} />
+                <Line key={vk} type="monotone" dataKey={vk} stroke={colors[vi % colors.length]} strokeWidth={2} dot={{ r: 3 }} activeDot={{ r: 6, cursor: "pointer" }} />
               ))}
             </LineChart>
           </ResponsiveContainer>
+          {drillHint}
         </ChartCard>
       );
     }
 
     // Bar chart (default)
+    const handleBarClick = (payload) => {
+      // Recharts fires onClick on a Bar with the data point as the argument.
+      // It contains the full row, so we can pull the labelKey value out.
+      const lbl = payload?.[labelKey] ?? payload?.payload?.[labelKey];
+      if (lbl != null) openDrill(chart, lbl);
+    };
     const isHorizontal = variant === "horizontal";
     // Horizontal bars deserve more height than vertical ones — one bar per
     // row, ~28px each, with a floor so a 3-bar chart still has room.
@@ -5015,14 +5084,22 @@ const DashboardRenderer = ({ spec, onBack }) => {
               // bar charts don't end up looking identical (all-green vs
               // all-green). With multiple series we keep one color per
               // series so the legend stays meaningful.
-              <Bar key={vk} dataKey={vk} fill={colors[vi % colors.length]} radius={[4, 4, 0, 0]}>
+              <Bar
+                key={vk}
+                dataKey={vk}
+                fill={colors[vi % colors.length]}
+                radius={[4, 4, 0, 0]}
+                onClick={handleBarClick}
+                style={{ cursor: "pointer" }}
+              >
                 {valueKeys.length === 1 && (chartData || []).map((_, i) => (
-                  <Cell key={`c-${i}`} fill={colors[i % colors.length]} />
+                  <Cell key={`c-${i}`} fill={colors[i % colors.length]} cursor="pointer" />
                 ))}
               </Bar>
             ))}
           </BarChart>
         </ResponsiveContainer>
+        {drillHint}
       </ChartCard>
     );
   };
@@ -5178,6 +5255,107 @@ const DashboardRenderer = ({ spec, onBack }) => {
             </div>
           )}
         </>
+      )}
+
+      {/* Drill-down modal — shows row-level breakdown for clicked chart segment */}
+      {drill && (
+        <div
+          onClick={closeDrill}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 1000, padding: 24,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: COLORS.surface, borderRadius: 16, width: "min(960px, 100%)",
+              maxHeight: "85vh", display: "flex", flexDirection: "column",
+              boxShadow: "0 16px 48px rgba(0,0,0,0.25)",
+              border: `1px solid ${COLORS.border}`,
+            }}
+          >
+            {/* Header */}
+            <div style={{
+              padding: "16px 20px", borderBottom: `1px solid ${COLORS.border}`,
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+            }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.textPrimary }}>
+                  {drill.title}
+                </div>
+                <div style={{ fontSize: 12, color: COLORS.textMuted, marginTop: 2 }}>
+                  Row-level breakdown
+                </div>
+              </div>
+              <button
+                onClick={closeDrill}
+                style={{
+                  background: "none", border: "none", cursor: "pointer",
+                  color: COLORS.textSecondary, fontSize: 22, lineHeight: 1, padding: 4,
+                }}
+                title="Close"
+              >×</button>
+            </div>
+            {/* Body */}
+            <div style={{ padding: 20, overflow: "auto", flex: 1 }}>
+              {drill.loading ? (
+                <div style={{ textAlign: "center", padding: 40, color: COLORS.textSecondary }}>
+                  Loading breakdown…
+                </div>
+              ) : drill.error ? (
+                <div style={{ padding: 16, background: "rgba(239,68,68,0.08)", borderRadius: 8, color: COLORS.danger, fontSize: 13 }}>
+                  <div style={{ fontWeight: 600, marginBottom: 4 }}>Couldn't generate breakdown</div>
+                  <div style={{ fontFamily: "monospace", fontSize: 12 }}>{drill.error}</div>
+                </div>
+              ) : (drill.rows?.length || 0) === 0 ? (
+                <div style={{ textAlign: "center", padding: 40, color: COLORS.textSecondary, fontSize: 13 }}>
+                  No detail rows for this category.
+                </div>
+              ) : (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ borderBottom: `2px solid ${COLORS.border}` }}>
+                        {drill.columns.map((c) => (
+                          <th key={c} style={{
+                            textAlign: "left", padding: "10px 12px", fontSize: 12,
+                            fontWeight: 600, color: COLORS.textSecondary,
+                            textTransform: "uppercase", letterSpacing: 0.4,
+                            background: COLORS.surfaceAlt,
+                          }}>{c.replace(/_/g, " ")}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {drill.rows.map((row, ri) => (
+                        <tr key={ri} style={{ borderBottom: `1px solid ${COLORS.border}` }}>
+                          {drill.columns.map((c) => {
+                            const v = row[c];
+                            const isNum = typeof v === "number" || (!isNaN(Number(v)) && v !== null && v !== "");
+                            return (
+                              <td key={c} style={{
+                                padding: "10px 12px", color: COLORS.textPrimary,
+                                textAlign: isNum ? "right" : "left",
+                                fontVariantNumeric: isNum ? "tabular-nums" : undefined,
+                              }}>
+                                {v == null ? "—" : (isNum ? Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(v))}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div style={{ marginTop: 12, fontSize: 11, color: COLORS.textMuted, textAlign: "right" }}>
+                    {drill.rows.length} {drill.rows.length === 1 ? "row" : "rows"}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

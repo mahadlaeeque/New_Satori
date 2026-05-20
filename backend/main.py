@@ -3695,6 +3695,180 @@ _REPAIR_PROMPT = """You are a BigQuery SQL repair assistant. The query below fai
 - Output ONLY raw SQL — one statement, no explanation."""
 
 
+_DRILLDOWN_PROMPT = """You generate BigQuery DRILL-DOWN SQL for the TMC Satori warehouse.
+
+GOAL: The user clicked one category on a dashboard chart. Show them the row-level
+detail behind that single category so they understand WHO/WHAT makes up the number.
+
+═══ TMC SCHEMA ═══
+- `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, Employee_Position, Employee_Hierarchy (department), Employee_Location, Employee_Type, Employee_Status.
+- `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), employee_id (INT64), employee_name (STRING), checkin_time, checkout_time, attendance_status_text, is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 0/1).
+- `{BQ_FULL}.Allocation_data` — project_id, employee_id (STRING), allocation_percent (STRING), emp_competency, Flag, Date.
+- `{BQ_FULL}.Timesheet_Data` — TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (INT64 YYYYMMDD).
+- `{BQ_FULL}.Sales_AM_Scorecard` — VP, AM, Role, City, col_2026_Target (STRING), Q1_ACH (STRING), Open_Pipeline (STRING), Hist_Win_Rate (FLOAT64 — NEVER REPLACE).
+- `{BQ_FULL}.Sales_Plan_vs_Pipeline` — AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio (FLOAT64 — NEVER REPLACE), Status, Action.
+- `{BQ_FULL}.Sales_Pipeline_Health` — Salesperson, Open_Pipeline, Open_Deals, Win_Rate_by.
+- `{BQ_FULL}.Sales_Accounts` — VP, AM, Location, Account, Tier, Dormant, Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits.
+
+═══ HARD RULES ═══
+- Active employees only: LOWER(Employee_Type) IN ('mto','permanent','probation').
+- Working days only for attendance: AND is_weekend=0 AND is_holiday=0.
+- Employee → Attendance join: UPPER(TRIM(Resource_Name)) = UPPER(TRIM(employee_name)).
+- NEVER wrap Coverage_Ratio/Hist_Win_Rate/Open_Deals/Win_Rate_by/is_* in REPLACE() — they're already numeric.
+- LIMIT 200 rows.
+- Output ONLY raw SQL — one SELECT statement, no markdown, no commentary.
+
+═══ DRILL-DOWN RECIPES ═══
+When the parent chart is grouped by DEPARTMENT (Employee_Hierarchy) and the user clicks department='Qlik':
+  SELECT
+    e.Resource_Name AS employee,
+    e.Employee_Position AS position,
+    SUM(a.is_present)  AS present_days,
+    SUM(a.is_absent)   AS absent_days,
+    SUM(a.is_on_leave) AS leave_days,
+    ROUND(100.0*SUM(a.is_present)/NULLIF(SUM(CASE WHEN a.is_weekend=0 AND a.is_holiday=0 THEN 1 ELSE 0 END),0),1) AS attendance_pct
+  FROM `{BQ_FULL}.Employee_Data` e
+  LEFT JOIN `{BQ_FULL}.Attendance_Data` a
+    ON UPPER(TRIM(e.Resource_Name)) = UPPER(TRIM(a.employee_name))
+   AND a.is_weekend=0 AND a.is_holiday=0
+   AND a.attendance_date BETWEEN <parent_start> AND <parent_end>
+  WHERE COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''),'Unspecified') = 'Qlik'
+    AND LOWER(e.Employee_Type) IN ('mto','permanent','probation')
+  GROUP BY employee, position
+  ORDER BY attendance_pct DESC
+  LIMIT 200
+
+When the parent is grouped by AM (Sales_AM_Scorecard) and the user clicks AM='Ali Tareen':
+  SELECT
+    a.Account, a.Tier, a.Location,
+    SAFE_CAST(a.Q1_Visits AS INT64) AS q1_visits,
+    a.Dormant
+  FROM `{BQ_FULL}.Sales_Accounts` a
+  WHERE LOWER(a.AM) = 'ali tareen'
+  ORDER BY q1_visits DESC NULLS LAST
+  LIMIT 200
+
+When the parent is a daily-trend LINE chart and the user clicks a specific date, e.g. 2026-03-12:
+  SELECT employee_name, attendance_status_text, checkin_time, checkout_time
+  FROM `{BQ_FULL}.Attendance_Data`
+  WHERE attendance_date = DATE '2026-03-12' AND is_weekend=0 AND is_holiday=0
+  ORDER BY attendance_status_text, employee_name
+  LIMIT 200
+
+GENERAL APPROACH:
+1. Identify the dimension the parent chart was grouped on (department, AM, date, city, etc.).
+2. Identify the matching column in the parent's source table.
+3. Write a row-level SELECT that returns the underlying entities (employees, accounts, deals, days)
+   that contributed to the clicked category, plus 2-4 useful metrics.
+4. Apply the same active-employees / working-days defaults the parent dashboard uses.
+5. Order by the most informative metric DESC, LIMIT 200."""
+
+
+def _generate_drilldown_sql(parent_sql: str, parent_title: str, parent_type: str,
+                            label_key: str, label_value, value_keys: list) -> str:
+    """Ask Gemini Flash to produce a row-level breakdown for one clicked
+    category of a chart. Returns the SQL string, or "" on failure."""
+    if not parent_sql or label_value in (None, ""):
+        return ""
+    try:
+        client = get_genai_client()
+        user_msg = (
+            f"Parent chart title: {parent_title or '(untitled)'}\n"
+            f"Parent chart type: {parent_type or 'bar'}\n"
+            f"Parent group-by column (labelKey): {label_key}\n"
+            f"Parent metric columns (valueKeys): {', '.join(value_keys or [])}\n"
+            f"User clicked the value: {label_value!r}\n\n"
+            f"Parent SQL:\n{parent_sql}\n\n"
+            f"Generate the row-level drill-down SQL. Output ONLY the SQL."
+        )
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
+            config=genai.types.GenerateContentConfig(
+                system_instruction=_DRILLDOWN_PROMPT.format(BQ_FULL=BQ_FULL),
+                temperature=0.1,
+                max_output_tokens=1024,
+            ),
+        )
+        out = (resp.text or "").strip()
+        if out.startswith("```"):
+            out = out.strip("`")
+            if out.lower().startswith("sql"):
+                out = out[3:].strip()
+            if out.endswith("```"):
+                out = out[:-3].strip()
+        if not out.upper().lstrip().startswith(("SELECT", "WITH")):
+            return ""
+        return out
+    except Exception as e:
+        print(f"[drilldown] gen failed: {e}")
+        return ""
+
+
+@app.post("/api/dashboard/drill")
+def dashboard_drill(body: dict, user: dict = Depends(get_current_user)):
+    """Generate + run a row-level drill-down for one clicked chart category.
+
+    Body: {
+      parent_sql:    "<the chart's SQL>",
+      parent_title:  "Attendance Rate by Department",
+      parent_type:   "bar" | "line" | "pie",
+      label_key:     "department",
+      label_value:   "Qlik",
+      value_keys:    ["attendance_pct"]
+    }
+    Returns: {
+      title:   "<auto-generated drill title>",
+      sql:     "<the SQL we ran>",
+      columns: [...],
+      rows:    [...],
+      error?:  "<bq error if any>"
+    }
+    """
+    parent_sql = (body.get("parent_sql") or "").strip()
+    parent_title = (body.get("parent_title") or "").strip()
+    parent_type = (body.get("parent_type") or "bar").strip()
+    label_key = (body.get("label_key") or "").strip()
+    label_value = body.get("label_value")
+    value_keys = body.get("value_keys") or []
+
+    if not parent_sql or label_value in (None, ""):
+        return {"error": "Missing parent SQL or clicked value.", "rows": [], "columns": []}
+
+    sql = _generate_drilldown_sql(parent_sql, parent_title, parent_type, label_key, label_value, value_keys)
+    if not sql:
+        return {"error": "Could not generate a drill-down query for this chart.", "rows": [], "columns": []}
+
+    # Same safety net as the dashboard runner
+    sql = normalize_bq_project(sql)
+    sql = _autofix_dashboard_sql(sql)
+    print(f"[drilldown] running: {sql[:300]}{'...' if len(sql) > 300 else ''}")
+
+    r = bq_run_query(sql, max_rows=200)
+    drill_title = f"{parent_title} — {label_value}" if parent_title else f"Breakdown for {label_value}"
+    out = {
+        "title":   drill_title,
+        "sql":     sql,
+        "columns": r.get("columns") or [],
+        "rows":    r.get("rows") or [],
+    }
+    if "error" in r:
+        # One repair attempt
+        repaired = _repair_widget_sql(sql, r["error"], {"kind": "drilldown", "title": drill_title})
+        if repaired and repaired.strip() and repaired.strip() != sql.strip():
+            repaired = normalize_bq_project(repaired)
+            repaired = _autofix_dashboard_sql(repaired)
+            r2 = bq_run_query(repaired, max_rows=200)
+            if "error" not in r2:
+                out["sql"]     = repaired
+                out["columns"] = r2.get("columns") or []
+                out["rows"]    = r2.get("rows") or []
+                out["recovered"] = True
+                return out
+        out["error"] = r["error"]
+    return out
+
+
 def _repair_widget_sql(failed_sql: str, error_msg: str, widget_meta: dict) -> str:
     """Ask Gemini Flash to rewrite a single widget's SQL given the BQ error.
 
