@@ -1986,17 +1986,7 @@ const AgentPage = () => {
             }}>
               <Send size={18} color="#fff" />
             </button>
-            {/* Voice agent button */}
-            <button onClick={startVoiceSession} title="Start voice agent" style={{
-              width: 46, height: 46, borderRadius: 14, border: `1px solid ${COLORS.border}`, cursor: "pointer",
-              background: COLORS.surface, display: "flex", alignItems: "center", justifyContent: "center",
-              transition: "all 0.2s", flexShrink: 0, alignSelf: "flex-end", marginBottom: 0
-            }}
-            onMouseEnter={e => { e.currentTarget.style.borderColor = COLORS.accent; e.currentTarget.style.background = "#F8FAF5"; }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = COLORS.border; e.currentTarget.style.background = "#fff"; }}
-            >
-              <AudioLines size={18} color={COLORS.textSecondary} />
-            </button>
+            {/* (Voice agent button removed — the floating mic FAB at bottom-right handles this now.) */}
           </div>
         </div>
 
