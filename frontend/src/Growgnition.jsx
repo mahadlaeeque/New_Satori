@@ -8654,6 +8654,122 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           color: var(--c-text-primary) !important;
           border-color: var(--c-border) !important;
         }
+        html[data-satori-theme="dark"] input::placeholder,
+        html[data-satori-theme="dark"] textarea::placeholder {
+          color: var(--c-text-muted) !important;
+          opacity: 0.7;
+        }
+
+        /* ─── Recharts dark-mode polish ──────────────────────────────────
+           Default recharts tooltips have a white background that glows on
+           a dark page, and the cartesian grid uses #F1F5F9 which is barely
+           visible. Override both. */
+        html[data-satori-theme="dark"] .recharts-default-tooltip {
+          background: var(--c-surface) !important;
+          border: 1px solid var(--c-border) !important;
+          color: var(--c-text-primary) !important;
+          border-radius: 12px !important;
+        }
+        html[data-satori-theme="dark"] .recharts-tooltip-wrapper * {
+          color: var(--c-text-primary) !important;
+        }
+        html[data-satori-theme="dark"] .recharts-cartesian-grid line,
+        html[data-satori-theme="dark"] .recharts-cartesian-grid-horizontal line,
+        html[data-satori-theme="dark"] .recharts-cartesian-grid-vertical line {
+          stroke: var(--c-border) !important;
+          stroke-opacity: 0.6;
+        }
+        html[data-satori-theme="dark"] .recharts-cartesian-axis-line,
+        html[data-satori-theme="dark"] .recharts-cartesian-axis-tick-line {
+          stroke: var(--c-border) !important;
+        }
+        html[data-satori-theme="dark"] .recharts-legend-item-text {
+          color: var(--c-text-secondary) !important;
+          fill: var(--c-text-secondary) !important;
+        }
+
+        /* ─── Status pill chips (KPI cards) ──────────────────────────────
+           Light up/down indicators are tinted on #ECFDF5 / #FEF2F2 which
+           glow white against a dark page. Mute them in dark mode. */
+        html[data-satori-theme="dark"] [style*="background: #ECFDF5"],
+        html[data-satori-theme="dark"] [style*="background:#ECFDF5"],
+        html[data-satori-theme="dark"] [style*="background: rgb(236, 253, 245)"] {
+          background: rgba(138,196,65,0.15) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: #FEF2F2"],
+        html[data-satori-theme="dark"] [style*="background:#FEF2F2"],
+        html[data-satori-theme="dark"] [style*="background: rgb(254, 242, 242)"] {
+          background: rgba(239,68,68,0.18) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: #FEF3C7"],
+        html[data-satori-theme="dark"] [style*="background:#FEF3C7"] {
+          background: rgba(245,158,11,0.18) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: #DBEAFE"],
+        html[data-satori-theme="dark"] [style*="background:#DBEAFE"] {
+          background: rgba(10,95,137,0.22) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: #EFF6FF"],
+        html[data-satori-theme="dark"] [style*="background:#EFF6FF"] {
+          background: rgba(10,95,137,0.18) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: #F3F4F6"],
+        html[data-satori-theme="dark"] [style*="background:#F3F4F6"],
+        html[data-satori-theme="dark"] [style*="background: rgb(243, 244, 246)"] {
+          background: var(--c-surface-alt) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: #FAFAFA"],
+        html[data-satori-theme="dark"] [style*="background:#FAFAFA"],
+        html[data-satori-theme="dark"] [style*="background: rgb(250, 250, 250)"] {
+          background: var(--c-surface-alt) !important;
+        }
+
+        /* Tables — alternating row backgrounds + th/td borders */
+        html[data-satori-theme="dark"] table { color: var(--c-text-primary); }
+        html[data-satori-theme="dark"] thead th {
+          background: var(--c-surface-alt) !important;
+          color: var(--c-text-secondary) !important;
+          border-bottom: 1px solid var(--c-border) !important;
+        }
+        html[data-satori-theme="dark"] tbody td,
+        html[data-satori-theme="dark"] tbody th {
+          border-bottom: 1px solid var(--c-border) !important;
+        }
+        html[data-satori-theme="dark"] tbody tr:nth-child(even) {
+          background: rgba(255,255,255,0.02);
+        }
+
+        /* Buttons that rely on the lightest brand tints */
+        html[data-satori-theme="dark"] [style*="background: rgba(138, 196, 65, 0.1)"],
+        html[data-satori-theme="dark"] [style*="background:rgba(138,196,65,0.1)"] {
+          background: rgba(138,196,65,0.22) !important;
+        }
+
+        /* Soft shadows look invisible on dark — bump them */
+        html[data-satori-theme="dark"] [style*="box-shadow: 0 1px 3px rgba(0,0,0,0.06)"],
+        html[data-satori-theme="dark"] [style*="box-shadow:0 1px 3px rgba(0,0,0,0.06)"] {
+          box-shadow: 0 1px 3px rgba(0,0,0,0.35), 0 1px 2px rgba(0,0,0,0.25) !important;
+        }
+        html[data-satori-theme="dark"] [style*="box-shadow: 0 4px 12px rgba(0,0,0,0.08)"] {
+          box-shadow: 0 4px 12px rgba(0,0,0,0.45) !important;
+        }
+
+        /* Catch lavender / cream tints used as soft section backgrounds */
+        html[data-satori-theme="dark"] [style*="background: #F5F3FF"],
+        html[data-satori-theme="dark"] [style*="background:#F5F3FF"],
+        html[data-satori-theme="dark"] [style*="background: #EEF2FF"],
+        html[data-satori-theme="dark"] [style*="background:#EEF2FF"],
+        html[data-satori-theme="dark"] [style*="background: #FFFBEB"],
+        html[data-satori-theme="dark"] [style*="background:#FFFBEB"] {
+          background: var(--c-surface-alt) !important;
+        }
+
+        /* Modal / dropdown / floating panel backdrops */
+        html[data-satori-theme="dark"] [style*="background: rgba(0, 0, 0, 0.5)"],
+        html[data-satori-theme="dark"] [style*="background: rgba(0,0,0,0.5)"],
+        html[data-satori-theme="dark"] [style*="background:rgba(0,0,0,0.5)"] {
+          background: rgba(0, 0, 0, 0.72) !important;
+        }
       `}</style>
     </div>
   );

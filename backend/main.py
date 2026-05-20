@@ -20,6 +20,39 @@ from dotenv import load_dotenv
 import os, json, asyncio, base64, re
 from datetime import datetime, timedelta
 
+# ─── BigQuery target (project + dataset) ──────────────────────────────────────
+# Single source of truth for which warehouse we're querying. Defaults preserve
+# the original TMC dataset so the existing deploy keeps working; overriding
+# either env var lets us point the same code at the migrated capability-agent-
+# prod project without touching prompts or autofix patterns.
+BQ_PROJECT  = os.environ.get("VERTEX_PROJECT",  "ai-vertex-mahad")
+BQ_DATASET  = os.environ.get("VERTEX_DATASET",  "Satori_Project")
+BQ_FULL     = f"{BQ_PROJECT}.{BQ_DATASET}"          # 'ai-vertex-mahad.Satori_Project'
+BQ_BACKTICK = f"`{BQ_FULL}`"                         # for SQL embedding
+
+
+def normalize_bq_project(sql: str) -> str:
+    """Rewrite legacy project names in user-supplied SQL so saved configs
+    keep working after a project migration. Maps the original TMC project
+    'ai-vertex-mahad' to whatever BQ_PROJECT is set to. Idempotent — no-op
+    when BQ_PROJECT is still the legacy default."""
+    if not sql:
+        return sql
+    if BQ_PROJECT != "ai-vertex-mahad":
+        sql = sql.replace("ai-vertex-mahad.Satori_Project",
+                          f"{BQ_PROJECT}.{BQ_DATASET}")
+        sql = sql.replace("`ai-vertex-mahad`.`Satori_Project`",
+                          f"`{BQ_PROJECT}`.`{BQ_DATASET}`")
+    return sql
+
+
+def sql_table(table_name: str) -> str:
+    """Return the fully-qualified backtick-wrapped table reference for SQL
+    embedding, using the configured BQ_PROJECT/BQ_DATASET. Use whenever code
+    builds a SQL string at runtime so the migration to capability-agent-prod
+    is a single env-var flip."""
+    return f"`{BQ_FULL}.{table_name}`"
+
 # ── Initialise ──
 load_dotenv()
 init_db()
@@ -1346,7 +1379,7 @@ User: "Who are the top absentees this month?"
 
 [F] DEPARTMENT-LEVEL ATTENDANCE
 User: "Attendance rate by department for March?"
-  → run_sql: SELECT COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''),'Unspecified') AS dept, ROUND(100.0*SUM(a.is_present)/NULLIF(COUNT(*),0),1) AS rate FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` a LEFT JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` e ON UPPER(TRIM(e.Resource_Name))=UPPER(TRIM(a.employee_name)) WHERE a.attendance_date BETWEEN DATE '2026-03-01' AND DATE '2026-03-31' GROUP BY dept ORDER BY rate DESC LIMIT 10
+  → run_sql: SELECT COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''),'Unspecified') AS dept, ROUND(100.0*SUM(a.is_present)/NULLIF(COUNT(*),0),1) AS rate FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` a LEFT JOIN `{BQ_FULL}.Employee_Data` e ON UPPER(TRIM(e.Resource_Name))=UPPER(TRIM(a.employee_name)) WHERE a.attendance_date BETWEEN DATE '2026-03-01' AND DATE '2026-03-31' GROUP BY dept ORDER BY rate DESC LIMIT 10
   → Speak: "SAP Finance leads March at 94 percent, SAP Supply Chain at 91, Professional Services at 89, KPO at 85, and Emerging Tech at 82."
 
 [G] BENCH SIZE
@@ -2986,7 +3019,10 @@ def voice_query(body: dict, user: dict = Depends(get_current_user)):
     if any(w in up.split() for w in forbidden):
         return {"result": "Write statements are not allowed."}
     # Reuse the dashboard SQL autofix so the voice agent gets the same healing
-    # (LOWER() filters, name-based joins, no fake 'Late', Flag fixes).
+    # (LOWER() filters, name-based joins, no fake 'Late', Flag fixes). Also
+    # rewrite legacy project names so SQL the model generates with the wrong
+    # project still works.
+    sql = normalize_bq_project(sql)
     sql = _autofix_dashboard_sql(sql)
     print(f"[voice] {sql[:240]}{'...' if len(sql) > 240 else ''}")
     r = bq_run_query(sql, max_rows=30)
@@ -3329,9 +3365,9 @@ def _autofix_dashboard_sql(sql: str) -> str:
             else:
                 sql = sql.replace(predicate, "")
             new_on = on_clause + " AND " + predicate_body
-            sql = sql.replace(m.group(0), "LEFT JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` " + alias + " ON " + new_on)
+            sql = sql.replace(m.group(0), f"LEFT JOIN `{BQ_FULL}.Employee_Data` " + alias + " ON " + new_on)
         else:
-            sql = sql.replace(m.group(0), "LEFT JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` " + alias + " ON " + on_clause)
+            sql = sql.replace(m.group(0), f"LEFT JOIN `{BQ_FULL}.Employee_Data` " + alias + " ON " + on_clause)
 
     # Fix 5 — Normalize the Employee_Code ↔ employee_id join key.
     # The two columns are stored in different formats: Employee_Code looks like
@@ -3525,6 +3561,7 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
             if sql_template.endswith("```"):
                 sql_template = sql_template[:-3].strip()
         sql = _substitute_where(sql_template, user_filters)
+        sql = normalize_bq_project(sql)
         sql = _autofix_dashboard_sql(sql)
         print(f"[dashboard] {tag}: {sql[:300]}{'...' if len(sql) > 300 else ''}")
         r = bq_run_query(sql, max_rows=200)
@@ -4059,6 +4096,11 @@ def _run_report_config(config: dict) -> dict:
             "error": "No SQL was generated. Re-confirm the report design and say 'generate' again.",
         }
 
+    # Rewrite legacy project/dataset refs from saved configs, then apply the
+    # same dashboard-style autofix (backticks, dataset prefixes, etc.).
+    sql = normalize_bq_project(sql)
+    sql = _autofix_dashboard_sql(sql)
+
     print(f"[report] running SQL: {sql[:220]}{'...' if len(sql) > 220 else ''}")
     r = bq_run_query(sql, max_rows=200)
     if "error" in r:
@@ -4426,7 +4468,36 @@ def _load_schema_settings_block() -> str:
             continue
         parts.append(f"\n• `ai-vertex-mahad.Satori_Project.{tn}`\n{desc}\n")
     parts.append("\n=== END SCHEMA NOTES ===\n")
-    return "".join(parts)
+    rendered = "".join(parts)
+    if BQ_PROJECT != "ai-vertex-mahad":
+        rendered = rendered.replace("ai-vertex-mahad", BQ_PROJECT)
+    return rendered
+
+
+# ─── Project-name interpolation ───────────────────────────────────────────────
+# Every prompt + seed-description literal above hardcodes the legacy project
+# name 'ai-vertex-mahad'. When BQ_PROJECT is overridden (e.g. for the
+# capability-agent-prod migration), swap the literal at module load so the AI
+# generates SQL against the right project AND the autofix regexes have less to
+# fix. Idempotent — no-op when BQ_PROJECT stays 'ai-vertex-mahad'.
+if BQ_PROJECT != "ai-vertex-mahad":
+    _PROMPT_NAMES = [
+        "SYSTEM_PROMPT", "VOICE_SYSTEM_PROMPT_EN", "VOICE_SYSTEM_PROMPT_URDU",
+        "DASHBOARD_REFINE_PROMPT", "DASHBOARD_EDIT_PROMPT",
+        "_REPORT_SYSTEM_PROMPT", "_SATORI_HELP_PROMPT",
+        "_DASHBOARD_SAP_SCHEMAS",
+    ]
+    for _name in _PROMPT_NAMES:
+        _v = globals().get(_name)
+        if isinstance(_v, str):
+            globals()[_name] = _v.replace("ai-vertex-mahad", BQ_PROJECT)
+    # _DEFAULT_SCHEMA_SETTINGS is a list[dict] — swap inside each description.
+    try:
+        for _s in _DEFAULT_SCHEMA_SETTINGS:
+            if isinstance(_s.get("description"), str):
+                _s["description"] = _s["description"].replace("ai-vertex-mahad", BQ_PROJECT)
+    except NameError:
+        pass
 
 
 @app.get("/api/admin/schema-settings")
@@ -4609,3 +4680,4 @@ else:
             "ok": True,
             "message": "Satori v2 backend up. React frontend not built into this container.",
         }
+
