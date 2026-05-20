@@ -2705,12 +2705,44 @@ JOINS:
 - Employee → Timesheet: CAST(Employee_Code AS STRING) = CAST(TICKET_USER_ID AS STRING).
 - Sales tables: join on `AM` (Sales_Pipeline_Health uses `Salesperson` ≈ AM).
 
-DATA QUALITY:
-- allocation_percent, TICKET_HOURS, and most USD/visit fields in Sales_* tables are STRING — always SAFE_CAST AS FLOAT64 before arithmetic.
+DATA QUALITY (READ TWICE — these are the column-type rules that break queries):
+- 🔴 STRING-typed numerics (need SAFE_CAST AS FLOAT64 before math, never compare to '<number>' literals):
+    Sales_AM_Scorecard.{col_2026_Target, Q1_ACH, Open_Pipeline}
+    Sales_Plan_vs_Pipeline.{col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline}
+    Sales_Pipeline_Health.Open_Pipeline
+    Sales_Accounts.{Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits}
+    Sales_Hunting_Gap.{Hunting_Target, Hunting_Achieved, Hunting_Gap}
+    Allocation_data.allocation_percent
+    Timesheet_Data.TICKET_HOURS
+- 🟢 ALREADY-NUMERIC columns (FLOAT64 or INT64 — NEVER wrap in REPLACE or SAFE_CAST AS STRING):
+    Sales_Plan_vs_Pipeline.Coverage_Ratio (FLOAT64 — already a ratio, NEVER REPLACE)
+    Sales_AM_Scorecard.Hist_Win_Rate (FLOAT64 decimal 0-1 — multiply by 100 for display)
+    Sales_Pipeline_Health.{Open_Deals (INT64), Win_Rate_by (FLOAT64)}
+    Attendance_Data.{is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend} (INT64 0/1)
+    Attendance_Data.attendance_date (DATE)
+    Attendance_Data.employee_id (INT64)
+- ❌ NEVER do: REPLACE(Coverage_Ratio, ',', ''), REPLACE(Hist_Win_Rate, '%', ''), SAFE_CAST(is_present AS STRING).
+  These columns are ALREADY numeric. REPLACE only takes STRING args and BQ will throw "No matching signature for function REPLACE Argument types: FLOAT64, STRING, STRING".
+- ✅ DO instead: ROUND(Coverage_Ratio * 100, 1), ROUND(Hist_Win_Rate * 100, 1), SUM(is_present).
 - Win-rate columns are decimals (0.32 = 32%); multiply by 100 for display.
+- For Headcount/Total Employees: ALWAYS use COUNT(DISTINCT employee_id) — never COUNT(*) on Attendance_Data (that counts attendance rows, ~30× too high).
 - Use COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified') for clean department grouping.
 - attendance_date is DATE — compare directly with DATE_SUB / CURRENT_DATE.
 - DATE_KEY (Timesheet) is INT64 in YYYYMMDD form — use SAFE.PARSE_DATE('%Y-%m-%d', CAST(DATE_KEY AS STRING)).
+
+CANONICAL ATTENDANCE PATTERNS (copy these — they are tested):
+- Attendance rate (last 30 days, working days only):
+    SELECT ROUND(100.0*SUM(is_present)/NULLIF(SUM(CASE WHEN is_weekend=0 AND is_holiday=0 THEN 1 ELSE 0 END),0),1) AS value
+    FROM `ai-vertex-mahad.Satori_Project.Attendance_Data`
+    WHERE attendance_date BETWEEN DATE_SUB(CURRENT_DATE(),INTERVAL 30 DAY) AND CURRENT_DATE() AND is_weekend=0 AND is_holiday=0
+- Total employees:
+    SELECT COUNT(DISTINCT Employee_Code) AS value
+    FROM `ai-vertex-mahad.Satori_Project.Employee_Data`
+    WHERE LOWER(Employee_Type) IN ('mto','permanent','probation')
+- Pipeline coverage by AM (Coverage_Ratio is FLOAT64 — no REPLACE):
+    SELECT AM, ROUND(Coverage_Ratio * 100, 1) AS coverage_pct
+    FROM `{BQ_FULL}.Sales_Plan_vs_Pipeline`
+    ORDER BY coverage_pct DESC LIMIT 50
 """
 
 
@@ -3492,7 +3524,153 @@ def _autofix_dashboard_sql(sql: str) -> str:
         lambda m: f"{m.group(1) or ''}Flag = 'Bench'", sql, flags=_re.IGNORECASE,
     )
 
+    # Fix 9 — REPLACE() wrapped around numeric arguments throws "No matching
+    # signature for function REPLACE Argument types: FLOAT64, STRING, STRING".
+    # The AI keeps wrapping SAFE_CAST(... AS FLOAT64) or already-numeric columns
+    # like Coverage_Ratio / Hist_Win_Rate / win_rate_by in REPLACE(x,',','').
+    # Strip the REPLACE wrapper so the inner numeric expression is used directly.
+    NUMERIC_NATIVE_COLUMNS = (
+        "Coverage_Ratio", "Hist_Win_Rate", "Open_Deals", "Win_Rate_by",
+        "is_present", "is_absent", "is_on_leave", "is_remote", "is_holiday",
+        "is_weekend", "Q1_Visits", "Jan_Visits", "Feb_Visits", "Mar_Visits",
+    )
+    # 9a) REPLACE(SAFE_CAST(<x> AS FLOAT64|INT64|NUMERIC), 'anything', 'anything') → SAFE_CAST(<x> AS …)
+    sql = _re.sub(
+        r"REPLACE\(\s*(SAFE_CAST\s*\([^()]*?\s+AS\s+(?:FLOAT64|INT64|NUMERIC|BIGNUMERIC)\s*\))\s*,\s*'[^']*'\s*,\s*'[^']*'\s*\)",
+        r"\1", sql, flags=_re.IGNORECASE,
+    )
+    # 9b) REPLACE(<bare_native_numeric_column>, '…', '…') → <bare_native_numeric_column>
+    cols_pat = "|".join(_re.escape(c) for c in NUMERIC_NATIVE_COLUMNS)
+    sql = _re.sub(
+        r"REPLACE\(\s*((?:[A-Za-z_][A-Za-z0-9_]*\.)?(?:" + cols_pat + r"))\s*,\s*'[^']*'\s*,\s*'[^']*'\s*\)",
+        r"\1", sql, flags=_re.IGNORECASE,
+    )
+    # 9c) REPLACE(CAST(<x> AS FLOAT64|INT64|NUMERIC), ...) → CAST(<x> AS …)
+    sql = _re.sub(
+        r"REPLACE\(\s*(CAST\s*\([^()]*?\s+AS\s+(?:FLOAT64|INT64|NUMERIC|BIGNUMERIC)\s*\))\s*,\s*'[^']*'\s*,\s*'[^']*'\s*\)",
+        r"\1", sql, flags=_re.IGNORECASE,
+    )
+
+    # Fix 10 — SAFE_CAST wrapped around an already-numeric column. Native
+    # numeric columns can be cast safely (it's a no-op) but if the AI nests
+    # SAFE_CAST AS FLOAT64 around a REPLACE that we just unwrapped, the result
+    # is fine. Leave this as documentation — no rewrite needed because BQ
+    # accepts SAFE_CAST(FLOAT64 → FLOAT64).
+
+    # Fix 11 — Common COUNT(*) misuse for headcount. The AI keeps writing
+    # `COUNT(*) AS value` on Attendance_Data to mean "total employees", which
+    # actually counts attendance rows (~30× too high). Rewrite naive headcount
+    # patterns to COUNT(DISTINCT employee_id) when the alias hints at it.
+    sql = _re.sub(
+        r"COUNT\(\s*\*\s*\)\s+AS\s+(total_employees|employees|headcount|emp_count|employee_count)\b",
+        lambda m: f"COUNT(DISTINCT employee_id) AS {m.group(1)}",
+        sql, flags=_re.IGNORECASE,
+    )
+
+    # Fix 12 — When the AI puts a numeric filter like `Coverage_Ratio > '1'`
+    # (string-compared to a number) BQ throws a type error. Strip the quotes
+    # from numeric comparisons on the known-numeric columns.
+    for col in NUMERIC_NATIVE_COLUMNS:
+        sql = _re.sub(
+            r"(?<![A-Za-z0-9_])((?:[A-Za-z_][A-Za-z0-9_]*\.)?" + _re.escape(col) + r")\s*(=|<|>|<=|>=|!=|<>)\s*'(-?\d+(?:\.\d+)?)'",
+            r"\1 \2 \3", sql, flags=_re.IGNORECASE,
+        )
+
     return sql
+
+
+_REPAIR_PROMPT = """You are a BigQuery SQL repair assistant. The query below failed with the given error against the TMC Satori warehouse. Output ONLY the fixed SQL — no prose, no markdown fence, no commentary.
+
+═══ TMC SCHEMA (use ONLY these tables/columns) ═══
+- `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, Employee_Position, Employee_Hierarchy (department), Employee_Location, Employee_Type, Employee_Status.
+- `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), employee_id (INT64), employee_name (STRING), checkin_time, checkout_time, attendance_status_text, is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 0/1).
+- `{BQ_FULL}.Allocation_data` — project_id, employee_id (STRING "E-1234"), allocation_percent (STRING), emp_competency, Flag ('Allocated'/'Bench'), Date.
+- `{BQ_FULL}.Timesheet_Data` — TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (INT64 YYYYMMDD).
+- `{BQ_FULL}.Sales_AM_Scorecard` — VP, AM, Role, City, col_2026_Target (STRING), Q1_ACH (STRING), Open_Pipeline (STRING), Hist_Win_Rate (FLOAT64 decimal 0-1 — NEVER REPLACE).
+- `{BQ_FULL}.Sales_Plan_vs_Pipeline` — AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio (FLOAT64 — NEVER REPLACE), Status, Action.
+- `{BQ_FULL}.Sales_Pipeline_Health` — Salesperson, Open_Pipeline (STRING), Open_Deals (INT64), Win_Rate_by (FLOAT64).
+- `{BQ_FULL}.Sales_Accounts` — VP, AM, Location, Account, Tier, Dormant, Q1_Visits (STRING).
+- `{BQ_FULL}.Sales_Hunting_Gap` — AM, City, Hunting_Target, Hunting_Achieved, Hunting_Gap.
+
+═══ HARD RULES ═══
+- NEVER wrap a FLOAT64/INT64 column in REPLACE() — REPLACE only accepts STRINGs. Coverage_Ratio, Hist_Win_Rate, Open_Deals, Win_Rate_by, and is_* columns are already numeric.
+- Only STRING-typed columns need REPLACE/SAFE_CAST: Open_Pipeline, Q1_ACH, col_2026_Target, allocation_percent, TICKET_HOURS, Q1_Visits.
+- Active employees: LOWER(Employee_Type) IN ('mto','permanent','probation').
+- Joins: LEFT JOIN with UPPER(TRIM(Resource_Name)) = UPPER(TRIM(employee_name)) for Employee↔Attendance.
+- LIMIT 50 on chart queries.
+- KPI must SELECT exactly one row with the metric aliased AS `value`.
+- KEEP the {{where}} placeholder in the same position the failed query had it.
+- Output ONLY raw SQL — one statement, no explanation."""
+
+
+def _repair_widget_sql(failed_sql: str, error_msg: str, widget_meta: dict) -> str:
+    """Ask Gemini Flash to rewrite a single widget's SQL given the BQ error.
+
+    Returns the repaired SQL string, or "" on failure. Best-effort — never
+    raises. Used as a last-resort safety net so transient AI-generated bugs
+    don't break the whole dashboard. We pass widget intent (title + chart
+    type) so the model preserves the original meaning.
+    """
+    if not failed_sql or not error_msg:
+        return ""
+    try:
+        client = get_genai_client()
+        intent = (widget_meta.get("title") or "").strip()
+        kind = widget_meta.get("kind") or "widget"  # 'kpi' or 'chart'
+        user_msg = (
+            f"Widget kind: {kind}\n"
+            f"Widget title: {intent}\n\n"
+            f"BigQuery error:\n{error_msg}\n\n"
+            f"Failed SQL:\n{failed_sql}\n\n"
+            f"Return ONLY the fixed SQL."
+        )
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
+            config=genai.types.GenerateContentConfig(
+                system_instruction=_REPAIR_PROMPT.format(BQ_FULL=BQ_FULL),
+                temperature=0.1,
+                max_output_tokens=1024,
+            ),
+        )
+        out = (resp.text or "").strip()
+        # Strip fenced code blocks
+        if out.startswith("```"):
+            out = out.strip("`")
+            if out.lower().startswith("sql"):
+                out = out[3:].strip()
+            if out.endswith("```"):
+                out = out[:-3].strip()
+        # Sanity: must look like a SELECT
+        if not out.upper().lstrip().startswith(("SELECT", "WITH")):
+            return ""
+        return out
+    except Exception as e:
+        print(f"[dashboard] repair attempt failed: {e}")
+        return ""
+
+
+# Map of dashboard filter "alias" names → real column expressions. The AI is
+# instructed to use these alias names in the `filters` config; runtime maps
+# them to the actual columns so `{where}` substitution produces valid SQL.
+# Order matters: most-specific aliases first so partial matches don't shadow.
+_FILTER_FIELD_MAP = {
+    # workforce — labels users see vs columns in BQ
+    "department":         "COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'Unspecified')",
+    "Employee_Hierarchy": "Employee_Hierarchy",
+    "employee_type":      "LOWER(Employee_Type)",
+    "Employee_Type":      "LOWER(Employee_Type)",
+    "location":           "Employee_Location",
+    "Employee_Location":  "Employee_Location",
+    "position":           "Employee_Position",
+    "Employee_Position":  "Employee_Position",
+    # sales
+    "AM":  "AM",  "am":  "AM",
+    "VP":  "VP",  "vp":  "VP",
+    "City": "City", "city": "City",
+    "Tier": "Tier", "tier": "Tier",
+    "attendance_status_text": "LOWER(attendance_status_text)",
+}
 
 
 def _substitute_where(sql: str, user_filters: dict) -> str:
@@ -3503,6 +3681,8 @@ def _substitute_where(sql: str, user_filters: dict) -> str:
        We inject `AND f='v' AND ...`.
 
     If no filters apply the placeholder becomes ''.
+    Filter values are matched case-insensitively against the columns they
+    target so users see real data even when the table stores mixed case.
     """
     if "{where}" not in sql:
         return sql
@@ -3511,7 +3691,13 @@ def _substitute_where(sql: str, user_filters: dict) -> str:
         if v is None or str(v).strip() == "":
             continue
         safe_v = str(v).replace("'", "\\'")
-        parts.append(f"{f} = '{safe_v}'")
+        col_expr = _FILTER_FIELD_MAP.get(f, f)
+        # If the column expression already lowercases the column, lowercase
+        # the literal too so the comparison matches.
+        if col_expr.startswith("LOWER("):
+            parts.append(f"{col_expr} = '{safe_v.lower()}'")
+        else:
+            parts.append(f"{col_expr} = '{safe_v}'")
     if not parts:
         return sql.replace("{where}", "")
 
@@ -3550,7 +3736,7 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
     config = body.get("config") or {}
     user_filters = body.get("filters") or {}
 
-    def _exec(sql_template, tag):
+    def _exec(sql_template, tag, widget_meta=None):
         if not sql_template or not sql_template.strip():
             print(f"[dashboard] {tag}: no sql in config")
             return {"error": "No SQL was saved for this widget.", "sql": ""}
@@ -3567,7 +3753,24 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         r = bq_run_query(sql, max_rows=200)
         r["sql"] = sql  # always include the substituted SQL so the frontend can show it on error
         if "error" in r:
-            print(f"[dashboard]   {tag} ERROR: {r['error']}")
+            err = r["error"]
+            print(f"[dashboard]   {tag} ERROR: {err}")
+            # Repair attempt — ask Gemini to rewrite the failing SQL given the
+            # BQ error message. Cheap, scoped to one widget. Returns nothing
+            # if repair fails, in which case the original error is surfaced.
+            repaired = _repair_widget_sql(sql, err, widget_meta or {})
+            if repaired and repaired.strip() and repaired.strip() != sql.strip():
+                repaired = normalize_bq_project(repaired)
+                repaired = _autofix_dashboard_sql(repaired)
+                print(f"[dashboard]   {tag} retry with repaired SQL: {repaired[:200]}…")
+                r2 = bq_run_query(repaired, max_rows=200)
+                if "error" not in r2:
+                    print(f"[dashboard]   {tag} ok on retry — {len(r2.get('rows') or [])} rows")
+                    r2["sql"] = repaired
+                    r2["recovered"] = True
+                    return r2
+                else:
+                    print(f"[dashboard]   {tag} retry also failed: {r2.get('error')}")
         else:
             print(f"[dashboard]   {tag} ok — {len(r.get('rows') or [])} rows, cols={r.get('columns')}")
         return r
@@ -3592,7 +3795,7 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
     kpis_out = []
     for i, k in enumerate((config.get("kpis") or [])[:6]):
         kid = k.get("id") or f"kpi{i}"
-        r = _exec(k.get("sql"), f"kpi[{kid}]")
+        r = _exec(k.get("sql"), f"kpi[{kid}]", {"kind": "kpi", "title": k.get("title")})
         card = {
             "id":       kid,
             "title":    k.get("title") or kid,
@@ -3612,7 +3815,7 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
     charts_out = []
     for i, c in enumerate((config.get("charts") or [])[:4]):
         cid = c.get("id") or f"chart{i}"
-        r = _exec(c.get("sql"), f"chart[{cid}]")
+        r = _exec(c.get("sql"), f"chart[{cid}]", {"kind": "chart", "title": c.get("title"), "type": c.get("type")})
         rows = r.get("rows") or []
         cols = r.get("columns") or []
         label_key, value_keys = _infer_chart_keys(cols, rows, c)
@@ -3670,6 +3873,10 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
                     "FROM `ai-vertex-mahad.Satori_Project.Employee_Data` "
                     "WHERE " + safe_col + " IS NOT NULL ORDER BY v LIMIT 100"
                 )
+        if probe_sql:
+            # Filter probes also need the project autofix so dropdown options
+            # populate on the new project after migration.
+            probe_sql = normalize_bq_project(probe_sql)
         if not probe_sql:
             continue
         try:
