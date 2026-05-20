@@ -1750,7 +1750,11 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
     except Exception as _e:
         print(f"[chat] live-schema render failed (continuing): {_e}")
         _live_snap = ""
-    system_prompt_final = (VOICE_SYSTEM_PROMPT_URDU if body.voice_mode else SYSTEM_PROMPT) + _build_date_context() + scope_addon + "\n\n" + _schema_notes + "\n\n" + _live_snap
+    system_prompt_final = (
+        ANALYST_COMMON_SENSE + "\n\n" +
+        (VOICE_SYSTEM_PROMPT_URDU if body.voice_mode else SYSTEM_PROMPT) +
+        _build_date_context() + scope_addon + "\n\n" + _schema_notes + "\n\n" + _live_snap
+    )
 
     try:
         # Voice mode stays simple (no tools) — the voice WS has its own tool path
@@ -2020,7 +2024,11 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
     except: _schema_notes_s = ""
     try:    _live_snap_s = live_schema.render_context_block()
     except: _live_snap_s = ""
-    system_prompt_final = SYSTEM_PROMPT + _build_date_context() + scope_addon_stream + "\n\n" + _schema_notes_s + "\n\n" + _live_snap_s
+    system_prompt_final = (
+        ANALYST_COMMON_SENSE + "\n\n" +
+        SYSTEM_PROMPT + _build_date_context() + scope_addon_stream + "\n\n" +
+        _schema_notes_s + "\n\n" + _live_snap_s
+    )
 
     def generate():
         try:
@@ -2707,18 +2715,18 @@ JOINS:
 
 DATA QUALITY (READ TWICE — these are the column-type rules that break queries):
 - 🔴 STRING-typed numerics (need SAFE_CAST AS FLOAT64 before math, never compare to '<number>' literals):
-    Sales_AM_Scorecard.{col_2026_Target, Q1_ACH, Open_Pipeline}
-    Sales_Plan_vs_Pipeline.{col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline}
+    Sales_AM_Scorecard: col_2026_Target, Q1_ACH, Open_Pipeline
+    Sales_Plan_vs_Pipeline: col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline
     Sales_Pipeline_Health.Open_Pipeline
-    Sales_Accounts.{Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits}
-    Sales_Hunting_Gap.{Hunting_Target, Hunting_Achieved, Hunting_Gap}
+    Sales_Accounts: Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits
+    Sales_Hunting_Gap: Hunting_Target, Hunting_Achieved, Hunting_Gap
     Allocation_data.allocation_percent
     Timesheet_Data.TICKET_HOURS
 - 🟢 ALREADY-NUMERIC columns (FLOAT64 or INT64 — NEVER wrap in REPLACE or SAFE_CAST AS STRING):
     Sales_Plan_vs_Pipeline.Coverage_Ratio (FLOAT64 — already a ratio, NEVER REPLACE)
     Sales_AM_Scorecard.Hist_Win_Rate (FLOAT64 decimal 0-1 — multiply by 100 for display)
-    Sales_Pipeline_Health.{Open_Deals (INT64), Win_Rate_by (FLOAT64)}
-    Attendance_Data.{is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend} (INT64 0/1)
+    Sales_Pipeline_Health.Open_Deals (INT64), Sales_Pipeline_Health.Win_Rate_by (FLOAT64)
+    Attendance_Data.is_present / is_absent / is_on_leave / is_remote / is_holiday / is_weekend (INT64 0/1)
     Attendance_Data.attendance_date (DATE)
     Attendance_Data.employee_id (INT64)
 - ❌ NEVER do: REPLACE(Coverage_Ratio, ',', ''), REPLACE(Hist_Win_Rate, '%', ''), SAFE_CAST(is_present AS STRING).
@@ -2741,9 +2749,85 @@ CANONICAL ATTENDANCE PATTERNS (copy these — they are tested):
     WHERE LOWER(Employee_Type) IN ('mto','permanent','probation')
 - Pipeline coverage by AM (Coverage_Ratio is FLOAT64 — no REPLACE):
     SELECT AM, ROUND(Coverage_Ratio * 100, 1) AS coverage_pct
-    FROM `{BQ_FULL}.Sales_Plan_vs_Pipeline`
+    FROM `ai-vertex-mahad.Satori_Project.Sales_Plan_vs_Pipeline`
     ORDER BY coverage_pct DESC LIMIT 50
 """
+
+
+# ─── Cross-surface analyst common sense ──────────────────────────────────────
+# Injected into EVERY AI surface that generates SQL or summarises TMC data:
+# dashboard refine/edit, report builder, chat agent, voice agent. Goal: the AI
+# behaves like a senior analyst who already knows the data — not a literal SQL
+# translator. It silently applies defaults; asks only when the answer would
+# materially change. This is plain text — NO curly braces — so it's safe to
+# concatenate into prompts that go through .format().
+ANALYST_COMMON_SENSE = """═══ ANALYST COMMON SENSE (apply silently to every answer, every dashboard, every report) ═══
+
+You are a senior TMC analyst, not a translator. The user often won't spell out
+the obvious — apply these defaults yourself unless they say otherwise. Confirm
+out loud only when a default would materially change the answer.
+
+DEFAULT FILTERS — apply automatically without asking:
+1. Workforce queries → ACTIVE EMPLOYEES ONLY.
+   LOWER(Employee_Type) IN ('mto','permanent','probation').
+   Contract / Intern / Terminated are excluded unless the user asks for them.
+2. Attendance metrics → WORKING DAYS ONLY (skip weekends + holidays).
+   AND is_weekend = 0 AND is_holiday = 0.
+   The denominator of an attendance rate must NEVER include weekends/holidays —
+   that's what produces nonsense rates like 39.7%.
+3. Headcount / "total employees" → COUNT(DISTINCT Employee_Code) on Employee_Data
+   filtered to active employees. NEVER COUNT(*) on Attendance_Data — that counts
+   ~30 attendance rows per employee per month, ~30× too high.
+4. Date defaults — today is May 2026:
+   - "this month" = May 2026; "last month" = April 2026; "Q1" = Jan–Mar 2026;
+     "YTD" = Jan 1, 2026 to CURRENT_DATE(); "recent" / "lately" = last 30 days.
+   - When the user names a month with no year, assume current year (2026).
+5. Person searches — fuzzy match: WHERE LOWER(employee_name) LIKE '%mahad%'
+   not WHERE employee_name = 'Mahad Laeeque'. People type partial names.
+6. Department, location, position, AM, VP, city, tier — these are STRINGs.
+   Always TRIM and COALESCE empties to 'Unspecified' when grouping.
+7. Sales currency — USD values are STRING; SAFE_CAST AS FLOAT64 before sums.
+   Coverage_Ratio is already a decimal — multiply by 100 only when DISPLAYING.
+
+DASHBOARD-LEVEL COMMON SENSE:
+- An "attendance dashboard" without further input should include: overall
+  attendance rate (working days, active employees), active headcount, total
+  absent days for the period, attendance by department, and daily trend.
+- A "sales dashboard" without further input should include: total pipeline,
+  coverage ratio, win rate %, top AMs by Q1 achievement, pipeline by city or
+  tier — using AMs from Sales_AM_Scorecard.
+- A "bench / utilization dashboard" should join Allocation_data → Employee_Data,
+  classify by MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per Employee_Code:
+  Allocated >= 90, Partial 1-89, Bench 0/NULL.
+
+WHEN TO ASK vs. WHEN TO ACT:
+- ASK only when the answer materially depends on a choice you can't infer:
+  "Did you mean Q1 (Jan-Mar) or this quarter?" / "By department or by location?"
+- DON'T ask about active-only, working-days-only, fuzzy-name, or default-month —
+  those are senior-analyst defaults. Just apply them and mention briefly in the
+  description: "across active employees, working days only".
+
+SANITY CHECK YOUR OWN NUMBERS BEFORE EMITTING SQL:
+- TMC has roughly 1,190 active employees. A "Total Employees" KPI in the
+  tens of thousands means you counted attendance rows, not people — fix the SQL.
+- Attendance rates under 70% almost always mean weekends/holidays slipped into
+  the denominator — fix the filter.
+- Pipeline coverage of 0% or NULL across every AM means Coverage_Ratio got
+  wrapped in REPLACE() — remove the wrapper.
+"""
+
+
+# Compact common-sense for voice (tight token budget). Keep under ~600 tokens.
+ANALYST_COMMON_SENSE_COMPACT = """ANALYST COMMON SENSE (apply silently):
+- Workforce queries → active employees only: LOWER(Employee_Type) IN ('mto','permanent','probation').
+- Attendance metrics → working days only: AND is_weekend=0 AND is_holiday=0. Never count weekends/holidays as absent.
+- Headcount → COUNT(DISTINCT Employee_Code) on Employee_Data (never COUNT(*) on Attendance_Data).
+- Today is May 2026. "this month"=May 2026; "last month"=April 2026; "Q1"=Jan-Mar 2026.
+- Name searches → fuzzy: LOWER(employee_name) LIKE '%mahad%'.
+- STRING numerics (need SAFE_CAST): allocation_percent, TICKET_HOURS, Open_Pipeline, Q1_ACH, col_2026_Target, Q1_Visits.
+- Already FLOAT64/INT64 (NEVER REPLACE): Coverage_Ratio, Hist_Win_Rate, Open_Deals, Win_Rate_by, is_*.
+- TMC has roughly 1,190 active employees. If your headcount is in the tens of thousands you counted attendance rows, not people.
+- Apply defaults silently; only ask when the answer materially depends on a choice you can't infer."""
 
 
 DASHBOARD_REFINE_PROMPT = """You are Satori AI, a smart business analyst. You help users build interactive dashboards from TMC's workforce + sales data in BigQuery.
@@ -2873,9 +2957,15 @@ def refine_dashboard(user_message: str, history: list, existing_config=None) -> 
         system = DASHBOARD_EDIT_PROMPT.format(current_config=json.dumps(existing_config, indent=2), tables=tables_str)
     else:
         system = DASHBOARD_REFINE_PROMPT.format(tables=tables_str)
-    # Inject admin-curated schema notes + live warehouse snapshot so the AI
-    # knows the REAL departments, employee types, AMs, etc. and the join rules.
-    system = system + "\n\n" + _load_schema_settings_block() + "\n\n" + live_schema.render_context_block()
+    # Inject analyst common-sense defaults + admin-curated schema notes + live
+    # warehouse snapshot so the AI behaves like a senior analyst (active-only,
+    # working days, distinct employees, sane numbers) by default.
+    system = (
+        ANALYST_COMMON_SENSE + "\n\n" +
+        system + "\n\n" +
+        _load_schema_settings_block() + "\n\n" +
+        live_schema.render_context_block()
+    )
 
     contents = []
     for msg in history[-12:]:
@@ -2990,8 +3080,10 @@ def voice_session(user: dict = Depends(get_current_user)):
     # notes + live snapshot like we do for chat. The voice session has tight
     # token budgets and a 7k-token system prompt was drowning out the tool
     # definitions so the model never called run_sql. The compact tables list
-    # inside VOICE_SYSTEM_PROMPT_EN is enough for voice.
-    system_instruction = VOICE_SYSTEM_PROMPT_EN
+    # inside VOICE_SYSTEM_PROMPT_EN is enough for voice. We still inject the
+    # compact common-sense block (active-only, working days, distinct
+    # employees, etc.) — it's small enough to fit alongside the tool defs.
+    system_instruction = ANALYST_COMMON_SENSE_COMPACT + "\n\n" + VOICE_SYSTEM_PROMPT_EN
     # Pick a live model that exists for THIS API key. We probe the list and
     # fall back through a preferred order. Cached on the function for life of
     # the process.
@@ -4224,7 +4316,12 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
             model="gemini-2.5-flash",
             contents=contents,
             config=genai.types.GenerateContentConfig(
-                system_instruction=_REPORT_SYSTEM_PROMPT + "\n\n" + _load_schema_settings_block() + "\n\n" + live_schema.render_context_block(),
+                system_instruction=(
+                    ANALYST_COMMON_SENSE + "\n\n" +
+                    _REPORT_SYSTEM_PROMPT + "\n\n" +
+                    _load_schema_settings_block() + "\n\n" +
+                    live_schema.render_context_block()
+                ),
                 temperature=0.4,
                 # Reports often span 3-6 sections each with a SQL block;
                 # 2048 tokens reliably clipped the last section's sql mid-
