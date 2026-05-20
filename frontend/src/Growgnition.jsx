@@ -480,6 +480,13 @@ const VoiceModal = ({ open, onClose }) => {
       let data;
       try { data = JSON.parse(typeof evt.data === "string" ? evt.data : await evt.data.text()); } catch { return; }
 
+      // Log non-audio events so we can see whether toolCalls are actually firing.
+      // Drop modelTurn audio chunks (they spam the console at ~50 hz).
+      const isAudioOnly = data.serverContent?.modelTurn?.parts?.every?.(p => p.inlineData?.data && !p.text);
+      if (!isAudioOnly) {
+        console.log("[VoiceModal WS]", data);
+      }
+
       if (data.setupComplete) {
         setupDoneRef.current = true;
         if (setupTimeoutRef.current) clearTimeout(setupTimeoutRef.current);
