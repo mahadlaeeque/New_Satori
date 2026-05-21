@@ -203,43 +203,27 @@ const EmployeeCard = ({ emp, onClick }) => {
   );
 };
 
-// ─── Skill Tag Row ───
-const SkillTagRow = ({ skills, active, onToggle }) => {
-  if (!skills || skills.length === 0) return null;
-  return (
-    <div style={{
-      display: "flex", flexWrap: "wrap", gap: 8,
-      padding: 16, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12,
-      marginBottom: 20,
-    }}>
-      {skills.map((s) => {
-        const isActive = active === s.skill;
-        return (
-          <button
-            key={s.skill}
-            onClick={() => onToggle(isActive ? null : s.skill)}
-            style={{
-              padding: "6px 12px", borderRadius: 999,
-              border: `1px solid ${isActive ? C.accentDark : C.border}`,
-              background: isActive ? `${C.accent}22` : C.surfaceAlt,
-              color: isActive ? C.accentDark : C.textSecondary,
-              fontSize: 12, fontWeight: 600, cursor: "pointer",
-              display: "inline-flex", alignItems: "center", gap: 6,
-              transition: "all 0.15s",
-            }}
-          >
-            {s.skill}
-            <span style={{
-              padding: "1px 6px", borderRadius: 999,
-              background: isActive ? C.accentDark : C.textMuted,
-              color: "#fff", fontSize: 10, fontWeight: 700,
-            }}>{fmtNumber(s.count)}</span>
-          </button>
-        );
-      })}
-    </div>
-  );
-};
+// ─── Skill Dropdown ───
+// Replaces the previous big tag row — that view got cluttered fast at
+// ~50 skills × counts. Same data, much cleaner control. "All skills" is
+// the default; selecting a skill applies the same filter param to the
+// /api/availability/employees query.
+const SkillDropdown = ({ skills, active, onChange }) => (
+  <select
+    value={active || ""}
+    onChange={e => onChange(e.target.value || null)}
+    style={{
+      padding: "12px 14px", borderRadius: 10, border: `1px solid ${C.border}`,
+      background: C.surface, color: C.textPrimary, fontSize: 14, fontWeight: 600,
+      width: "100%", boxSizing: "border-box", cursor: "pointer",
+    }}
+  >
+    <option value="">All Skills</option>
+    {(skills || []).map(s => (
+      <option key={s.skill} value={s.skill}>{s.skill} ({fmtNumber(s.count)})</option>
+    ))}
+  </select>
+);
 
 // ─── Create Task Modal ───
 const CreateTaskModal = ({ open, onClose, onSubmit, departments, loading, error }) => {
@@ -514,6 +498,195 @@ const SavedTasksPanel = ({ tasks, onDelete, onToggleStatus }) => {
   );
 };
 
+// ─── Employee Detail Modal ───
+// Drill-down for one employee. Fetches /api/availability/employees/{code}/detail
+// when an employee is selected, then renders their projects (Allocation_data)
+// and 90-day timesheet activity. The card-level fields (name, position,
+// status, allocation bar) come from the card prop directly so the header
+// renders instantly while the detail fetch is in flight.
+const EmployeeDetailModal = ({ emp, onClose }) => {
+  const [detail, setDetail] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!emp) { setDetail(null); setError(null); return; }
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const d = await fetchJson(`/api/availability/employees/${encodeURIComponent(emp.code)}/detail`);
+        if (!cancelled) setDetail(d);
+      } catch (e) {
+        if (!cancelled) setError(String(e.message || e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [emp]);
+
+  if (!emp) return null;
+  const status = emp.status || "Bench";
+  const c = STATUS_COLOR[status] || STATUS_COLOR.Bench;
+  const allocPct = Math.max(0, Math.min(100, Number(emp.allocation_pct || 0)));
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 24,
+    }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: C.surface, borderRadius: 16, width: "100%", maxWidth: 760, maxHeight: "88vh",
+        display: "flex", flexDirection: "column",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.25)", overflow: "hidden",
+      }}>
+        {/* Header */}
+        <div style={{ padding: "20px 24px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0 }}>
+            <div style={{
+              width: 48, height: 48, borderRadius: "50%",
+              background: avatarTint(emp.name) + "22",
+              color: avatarTint(emp.name),
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontWeight: 700, fontSize: 17, flexShrink: 0,
+            }}>{initials(emp.name)}</div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: C.textPrimary }}>{emp.name}</h2>
+                <span style={{
+                  fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999,
+                  background: c.bg, color: c.fg, border: `1px solid ${c.border}`,
+                }}>{status}</span>
+              </div>
+              <div style={{ fontSize: 13, color: C.textSecondary, marginTop: 4 }}>
+                {emp.position || "—"}{emp.department && ` · ${emp.department}`}{emp.location && ` · ${emp.location}`}
+              </div>
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.textMuted, padding: 4 }}><X size={20} /></button>
+        </div>
+
+        {/* Body — scrollable */}
+        <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+          {/* Snapshot row */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 20 }}>
+            <div style={{ background: C.surfaceAlt, borderRadius: 10, padding: "12px 14px" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>Peak allocation</div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: C.textPrimary, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>{Math.round(allocPct)}%</div>
+              <div style={{ height: 4, background: C.border, borderRadius: 999, marginTop: 8, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${allocPct}%`, background: c.fg }} />
+              </div>
+            </div>
+            <div style={{ background: C.surfaceAlt, borderRadius: 10, padding: "12px 14px" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>Projects (current)</div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: C.textPrimary, marginTop: 4 }}>{emp.project_count || 0}</div>
+              <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4 }}>{emp.competency || "—"}</div>
+            </div>
+            <div style={{ background: C.surfaceAlt, borderRadius: 10, padding: "12px 14px" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>Hours / last 90d</div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: Number(emp.hrs_90d) === 0 ? C.danger : C.textPrimary, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>
+                {Math.round(Number(emp.hrs_90d || 0))}h
+              </div>
+              <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4 }}>{Number(emp.hrs_90d) === 0 ? "No timesheet activity" : "logged hours"}</div>
+            </div>
+          </div>
+
+          {error && (
+            <div style={{ padding: "10px 14px", background: "#FEE2E2", color: "#991B1B", borderRadius: 8, fontSize: 13, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
+              <AlertCircle size={16} /> {error}
+            </div>
+          )}
+
+          {/* Projects */}
+          <div style={{ marginBottom: 20 }}>
+            <h3 style={{ margin: "0 0 10px", fontSize: 13, fontWeight: 700, color: C.textPrimary, textTransform: "uppercase", letterSpacing: "0.5px", display: "flex", alignItems: "center", gap: 6 }}>
+              <Briefcase size={14} /> Project allocations
+            </h3>
+            {loading && !detail ? (
+              <div style={{ padding: 20, color: C.textMuted, fontSize: 13 }}>Loading…</div>
+            ) : detail && detail.projects && detail.projects.length > 0 ? (
+              <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+                {detail.projects.map((p, i) => {
+                  const pct = Math.max(0, Math.min(100, Number(p.allocation_pct || 0)));
+                  const pColor = pct >= 100 ? STATUS_COLOR.Allocated.fg : pct > 0 ? STATUS_COLOR.Partial.fg : STATUS_COLOR.Bench.fg;
+                  return (
+                    <div key={i} style={{
+                      padding: "12px 14px", borderTop: i === 0 ? "none" : `1px solid ${C.border}`,
+                      display: "grid", gridTemplateColumns: "1fr 90px", gap: 14, alignItems: "center",
+                    }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: C.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.project_id}</div>
+                        <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>{p.competency || "—"}</div>
+                      </div>
+                      <div>
+                        <div style={{ height: 6, background: C.surfaceAlt, borderRadius: 999, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${pct}%`, background: pColor }} />
+                        </div>
+                        <div style={{ fontSize: 11, color: C.textSecondary, marginTop: 4, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>{Math.round(pct)}%</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div style={{ padding: 14, color: C.textMuted, fontSize: 13, border: `1px dashed ${C.border}`, borderRadius: 10 }}>
+                No project allocations on record.
+              </div>
+            )}
+          </div>
+
+          {/* Timesheet by project */}
+          <div>
+            <h3 style={{ margin: "0 0 10px", fontSize: 13, fontWeight: 700, color: C.textPrimary, textTransform: "uppercase", letterSpacing: "0.5px", display: "flex", alignItems: "center", gap: 6 }}>
+              <Clock size={14} /> Timesheet activity (last 90 days)
+            </h3>
+            {loading && !detail ? (
+              <div style={{ padding: 20, color: C.textMuted, fontSize: 13 }}>Loading…</div>
+            ) : detail && detail.timesheet && detail.timesheet.by_project && detail.timesheet.by_project.length > 0 ? (
+              <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+                {detail.timesheet.by_project.map((t, i) => {
+                  const totalHrs = Number(detail.timesheet.total_hrs_90d || 1);
+                  const bar = Math.min(100, (Number(t.hrs || 0) / totalHrs) * 100);
+                  return (
+                    <div key={i} style={{
+                      padding: "12px 14px", borderTop: i === 0 ? "none" : `1px solid ${C.border}`,
+                      display: "grid", gridTemplateColumns: "1fr 110px 90px", gap: 12, alignItems: "center",
+                    }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: C.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.project}</div>
+                        <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>{t.tickets} ticket{t.tickets === 1 ? "" : "s"}{t.last_entry ? ` · last ${t.last_entry}` : ""}</div>
+                      </div>
+                      <div>
+                        <div style={{ height: 6, background: C.surfaceAlt, borderRadius: 999, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${bar}%`, background: C.accent }} />
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: C.textSecondary, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{Math.round(Number(t.hrs || 0))}h</div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div style={{ padding: 14, color: C.textMuted, fontSize: 13, border: `1px dashed ${C.border}`, borderRadius: 10 }}>
+                No timesheet entries in the last 90 days.
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div style={{ padding: "12px 24px", borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "flex-end", background: C.surfaceAlt }}>
+          <button onClick={onClose} style={{
+            padding: "9px 16px", borderRadius: 8, border: `1px solid ${C.border}`,
+            background: C.surface, color: C.textSecondary, fontWeight: 600, fontSize: 13, cursor: "pointer",
+          }}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── Main Page ───
 const AvailabilityEnginePage = () => {
   const [kpis, setKpis] = useState(null);
@@ -523,8 +696,8 @@ const AvailabilityEnginePage = () => {
   const [tasks, setTasks] = useState([]);
 
   // Filters
-  const [statusFilter, setStatusFilter] = useState("");      // "" | Bench | Partial | Allocated
-  const [skillFilter, setSkillFilter] = useState(null);      // active tag string or null
+  const [statusFilter, setStatusFilter] = useState("");
+  const [skillFilter, setSkillFilter] = useState(null);
   const [searchTerm, setSearchTerm] = useState("");
 
   // Loading / error
@@ -539,6 +712,9 @@ const AvailabilityEnginePage = () => {
   const [bestFitProject, setBestFitProject] = useState(null);
   const [bestFitRecs, setBestFitRecs] = useState([]);
   const [savingTask, setSavingTask] = useState(false);
+
+  // Employee detail drawer state
+  const [detailEmp, setDetailEmp] = useState(null);
 
   const searchDebounce = useRef(null);
 
@@ -621,7 +797,6 @@ const AvailabilityEnginePage = () => {
         ai_reasoning: reasoningByCode,
       };
       await fetchJson("/api/availability/tasks", { method: "POST", body: JSON.stringify(body) });
-      // Reload tasks
       const t = await fetchJson("/api/availability/tasks");
       setTasks(t.tasks || []);
       setBestFitOpen(false);
@@ -686,8 +861,8 @@ const AvailabilityEnginePage = () => {
       {/* Tasks panel (collapsible) */}
       <SavedTasksPanel tasks={tasks} onDelete={handleDeleteTask} onToggleStatus={handleToggleStatus} />
 
-      {/* Search + filter + Create Task row */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 200px 180px", gap: 12, marginBottom: 16 }}>
+      {/* Search + status + skill + Create Task row */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 180px 220px 180px", gap: 12, marginBottom: 20 }}>
         <div style={{ position: "relative" }}>
           <Search size={16} style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", color: C.textMuted }} />
           <input
@@ -710,6 +885,7 @@ const AvailabilityEnginePage = () => {
           <option value="Partial">Partial</option>
           <option value="Allocated">Allocated</option>
         </select>
+        <SkillDropdown skills={skills} active={skillFilter} onChange={setSkillFilter} />
         <button onClick={() => setCreateOpen(true)} style={{
           padding: "12px 18px", borderRadius: 10, border: "none",
           background: `linear-gradient(135deg, ${C.accent}, ${C.accentDark})`,
@@ -719,9 +895,6 @@ const AvailabilityEnginePage = () => {
           <Plus size={16} /> Create Task
         </button>
       </div>
-
-      {/* Skill tag row */}
-      <SkillTagRow skills={skills} active={skillFilter} onToggle={setSkillFilter} />
 
       {/* Employee grid */}
       {errorList && (
@@ -740,7 +913,7 @@ const AvailabilityEnginePage = () => {
         </div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 16 }}>
-          {employees.map(emp => <EmployeeCard key={emp.code} emp={emp} />)}
+          {employees.map(emp => <EmployeeCard key={emp.code} emp={emp} onClick={() => setDetailEmp(emp)} />)}
         </div>
       )}
 
@@ -764,6 +937,7 @@ const AvailabilityEnginePage = () => {
         onSaveTask={handleSaveTask}
         saving={savingTask}
       />
+      <EmployeeDetailModal emp={detailEmp} onClose={() => setDetailEmp(null)} />
     </div>
   );
 };

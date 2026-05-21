@@ -4551,6 +4551,104 @@ def availability_employees(
     return {"employees": out, "total": len(out)}
 
 
+@app.get("/api/availability/employees/{code}/detail")
+def availability_employee_detail(code: str, user: dict = Depends(get_current_user)):
+    """Return drill-down detail for one employee: projects + timesheet
+    breakdown over the last 90 days. The card-level data the frontend
+    already has (name, position, status, allocation %) is NOT re-shipped
+    — the caller passes its existing card object alongside this response.
+    """
+    emp_code = (code or "").strip()
+    if not emp_code:
+        raise HTTPException(status_code=400, detail="Employee code is required.")
+    # Defensive: escape single quotes in the code to prevent SQL injection.
+    safe_code = emp_code.replace("'", "''")
+
+    # Project allocations — every project this employee has touched, with
+    # peak allocation % and the competency they brought to it. No Date
+    # filter (Allocation_data.Date type unreliable on prod, see _avail_kpis_sql).
+    alloc_sql = f"""
+        SELECT
+          COALESCE(NULLIF(TRIM(CAST(project_id AS STRING)), ''), 'Unspecified') AS project_id,
+          COALESCE(NULLIF(TRIM(emp_competency), ''), '') AS competency,
+          MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS allocation_pct,
+          COUNT(*) AS records
+        FROM {_bq_avail('Allocation_data')}
+        WHERE CAST(employee_id AS STRING) = '{safe_code}'
+        GROUP BY project_id, competency
+        ORDER BY allocation_pct DESC, records DESC
+        LIMIT 50
+    """
+    alloc_sql = normalize_bq_project(_autofix_dashboard_sql(alloc_sql))
+    r1 = bq_run_query(alloc_sql, max_rows=100)
+    if "error" in r1:
+        print(f"[/api/availability/employees/detail] alloc BQ error: {r1['error']}")
+        raise HTTPException(status_code=500, detail=r1["error"])
+    projects = [
+        {
+            "project_id":     row.get("project_id") or "Unspecified",
+            "competency":     row.get("competency") or "",
+            "allocation_pct": float(row.get("allocation_pct") or 0),
+            "records":        int(row.get("records") or 0),
+        }
+        for row in (r1.get("rows") or [])
+    ]
+
+    # Timesheet breakdown over last 90d — top projects by hours, with
+    # ticket counts and last-entry date. Uses the same type-agnostic
+    # DATE_KEY filter as the list endpoints (handles DATE + INT64 shapes).
+    ts_sql = f"""
+        WITH t AS (
+          SELECT
+            COALESCE(NULLIF(TRIM(TICKET_PROJECT_LABEL), ''), 'Unspecified') AS project,
+            SAFE_CAST(TICKET_HOURS AS FLOAT64) AS hours,
+            COALESCE(
+              SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),
+              SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))
+            ) AS d
+          FROM {_bq_avail('Timesheet_Data')}
+          WHERE CAST(TICKET_USER_ID AS STRING) = '{safe_code}'
+        )
+        SELECT
+          project,
+          ROUND(SUM(hours), 1) AS hrs,
+          COUNT(*) AS tickets,
+          MAX(d) AS last_entry
+        FROM t
+        WHERE d >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+        GROUP BY project
+        ORDER BY hrs DESC
+        LIMIT 20
+    """
+    ts_sql = normalize_bq_project(_autofix_dashboard_sql(ts_sql))
+    r2 = bq_run_query(ts_sql, max_rows=50)
+    timesheet_by_project = []
+    total_hrs_90d = 0.0
+    if "error" in r2:
+        # Don't 500 the whole detail view — log + return empty timesheet.
+        print(f"[/api/availability/employees/detail] timesheet BQ error: {r2['error']}")
+    else:
+        for row in (r2.get("rows") or []):
+            hrs = float(row.get("hrs") or 0)
+            total_hrs_90d += hrs
+            last_entry = row.get("last_entry")
+            timesheet_by_project.append({
+                "project":    row.get("project") or "Unspecified",
+                "hrs":        hrs,
+                "tickets":    int(row.get("tickets") or 0),
+                "last_entry": str(last_entry) if last_entry else None,
+            })
+
+    return {
+        "code": emp_code,
+        "projects": projects,
+        "timesheet": {
+            "total_hrs_90d": round(total_hrs_90d, 1),
+            "by_project":    timesheet_by_project,
+        },
+    }
+
+
 _FIND_BEST_FIT_PROMPT = """You are Satori AI, a senior staffing analyst at TMC. A project owner is creating a new task / project and you have to recommend the BEST 5 employees for it, ranked.
 
 You will receive:
@@ -4692,24 +4790,80 @@ def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user
         print(f"[/api/availability/find-best-fit] Gemini error: {e}")
         raise HTTPException(status_code=502, detail=f"AI ranking failed: {e}")
 
-    # 4) Parse Gemini's response. response_mime_type=json should give us a JSON
-    #    object directly, but fence/whitespace cleanup is cheap insurance.
+    # 4) Parse Gemini's response. With response_mime_type=json the model
+    #    *should* return raw JSON, but in practice it sometimes returns
+    #    empty / truncated text (token-budget), fenced code blocks, or
+    #    JSON wrapped in prose. Be tolerant: try direct parse, then
+    #    balanced-brace extraction, and fall through to a deterministic
+    #    ranker below if both fail so the modal never errors out.
+    parsed = None
+    raw_for_log = text
     try:
-        text = text.strip()
+        text = (text or "").strip()
         if text.startswith("```"):
-            text = text.strip("`")
+            text = text.lstrip("`")
             if text.lower().startswith("json"):
-                text = text[4:].lstrip()
+                text = text[4:]
+            text = text.strip()
             if text.endswith("```"):
-                text = text[:-3]
-        parsed = json.loads(text)
+                text = text[:-3].strip()
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                parsed = json.loads(text[start:end + 1])
     except Exception as e:
-        print(f"[/api/availability/find-best-fit] parse error: {e}; raw: {text[:400]}")
-        raise HTTPException(status_code=502, detail="AI returned a non-JSON response. Try again.")
+        print(f"[/api/availability/find-best-fit] parse error: {e}; raw: {raw_for_log[:400]!r}")
+        parsed = None
 
-    recs = parsed.get("recommendations") or []
+    recs = (parsed or {}).get("recommendations") or []
     if not isinstance(recs, list):
         recs = []
+
+    # 4b) Deterministic fallback — when Gemini fails or returns nothing
+    #     usable. Score = 50 base + status bonus + capped skill-hit bonus.
+    #     Reasoning text is built from the candidate's facts directly so
+    #     it stays specific (matched keywords, allocation %, recent hours)
+    #     even without the LLM.
+    if not recs:
+        print("[/api/availability/find-best-fit] using deterministic fallback ranker")
+        for i, e in enumerate(ranked_pool[:5]):
+            hits = int(e.get("_hits") or 0)
+            status = e.get("status") or ""
+            score = 50
+            if status == "Bench":
+                score += 35
+            elif status == "Partial":
+                score += 20
+            else:
+                score += 5
+            score += min(20, hits * 7)
+            score = max(20, min(95, score))
+            comp = (e.get("competency") or "").strip() or "—"
+            pos = (e.get("position") or "").strip() or "—"
+            alloc = round(float(e.get("allocation_pct") or 0))
+            hrs = round(float(e.get("hrs_90d") or 0))
+            haystack = ((e.get("competency", "") or "") + " " + (e.get("position", "") or "") + " " + (e.get("location", "") or "")).lower()
+            keyword_hits = [k for k in keywords if k in haystack]
+            if status == "Bench":
+                avail_note = "Currently on Bench (0% allocated) — available immediately."
+            elif status == "Partial":
+                avail_note = f"Partially allocated at {alloc}% — has remaining capacity."
+            else:
+                avail_note = f"Currently allocated at {alloc}% — would need to be reassigned."
+            if keyword_hits:
+                skill_note = f"Matches keyword{'s' if len(keyword_hits) > 1 else ''}: {', '.join(keyword_hits[:3])} (in {comp} / {pos})."
+            else:
+                skill_note = f"No direct keyword match — {comp} role in {e.get('location') or '—'}."
+            ts_note = "No timesheet activity in last 90 days." if hrs == 0 else f"Active: {hrs}h logged in last 90 days."
+            recs.append({
+                "code": e.get("code"),
+                "rank": i + 1,
+                "match_score": score,
+                "reasoning": f"{avail_note} {skill_note} {ts_note}",
+            })
 
     # 5) Hydrate each recommendation with the full employee record.
     pool_by_code = {(e.get("code") or ""): e for e in ranked_pool}
