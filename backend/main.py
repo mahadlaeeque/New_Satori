@@ -4599,17 +4599,24 @@ def _avail_kpis_sql(dept_scope: list | None = None) -> str:
         emp_ts AS (
           -- DATE_KEY type varies across environments: docs say
           -- INT64 YYYYMMDD but capability-agent-prod actually stores
-          -- it as DATE. COALESCE of two parses handles both shapes —
-          -- the first attempts ISO-string-to-DATE (works for DATE +
-          -- ISO-string columns), the second attempts the YYYYMMDD
-          -- parse (works for INT64 + compact-string columns).
+          -- it as DATE. COALESCE of two parses handles both shapes.
+          --
+          -- Window is anchored to MAX(date) in the data, not CURRENT_DATE,
+          -- so the "last 90 days" stays meaningful even when the data
+          -- is older than the server clock (e.g. a year-old QVD import).
           SELECT CAST(TICKET_USER_ID AS STRING) AS emp_id,
                  SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) AS hrs_90d
           FROM {_bq_avail('Timesheet_Data')}
           WHERE COALESCE(
                   SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),
                   SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))
-                ) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+                ) >= (
+                  SELECT DATE_SUB(MAX(COALESCE(
+                    SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),
+                    SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))
+                  )), INTERVAL 90 DAY)
+                  FROM {_bq_avail('Timesheet_Data')}
+                )
           GROUP BY emp_id
         )
         SELECT
@@ -4703,14 +4710,22 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
           GROUP BY emp_id
         ),
         emp_ts AS (
-          -- Same type-agnostic DATE_KEY handling as _avail_kpis_sql.
+          -- Same MAX-date-anchored 90-day window as _avail_kpis_sql so
+          -- the engine reflects whatever data is loaded rather than the
+          -- server's wall-clock relative to it.
           SELECT CAST(TICKET_USER_ID AS STRING) AS emp_id,
                  SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) AS hrs_90d
           FROM {_bq_avail('Timesheet_Data')}
           WHERE COALESCE(
                   SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),
                   SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))
-                ) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+                ) >= (
+                  SELECT DATE_SUB(MAX(COALESCE(
+                    SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),
+                    SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))
+                  )), INTERVAL 90 DAY)
+                  FROM {_bq_avail('Timesheet_Data')}
+                )
           GROUP BY emp_id
         )
         SELECT
@@ -4951,7 +4966,7 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
           COUNT(*) AS tickets,
           MAX(d) AS last_entry
         FROM t
-        WHERE d >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+        WHERE d >= (SELECT DATE_SUB(MAX(d), INTERVAL 90 DAY) FROM t)
         GROUP BY project
         ORDER BY hrs DESC
         LIMIT 20
