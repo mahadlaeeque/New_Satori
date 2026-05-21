@@ -4290,14 +4290,19 @@ def _avail_kpis_sql() -> str:
           GROUP BY emp_id
         ),
         emp_ts AS (
-          -- DATE_KEY is INT64 YYYYMMDD. Compare as integer to avoid
-          -- string parsing entirely (PARSE_DATE was erroring with
-          -- "Failed to parse input string" on prod data).
+          -- DATE_KEY type varies across environments: docs say
+          -- INT64 YYYYMMDD but capability-agent-prod actually stores
+          -- it as DATE. COALESCE of two parses handles both shapes —
+          -- the first attempts ISO-string-to-DATE (works for DATE +
+          -- ISO-string columns), the second attempts the YYYYMMDD
+          -- parse (works for INT64 + compact-string columns).
           SELECT CAST(TICKET_USER_ID AS STRING) AS emp_id,
                  SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) AS hrs_90d
           FROM {_bq_avail('Timesheet_Data')}
-          WHERE SAFE_CAST(DATE_KEY AS INT64)
-                >= CAST(FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)) AS INT64)
+          WHERE COALESCE(
+                  SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),
+                  SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))
+                ) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
           GROUP BY emp_id
         )
         SELECT
@@ -4389,14 +4394,14 @@ def _avail_employees_sql(limit: int = 500) -> str:
           GROUP BY emp_id
         ),
         emp_ts AS (
-          -- Integer compare on DATE_KEY (INT64 YYYYMMDD) — robust to
-          -- non-parseable values and avoids string-parse errors that
-          -- broke PARSE_DATE on prod data.
+          -- Same type-agnostic DATE_KEY handling as _avail_kpis_sql.
           SELECT CAST(TICKET_USER_ID AS STRING) AS emp_id,
                  SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) AS hrs_90d
           FROM {_bq_avail('Timesheet_Data')}
-          WHERE SAFE_CAST(DATE_KEY AS INT64)
-                >= CAST(FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)) AS INT64)
+          WHERE COALESCE(
+                  SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),
+                  SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))
+                ) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
           GROUP BY emp_id
         )
         SELECT
