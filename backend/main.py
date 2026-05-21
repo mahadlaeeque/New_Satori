@@ -225,6 +225,7 @@ FEATURE_CATALOG = [
     # grants; the label tracks the sidebar wording.
     {"id": "reportbuilder", "label": "Report Builder",    "group": "Workspace"},
     {"id": "dashboards",    "label": "Dashboard Builder", "group": "Workspace"},
+    {"id": "availability",  "label": "Availability Engine", "group": "Intelligence"},
 ]
 ALL_FEATURE_IDS = {f["id"] for f in FEATURE_CATALOG}
 
@@ -4240,6 +4241,602 @@ def update_dashboard(dashboard_id: int, body: dict, user: dict = Depends(get_cur
 def delete_dashboard(dashboard_id: int, user: dict = Depends(get_current_user)):
     db = get_db(); cur = db.cursor()
     cur.execute("DELETE FROM saved_dashboards WHERE id = ?", (dashboard_id,))
+    db.commit(); db.close()
+    return {"ok": True}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AVAILABILITY ENGINE  ──  KPIs + skill tags + employee cards + AI Find Best Fit
+#  ----------------------------------------------------------------------------
+#  Surfaces the "who's free, who's loaded, who fits this project" view. KPIs:
+#  Total / On Bench / Partial / Allocated / High Activity / No Timesheet.
+#  Status bands:
+#    Bench     = MAX(allocation_percent) over last 90 days = 0
+#    Partial   = 0 < MAX(alloc%) < 100
+#    Allocated = MAX(alloc%) >= 100
+#  Engagement bands (last-90-days timesheet hours):
+#    High Activity = hrs_90d >= 120
+#    No Timesheet  = hrs_90d = 0
+#  All queries respect the active-employees filter (Employee_Type IN mto /
+#  permanent / probation). SQL is sent through normalize_bq_project +
+#  _autofix_dashboard_sql so the migration story (capability-agent-prod env
+#  flip) and the predictable-AI-mistake autofixes both still apply.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _bq_avail(prefix: str) -> str:
+    """Backtick-wrapped fully-qualified table reference for the Availability
+    Engine SQL helpers below. Centralised so we don't sprinkle string-formatted
+    `BQ_FULL` references across the module."""
+    return f"`{BQ_FULL}.{prefix}`"
+
+
+def _avail_kpis_sql() -> str:
+    return f"""
+        WITH active_emp AS (
+          SELECT CAST(Employee_Code AS STRING) AS emp_id
+          FROM {_bq_avail('Employee_Data')}
+          WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
+        ),
+        emp_alloc AS (
+          SELECT CAST(employee_id AS STRING) AS emp_id,
+                 MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct
+          FROM {_bq_avail('Allocation_data')}
+          WHERE Date >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+          GROUP BY emp_id
+        ),
+        emp_ts AS (
+          SELECT CAST(TICKET_USER_ID AS STRING) AS emp_id,
+                 SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) AS hrs_90d
+          FROM {_bq_avail('Timesheet_Data')}
+          WHERE PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))
+                >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+          GROUP BY emp_id
+        )
+        SELECT
+          (SELECT COUNT(DISTINCT emp_id) FROM active_emp) AS total_employees,
+          (SELECT COUNT(DISTINCT ae.emp_id) FROM active_emp ae
+             LEFT JOIN emp_alloc ea ON ea.emp_id = ae.emp_id
+             WHERE COALESCE(ea.max_pct, 0) = 0) AS on_bench,
+          (SELECT COUNT(DISTINCT ae.emp_id) FROM active_emp ae
+             JOIN emp_alloc ea ON ea.emp_id = ae.emp_id
+             WHERE ea.max_pct > 0 AND ea.max_pct < 100) AS partial,
+          (SELECT COUNT(DISTINCT ae.emp_id) FROM active_emp ae
+             JOIN emp_alloc ea ON ea.emp_id = ae.emp_id
+             WHERE ea.max_pct >= 100) AS allocated,
+          (SELECT COUNT(DISTINCT ae.emp_id) FROM active_emp ae
+             JOIN emp_ts et ON et.emp_id = ae.emp_id
+             WHERE et.hrs_90d >= 120) AS high_activity,
+          (SELECT COUNT(DISTINCT ae.emp_id) FROM active_emp ae
+             LEFT JOIN emp_ts et ON et.emp_id = ae.emp_id
+             WHERE COALESCE(et.hrs_90d, 0) = 0) AS no_timesheet
+    """
+
+
+def _avail_skills_sql(limit: int = 50, min_count: int = 5) -> str:
+    """Combined skill/competency tag list. Union of Allocation_data.emp_competency
+    (latest per employee) and Employee_Data.Employee_Position, with per-tag
+    DISTINCT-employee counts. Tags with fewer than min_count employees are
+    hidden to keep the row digestible."""
+    return f"""
+        WITH active_emp AS (
+          SELECT CAST(Employee_Code AS STRING) AS emp_id,
+                 COALESCE(NULLIF(TRIM(Employee_Position), ''), '') AS position
+          FROM {_bq_avail('Employee_Data')}
+          WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
+        ),
+        latest_alloc AS (
+          SELECT emp_id, emp_competency FROM (
+            SELECT CAST(employee_id AS STRING) AS emp_id,
+                   emp_competency,
+                   ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY Date DESC) AS rn
+            FROM {_bq_avail('Allocation_data')}
+            WHERE emp_competency IS NOT NULL AND TRIM(emp_competency) != ''
+          ) WHERE rn = 1
+        ),
+        emp_tags AS (
+          SELECT ae.emp_id, TRIM(la.emp_competency) AS tag
+          FROM active_emp ae
+          LEFT JOIN latest_alloc la ON la.emp_id = ae.emp_id
+          WHERE la.emp_competency IS NOT NULL AND TRIM(la.emp_competency) != ''
+          UNION ALL
+          SELECT emp_id, position AS tag FROM active_emp WHERE position != ''
+        )
+        SELECT tag AS skill, COUNT(DISTINCT emp_id) AS count
+        FROM emp_tags
+        WHERE tag IS NOT NULL AND tag != ''
+        GROUP BY tag
+        HAVING COUNT(DISTINCT emp_id) >= {int(min_count)}
+        ORDER BY count DESC
+        LIMIT {int(limit)}
+    """
+
+
+def _avail_employees_sql(limit: int = 500) -> str:
+    """Per-employee card data. One row per active employee with allocation %,
+    project count, latest competency, 90d timesheet hours, and a derived
+    status band (Bench / Partial / Allocated)."""
+    return f"""
+        WITH active_emp AS (
+          SELECT CAST(Employee_Code AS STRING) AS emp_id,
+                 Employee_Code AS code,
+                 Resource_Name AS name,
+                 COALESCE(NULLIF(TRIM(Employee_Position), ''), '') AS position,
+                 COALESCE(NULLIF(TRIM(Employee_Hierarchy), ''), 'Unspecified') AS department,
+                 COALESCE(NULLIF(TRIM(Employee_Location), ''), '') AS location
+          FROM {_bq_avail('Employee_Data')}
+          WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
+        ),
+        alloc AS (
+          SELECT CAST(employee_id AS STRING) AS emp_id,
+                 MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct,
+                 COUNT(DISTINCT project_id) AS project_count,
+                 ANY_VALUE(emp_competency) AS competency
+          FROM {_bq_avail('Allocation_data')}
+          WHERE Date >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+          GROUP BY emp_id
+        ),
+        emp_ts AS (
+          SELECT CAST(TICKET_USER_ID AS STRING) AS emp_id,
+                 SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) AS hrs_90d
+          FROM {_bq_avail('Timesheet_Data')}
+          WHERE PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))
+                >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+          GROUP BY emp_id
+        )
+        SELECT
+          ae.code,
+          ae.name,
+          ae.position,
+          ae.department,
+          ae.location,
+          COALESCE(a.max_pct, 0) AS allocation_pct,
+          COALESCE(a.project_count, 0) AS project_count,
+          COALESCE(NULLIF(TRIM(a.competency), ''), ae.position) AS competency,
+          COALESCE(et.hrs_90d, 0) AS hrs_90d,
+          CASE
+            WHEN COALESCE(a.max_pct, 0) = 0 THEN 'Bench'
+            WHEN a.max_pct >= 100 THEN 'Allocated'
+            ELSE 'Partial'
+          END AS status
+        FROM active_emp ae
+        LEFT JOIN alloc a ON a.emp_id = ae.emp_id
+        LEFT JOIN emp_ts et ON et.emp_id = ae.emp_id
+        ORDER BY ae.name
+        LIMIT {int(limit)}
+    """
+
+
+def _avail_departments_sql() -> str:
+    """Distinct department list for the Create-Task modal dropdown."""
+    return f"""
+        SELECT DISTINCT COALESCE(NULLIF(TRIM(Employee_Hierarchy), ''), 'Unspecified') AS department
+        FROM {_bq_avail('Employee_Data')}
+        WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
+        ORDER BY department
+    """
+
+
+@app.get("/api/availability/kpis")
+def availability_kpis(user: dict = Depends(get_current_user)):
+    """Return the 6 KPI counts shown at the top of the engine."""
+    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_kpis_sql()))
+    r = bq_run_query(sql, max_rows=1)
+    if "error" in r:
+        print(f"[/api/availability/kpis] BQ error: {r['error']}")
+        raise HTTPException(status_code=500, detail=r["error"])
+    rows = r.get("rows") or []
+    if not rows:
+        return {"total_employees": 0, "on_bench": 0, "partial": 0, "allocated": 0, "high_activity": 0, "no_timesheet": 0}
+    row = rows[0]
+    return {
+        "total_employees": int(row.get("total_employees") or 0),
+        "on_bench":        int(row.get("on_bench") or 0),
+        "partial":         int(row.get("partial") or 0),
+        "allocated":       int(row.get("allocated") or 0),
+        "high_activity":   int(row.get("high_activity") or 0),
+        "no_timesheet":    int(row.get("no_timesheet") or 0),
+    }
+
+
+@app.get("/api/availability/skills")
+def availability_skills(user: dict = Depends(get_current_user)):
+    """Return the skill/competency tag row with per-tag DISTINCT-employee counts."""
+    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_skills_sql()))
+    r = bq_run_query(sql, max_rows=100)
+    if "error" in r:
+        print(f"[/api/availability/skills] BQ error: {r['error']}")
+        raise HTTPException(status_code=500, detail=r["error"])
+    skills = [{"skill": row.get("skill"), "count": int(row.get("count") or 0)} for row in (r.get("rows") or []) if row.get("skill")]
+    return {"skills": skills}
+
+
+@app.get("/api/availability/departments")
+def availability_departments(user: dict = Depends(get_current_user)):
+    """Distinct department list, used by the Create-Task / Project modal dropdown."""
+    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_departments_sql()))
+    r = bq_run_query(sql, max_rows=500)
+    if "error" in r:
+        print(f"[/api/availability/departments] BQ error: {r['error']}")
+        raise HTTPException(status_code=500, detail=r["error"])
+    return {"departments": [row.get("department") for row in (r.get("rows") or []) if row.get("department")]}
+
+
+@app.get("/api/availability/employees")
+def availability_employees(
+    status: Optional[str] = None,
+    skill: Optional[str] = None,
+    department: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = 500,
+    user: dict = Depends(get_current_user),
+):
+    """Return employee cards.
+
+    Optional query parameters:
+      status      — 'Bench' | 'Partial' | 'Allocated'
+      skill       — matches competency OR position (case-insensitive)
+      department  — exact department (Employee_Hierarchy)
+      q           — free-text substring matched against name / position / department / location / competency
+      limit       — hard cap on rows returned (default 500)
+
+    Filtering happens in Python over the full result set because the dashboard
+    UI typically wants the full list paged client-side. If we ever scale past
+    ~3k active employees we'd push these into the SQL WHERE clause instead.
+    """
+    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_employees_sql(limit=max(50, min(int(limit), 2000)))))
+    r = bq_run_query(sql, max_rows=2000)
+    if "error" in r:
+        print(f"[/api/availability/employees] BQ error: {r['error']}")
+        raise HTTPException(status_code=500, detail=r["error"])
+    rows = r.get("rows") or []
+
+    # Coerce numerics to plain Python types so JSON ships cleanly.
+    out = []
+    for row in rows:
+        out.append({
+            "code":           row.get("code"),
+            "name":           row.get("name"),
+            "position":       row.get("position") or "",
+            "department":     row.get("department") or "",
+            "location":       row.get("location") or "",
+            "allocation_pct": float(row.get("allocation_pct") or 0),
+            "project_count":  int(row.get("project_count") or 0),
+            "competency":     row.get("competency") or "",
+            "hrs_90d":        float(row.get("hrs_90d") or 0),
+            "status":         row.get("status") or "Bench",
+        })
+
+    # Apply server-side filters.
+    if status:
+        s = status.strip().lower()
+        out = [e for e in out if (e["status"] or "").lower() == s]
+    if department:
+        d = department.strip().lower()
+        out = [e for e in out if (e["department"] or "").lower() == d]
+    if skill:
+        sk = skill.strip().lower()
+        out = [e for e in out if sk in (e["competency"] or "").lower() or sk in (e["position"] or "").lower()]
+    if q:
+        ql = q.strip().lower()
+        out = [
+            e for e in out
+            if ql in (e["name"] or "").lower()
+            or ql in (e["position"] or "").lower()
+            or ql in (e["department"] or "").lower()
+            or ql in (e["location"] or "").lower()
+            or ql in (e["competency"] or "").lower()
+        ]
+
+    return {"employees": out, "total": len(out)}
+
+
+_FIND_BEST_FIT_PROMPT = """You are Satori AI, a senior staffing analyst at TMC. A project owner is creating a new task / project and you have to recommend the BEST 5 employees for it, ranked.
+
+You will receive:
+  - The project: name, target department, description, and skills/keywords needed.
+  - A pre-filtered candidate pool of available employees in the chosen department (or adjacent departments if the department was 'Unspecified'). Each candidate row tells you their name, position, latest competency, current MAX allocation % over the last 90 days, project count, timesheet hours in the last 90 days, and location.
+
+Rank the candidates against the project using these signals, weighted in this order:
+
+  1. **Availability** — prefer Bench (max alloc% = 0) first, then Partial (>0 and <100). Avoid Allocated (>=100) unless the skill match is so strong that pulling them off something matters.
+  2. **Skill match** — does competency or position contain the requested skills/keywords (case-insensitive substring)? More matches = better.
+  3. **Recent engagement** — prefer recent timesheet hours > 0 (they're actively working, not dormant) but not absurdly high (avoid >300 hrs/90d unless skill is a near-perfect match).
+  4. **Tie-breakers** — same location as project owner's department if known; otherwise prefer fewer concurrent projects.
+
+Return EXACTLY this JSON shape (no markdown, no commentary outside the JSON):
+
+{
+  "recommendations": [
+    {
+      "code": "<employee_code from input>",
+      "rank": 1,
+      "match_score": 0-100,
+      "reasoning": "<1-2 sentences. Mention the specific skill match, availability state, and any caveat.>"
+    },
+    ... (exactly 5 recommendations, ranked 1-5)
+  ]
+}
+
+Hard rules:
+  - If fewer than 5 candidates are provided, return as many as you got (don't fabricate).
+  - Use the exact `code` value from the input (don't guess Employee_Code strings).
+  - `match_score` is an integer 0-100. A pure-bench, perfect-skill-match candidate should be ~90-95. Reserve 100 for "exactly this person and they're free now". Skill mismatch + Allocated = below 30.
+  - Reasoning must be SPECIFIC (cite the matched skill keyword and the allocation state). Generic praise like "strong candidate" is not acceptable.
+"""
+
+
+@app.post("/api/availability/find-best-fit")
+def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user)):
+    """Rank candidates for a new project using Gemini Flash.
+
+    Body: {
+      name: str,
+      department: str,
+      description: str,
+      skills_keywords: str,            # comma- or space-separated keywords
+      max_candidates_to_rank: int = 25 # how many to feed to Gemini
+    }
+    Returns: {
+      candidates_considered: int,
+      recommendations: [
+        {code, rank, match_score, reasoning, employee: <full card>}
+      ]
+    }
+    """
+    name = (body.get("name") or "").strip()
+    department = (body.get("department") or "").strip()
+    description = (body.get("description") or "").strip()
+    skills_keywords = (body.get("skills_keywords") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Project name is required.")
+    if not department:
+        raise HTTPException(status_code=400, detail="Department is required.")
+    max_to_rank = max(5, min(int(body.get("max_candidates_to_rank") or 25), 50))
+
+    # 1) Pull the candidate pool — active employees in this department, sorted
+    #    by availability (Bench first) then by light skill-match heuristic.
+    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_employees_sql(limit=2000)))
+    r = bq_run_query(sql, max_rows=2000)
+    if "error" in r:
+        raise HTTPException(status_code=500, detail=r["error"])
+    all_rows = r.get("rows") or []
+    pool = [row for row in all_rows if (row.get("department") or "").lower() == department.lower()]
+    if not pool:
+        # Department had no active employees — surface a friendly empty result.
+        return {"candidates_considered": 0, "recommendations": []}
+
+    # Light pre-filter — keep Bench + Partial preferentially, then top up with
+    # Allocated if we don't have enough. Within each band sort by skill-match
+    # count (substring hits) then by hrs_90d descending.
+    keywords = [k.strip().lower() for k in re.split(r"[,\n]+", skills_keywords) if k.strip()]
+    def _hit_count(emp):
+        haystack = (
+            (emp.get("competency") or "") + " " +
+            (emp.get("position") or "") + " " +
+            (emp.get("location") or "")
+        ).lower()
+        return sum(1 for k in keywords if k in haystack)
+    for emp in pool:
+        emp["_hits"] = _hit_count(emp)
+
+    bench = sorted([e for e in pool if (e.get("status") or "") == "Bench"], key=lambda e: (-e["_hits"], -(float(e.get("hrs_90d") or 0))))
+    partial = sorted([e for e in pool if (e.get("status") or "") == "Partial"], key=lambda e: (-e["_hits"], -(float(e.get("hrs_90d") or 0))))
+    allocated = sorted([e for e in pool if (e.get("status") or "") == "Allocated"], key=lambda e: (-e["_hits"], -(float(e.get("hrs_90d") or 0))))
+    ranked_pool = (bench + partial + allocated)[:max_to_rank]
+
+    # 2) Build the compact candidate payload for Gemini.
+    compact = [
+        {
+            "code":          e.get("code"),
+            "name":          e.get("name"),
+            "position":      e.get("position") or "",
+            "competency":    e.get("competency") or "",
+            "allocation_pct": float(e.get("allocation_pct") or 0),
+            "status":        e.get("status") or "",
+            "project_count": int(e.get("project_count") or 0),
+            "hrs_90d":       float(e.get("hrs_90d") or 0),
+            "location":      e.get("location") or "",
+        }
+        for e in ranked_pool
+    ]
+
+    project_payload = {
+        "name": name,
+        "department": department,
+        "description": description,
+        "skills_keywords": skills_keywords,
+    }
+
+    # 3) Call Gemini Flash with ANALYST_COMMON_SENSE + _FIND_BEST_FIT_PROMPT.
+    client = get_genai_client()
+    system_instruction = ANALYST_COMMON_SENSE + "\n\n" + _FIND_BEST_FIT_PROMPT
+    user_msg = (
+        "PROJECT:\n" + json.dumps(project_payload, indent=2) +
+        "\n\nCANDIDATES (pre-filtered):\n" + json.dumps(compact, indent=2) +
+        "\n\nReturn ONLY the JSON object described in the system instruction."
+    )
+    try:
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
+            config=genai.types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.3,
+                max_output_tokens=2048,
+                response_mime_type="application/json",
+            ),
+        )
+        text = resp.text or "{}"
+    except Exception as e:
+        print(f"[/api/availability/find-best-fit] Gemini error: {e}")
+        raise HTTPException(status_code=502, detail=f"AI ranking failed: {e}")
+
+    # 4) Parse Gemini's response. response_mime_type=json should give us a JSON
+    #    object directly, but fence/whitespace cleanup is cheap insurance.
+    try:
+        text = text.strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.lower().startswith("json"):
+                text = text[4:].lstrip()
+            if text.endswith("```"):
+                text = text[:-3]
+        parsed = json.loads(text)
+    except Exception as e:
+        print(f"[/api/availability/find-best-fit] parse error: {e}; raw: {text[:400]}")
+        raise HTTPException(status_code=502, detail="AI returned a non-JSON response. Try again.")
+
+    recs = parsed.get("recommendations") or []
+    if not isinstance(recs, list):
+        recs = []
+
+    # 5) Hydrate each recommendation with the full employee record.
+    pool_by_code = {(e.get("code") or ""): e for e in ranked_pool}
+    enriched = []
+    for rec in recs:
+        code = (rec or {}).get("code") or ""
+        emp = pool_by_code.get(code)
+        if not emp:
+            # Skip recs that point to codes that aren't in the pool (defensive).
+            continue
+        enriched.append({
+            "code":        code,
+            "rank":        int(rec.get("rank") or len(enriched) + 1),
+            "match_score": int(rec.get("match_score") or 0),
+            "reasoning":   rec.get("reasoning") or "",
+            "employee": {
+                "code":           emp.get("code"),
+                "name":           emp.get("name"),
+                "position":       emp.get("position") or "",
+                "department":     emp.get("department") or "",
+                "location":       emp.get("location") or "",
+                "competency":     emp.get("competency") or "",
+                "allocation_pct": float(emp.get("allocation_pct") or 0),
+                "project_count":  int(emp.get("project_count") or 0),
+                "hrs_90d":        float(emp.get("hrs_90d") or 0),
+                "status":         emp.get("status") or "Bench",
+            },
+        })
+    enriched.sort(key=lambda r: r["rank"])
+
+    return {
+        "candidates_considered": len(ranked_pool),
+        "recommendations": enriched[:5],
+    }
+
+
+@app.get("/api/availability/tasks")
+def availability_list_tasks(user: dict = Depends(get_current_user)):
+    """List the current user's Availability Engine tasks."""
+    uid = int(user["sub"])
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute(
+            "SELECT id, name, department, description, skills_keywords, status, "
+            "assigned_employee_codes, ai_reasoning, created_at, updated_at "
+            "FROM availability_tasks WHERE user_id = ? ORDER BY created_at DESC",
+            (uid,),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[/api/availability/tasks] error: {e}")
+        rows = []
+    db.close()
+    # Deserialise JSON columns for the frontend.
+    for r in rows:
+        for k in ("assigned_employee_codes", "ai_reasoning"):
+            v = r.get(k)
+            if isinstance(v, str):
+                try:
+                    r[k] = json.loads(v)
+                except Exception:
+                    r[k] = [] if k == "assigned_employee_codes" else {}
+    return {"tasks": rows}
+
+
+@app.post("/api/availability/tasks")
+def availability_create_task(body: dict, user: dict = Depends(get_current_user)):
+    """Persist a Create-Task / Project entry.
+    Body: { name, department, description, skills_keywords, assigned_employee_codes: [], ai_reasoning: {} }
+    """
+    from database import USE_POSTGRES
+    uid = int(user["sub"])
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Task name is required.")
+    department = (body.get("department") or "").strip()
+    description = (body.get("description") or "").strip()
+    skills_keywords = (body.get("skills_keywords") or "").strip()
+    assigned = body.get("assigned_employee_codes") or []
+    if not isinstance(assigned, list):
+        assigned = []
+    reasoning = body.get("ai_reasoning") or {}
+    if not isinstance(reasoning, (dict, list)):
+        reasoning = {}
+    status = (body.get("status") or "open").strip() or "open"
+
+    assigned_json = json.dumps(assigned)
+    reasoning_json = json.dumps(reasoning)
+
+    db = get_db(); cur = db.cursor()
+    if USE_POSTGRES:
+        cur.execute(
+            "INSERT INTO availability_tasks "
+            "(user_id, name, department, description, skills_keywords, status, "
+            " assigned_employee_codes, ai_reasoning) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            (uid, name, department, description, skills_keywords, status, assigned_json, reasoning_json),
+        )
+        row = cur.fetchone()
+        new_id = row["id"] if isinstance(row, dict) else row[0]
+    else:
+        cur.execute(
+            "INSERT INTO availability_tasks "
+            "(user_id, name, department, description, skills_keywords, status, "
+            " assigned_employee_codes, ai_reasoning) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (uid, name, department, description, skills_keywords, status, assigned_json, reasoning_json),
+        )
+        new_id = cur.lastrowid
+    db.commit(); db.close()
+    return {"id": new_id, "ok": True}
+
+
+@app.put("/api/availability/tasks/{task_id}")
+def availability_update_task(task_id: int, body: dict, user: dict = Depends(get_current_user)):
+    """Update a task — typically status changes (open → in_progress → done) or reassignment."""
+    from database import USE_POSTGRES
+    uid = int(user["sub"])
+    sets, params = [], []
+    if "name" in body:
+        sets.append("name = ?");        params.append((body.get("name") or "").strip())
+    if "department" in body:
+        sets.append("department = ?");  params.append((body.get("department") or "").strip())
+    if "description" in body:
+        sets.append("description = ?"); params.append((body.get("description") or "").strip())
+    if "skills_keywords" in body:
+        sets.append("skills_keywords = ?"); params.append((body.get("skills_keywords") or "").strip())
+    if "status" in body:
+        sets.append("status = ?");      params.append((body.get("status") or "open").strip())
+    if "assigned_employee_codes" in body:
+        sets.append("assigned_employee_codes = ?"); params.append(json.dumps(body.get("assigned_employee_codes") or []))
+    if "ai_reasoning" in body:
+        sets.append("ai_reasoning = ?"); params.append(json.dumps(body.get("ai_reasoning") or {}))
+    if not sets:
+        return {"ok": True, "note": "nothing to update"}
+    sets.append("updated_at = " + ("NOW()" if USE_POSTGRES else "datetime('now')"))
+    params.extend([task_id, uid])
+    db = get_db(); cur = db.cursor()
+    cur.execute(f"UPDATE availability_tasks SET {', '.join(sets)} WHERE id = ? AND user_id = ?", tuple(params))
+    db.commit(); db.close()
+    return {"ok": True}
+
+
+@app.delete("/api/availability/tasks/{task_id}")
+def availability_delete_task(task_id: int, user: dict = Depends(get_current_user)):
+    uid = int(user["sub"])
+    db = get_db(); cur = db.cursor()
+    cur.execute("DELETE FROM availability_tasks WHERE id = ? AND user_id = ?", (task_id, uid))
     db.commit(); db.close()
     return {"ok": True}
 

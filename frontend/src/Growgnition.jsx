@@ -16,6 +16,7 @@ import {
   HelpCircle, Calendar, Command, CreditCard, Star, MoreHorizontal, Copy, Share2, Link as LinkIcon, UserPlus,
   Filter, Sun, Moon
 } from "lucide-react";
+import AvailabilityEnginePage from "./AvailabilityEngine.jsx";
 
 // ─── TMC Brand Color Palette ───
 // Theme-aware tokens go through CSS custom properties so the same JSX inline
@@ -8113,6 +8114,8 @@ const NAV_ITEMS = [
   { id: "agent", label: "Ask Me Anything", icon: Bot, component: AgentPage, requiresFeature: "agent" },
   { id: "reports", label: "Report Builder", icon: FileText, component: ReportsPage, requiresFeature: "reportbuilder" },
   { id: "dashboards", label: "Dashboard Builder", icon: LayoutDashboard, component: DashboardsPage, requiresFeature: "dashboards" },
+  { id: "_divider_intelligence", label: "INTELLIGENCE", isDivider: true },
+  { id: "availability", label: "Availability Engine", icon: Activity, component: AvailabilityEnginePage, requiresFeature: "availability" },
   { id: "_divider_admin", label: "ADMIN", isDivider: true, adminOnly: true },
   { id: "users", label: "User Management", icon: Users, component: UserManagementPage, adminOnly: true },
   { id: "audit", label: "Audit Log", icon: Shield, component: AuditLogPage, adminOnly: true },

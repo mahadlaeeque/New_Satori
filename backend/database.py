@@ -90,6 +90,7 @@ def init_db():
     _migrate_add_governance_tables()
     _migrate_add_data_scope_tables()
     _migrate_add_system_settings()
+    _migrate_add_availability_tasks()
 
 
 def _migrate_rename_polypack_to_ffc():
@@ -885,3 +886,54 @@ def _migrate_add_system_settings():
         print("[DB] Migration: system_settings table ready")
     except Exception as e:
         print(f"[DB] system_settings migration error: {e}")
+
+
+def _migrate_add_availability_tasks():
+    """Idempotent — creates the availability_tasks table used by the
+    Availability Engine page. Stores Create-Task / Project entries with their
+    assigned-employee picks and the AI's per-candidate reasoning. JSON fields
+    are stored as TEXT for portability across SQLite + Postgres."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        if USE_POSTGRES:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS availability_tasks (
+                    id                       SERIAL PRIMARY KEY,
+                    user_id                  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    name                     TEXT NOT NULL,
+                    department               TEXT NOT NULL DEFAULT '',
+                    description              TEXT NOT NULL DEFAULT '',
+                    skills_keywords          TEXT NOT NULL DEFAULT '',
+                    status                   TEXT NOT NULL DEFAULT 'open',
+                    assigned_employee_codes  TEXT NOT NULL DEFAULT '[]',
+                    ai_reasoning             TEXT NOT NULL DEFAULT '{}',
+                    created_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_availability_tasks_user ON availability_tasks(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_availability_tasks_status ON availability_tasks(status)")
+        else:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS availability_tasks (
+                    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id                  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    name                     TEXT NOT NULL,
+                    department               TEXT NOT NULL DEFAULT '',
+                    description              TEXT NOT NULL DEFAULT '',
+                    skills_keywords          TEXT NOT NULL DEFAULT '',
+                    status                   TEXT NOT NULL DEFAULT 'open',
+                    assigned_employee_codes  TEXT NOT NULL DEFAULT '[]',
+                    ai_reasoning             TEXT NOT NULL DEFAULT '{}',
+                    created_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_availability_tasks_user ON availability_tasks(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_availability_tasks_status ON availability_tasks(status)")
+        conn.commit()
+        conn.close()
+        print("[DB] Migration: availability_tasks table ready")
+    except Exception as e:
+        print(f"[DB] availability_tasks migration error: {e}")
