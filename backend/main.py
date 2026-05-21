@@ -4278,18 +4278,26 @@ def _avail_kpis_sql() -> str:
           WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
         ),
         emp_alloc AS (
+          -- No date filter here: Allocation_data.Date type varies across
+          -- environments (sometimes DATE, sometimes STRING / INT64) so a
+          -- direct comparison errors on capability-agent-prod. Aggregating
+          -- across all rows + MAX preserves the "ever been allocated"
+          -- signal, matching the legacy /api/availability/engine dashboard
+          -- pattern (main.py ~line 2475).
           SELECT CAST(employee_id AS STRING) AS emp_id,
                  MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct
           FROM {_bq_avail('Allocation_data')}
-          WHERE Date >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
           GROUP BY emp_id
         ),
         emp_ts AS (
+          -- DATE_KEY is INT64 YYYYMMDD. Compare as integer to avoid
+          -- string parsing entirely (PARSE_DATE was erroring with
+          -- "Failed to parse input string" on prod data).
           SELECT CAST(TICKET_USER_ID AS STRING) AS emp_id,
                  SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) AS hrs_90d
           FROM {_bq_avail('Timesheet_Data')}
-          WHERE PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))
-                >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+          WHERE SAFE_CAST(DATE_KEY AS INT64)
+                >= CAST(FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)) AS INT64)
           GROUP BY emp_id
         )
         SELECT
@@ -4325,13 +4333,16 @@ def _avail_skills_sql(limit: int = 50, min_count: int = 5) -> str:
           WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
         ),
         latest_alloc AS (
-          SELECT emp_id, emp_competency FROM (
-            SELECT CAST(employee_id AS STRING) AS emp_id,
-                   emp_competency,
-                   ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY Date DESC) AS rn
-            FROM {_bq_avail('Allocation_data')}
-            WHERE emp_competency IS NOT NULL AND TRIM(emp_competency) != ''
-          ) WHERE rn = 1
+          -- One competency per employee. ANY_VALUE instead of ROW_NUMBER
+          -- because Allocation_data.Date type varies across environments
+          -- and ORDER BY Date errors on capability-agent-prod. ANY_VALUE
+          -- picks a representative competency per employee non-deterministically,
+          -- which is fine for the tag-count aggregation downstream.
+          SELECT CAST(employee_id AS STRING) AS emp_id,
+                 ANY_VALUE(TRIM(emp_competency)) AS emp_competency
+          FROM {_bq_avail('Allocation_data')}
+          WHERE emp_competency IS NOT NULL AND TRIM(emp_competency) != ''
+          GROUP BY emp_id
         ),
         emp_tags AS (
           SELECT ae.emp_id, TRIM(la.emp_competency) AS tag
@@ -4367,20 +4378,25 @@ def _avail_employees_sql(limit: int = 500) -> str:
           WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
         ),
         alloc AS (
+          -- No Date filter: Allocation_data.Date type unreliable on
+          -- capability-agent-prod (see emp_alloc CTE in _avail_kpis_sql).
+          -- MAX across all rows preserves the "ever been allocated" signal.
           SELECT CAST(employee_id AS STRING) AS emp_id,
                  MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct,
                  COUNT(DISTINCT project_id) AS project_count,
                  ANY_VALUE(emp_competency) AS competency
           FROM {_bq_avail('Allocation_data')}
-          WHERE Date >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
           GROUP BY emp_id
         ),
         emp_ts AS (
+          -- Integer compare on DATE_KEY (INT64 YYYYMMDD) — robust to
+          -- non-parseable values and avoids string-parse errors that
+          -- broke PARSE_DATE on prod data.
           SELECT CAST(TICKET_USER_ID AS STRING) AS emp_id,
                  SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) AS hrs_90d
           FROM {_bq_avail('Timesheet_Data')}
-          WHERE PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))
-                >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+          WHERE SAFE_CAST(DATE_KEY AS INT64)
+                >= CAST(FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)) AS INT64)
           GROUP BY emp_id
         )
         SELECT
@@ -5722,6 +5738,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 _FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+_FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
+from fastapi.staticfiles import StaticFiles
 
 _FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 from fastapi.staticfiles import StaticFiles
