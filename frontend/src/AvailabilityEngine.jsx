@@ -451,9 +451,12 @@ const BestFitResultsModal = ({ open, onClose, project, recommendations, onSaveTa
 };
 
 // ─── Saved Tasks panel (collapsible) ───
-const SavedTasksPanel = ({ tasks, onDelete, onToggleStatus }) => {
+const SavedTasksPanel = ({ tasks, onDelete, onToggleStatus, onOpen }) => {
   const [open, setOpen] = useState(false);
   if (!tasks || tasks.length === 0) return null;
+  // stopPropagation helper for the in-row controls (status dropdown, delete)
+  // so clicking those doesn't also trigger the row's onClick → detail modal.
+  const stop = e => e.stopPropagation();
   return (
     <div style={{ marginBottom: 20, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12 }}>
       <button onClick={() => setOpen(o => !o)} style={{
@@ -466,10 +469,18 @@ const SavedTasksPanel = ({ tasks, onDelete, onToggleStatus }) => {
       {open && (
         <div style={{ borderTop: `1px solid ${C.border}`, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
           {tasks.map(t => (
-            <div key={t.id} style={{
-              padding: 12, border: `1px solid ${C.border}`, borderRadius: 10,
-              display: "grid", gridTemplateColumns: "1fr auto auto", gap: 12, alignItems: "center",
-            }}>
+            <div
+              key={t.id}
+              onClick={() => onOpen && onOpen(t)}
+              style={{
+                padding: 12, border: `1px solid ${C.border}`, borderRadius: 10,
+                display: "grid", gridTemplateColumns: "1fr auto auto", gap: 12, alignItems: "center",
+                cursor: onOpen ? "pointer" : "default",
+                transition: "box-shadow 0.15s, transform 0.15s",
+              }}
+              onMouseEnter={e => { if (onOpen) { e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.06)"; e.currentTarget.style.transform = "translateY(-1px)"; } }}
+              onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.transform = "translateY(0)"; }}
+            >
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 700, color: C.textPrimary }}>{t.name}</div>
                 <div style={{ fontSize: 12, color: C.textMuted, marginTop: 2 }}>
@@ -479,17 +490,27 @@ const SavedTasksPanel = ({ tasks, onDelete, onToggleStatus }) => {
                     : " · unassigned"}
                 </div>
               </div>
-              <select value={t.status || "open"} onChange={e => onToggleStatus(t.id, e.target.value)} style={{
-                padding: "6px 10px", borderRadius: 6, border: `1px solid ${C.border}`,
-                background: C.surfaceAlt, color: C.textSecondary, fontSize: 12, fontWeight: 600,
-              }}>
+              <select
+                value={t.status || "open"}
+                onClick={stop}
+                onChange={e => { stop(e); onToggleStatus(t.id, e.target.value); }}
+                style={{
+                  padding: "6px 10px", borderRadius: 6, border: `1px solid ${C.border}`,
+                  background: C.surfaceAlt, color: C.textSecondary, fontSize: 12, fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
                 <option value="open">Open</option>
                 <option value="in_progress">In progress</option>
                 <option value="done">Done</option>
               </select>
-              <button onClick={() => onDelete(t.id)} title="Delete task" style={{
-                background: "transparent", border: "none", cursor: "pointer", padding: 6, color: C.danger,
-              }}><Trash2 size={16} /></button>
+              <button
+                onClick={e => { stop(e); onDelete(t.id); }}
+                title="Delete task"
+                style={{
+                  background: "transparent", border: "none", cursor: "pointer", padding: 6, color: C.danger,
+                }}
+              ><Trash2 size={16} /></button>
             </div>
           ))}
         </div>
@@ -687,6 +708,231 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
   );
 };
 
+// ─── Task Detail Modal ───
+// Opens when a saved task is clicked. Renders:
+//   - Title + status pill + dept · created date
+//   - Project description (if set)
+//   - Skills / keywords (parsed CSV)
+//   - Assignees list: each row = the employee snapshot stored in
+//     ai_reasoning at save time (name/position/status/allocation/competency)
+//     plus the AI's per-person reasoning and match score. Clicking an
+//     assignee row swaps to the EmployeeDetailModal for that person.
+//   - Footer: status dropdown + delete button.
+const TaskDetailModal = ({ task, onClose, onOpenEmployee, onToggleStatus, onDelete }) => {
+  if (!task) return null;
+
+  const assignedCodes = Array.isArray(task.assigned_employee_codes) ? task.assigned_employee_codes : [];
+  const reasoningBlob = (task.ai_reasoning && typeof task.ai_reasoning === "object") ? task.ai_reasoning : {};
+  const assignees = assignedCodes
+    .map(code => ({ code, ...(reasoningBlob[code] || {}) }))
+    .sort((a, b) => (a.rank || 99) - (b.rank || 99));
+
+  const skillTokens = (task.skills_keywords || "")
+    .split(/[,\n]+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const status = task.status || "open";
+  const STATUS_BADGE = {
+    open:        { fg: "#1D4ED8", bg: "#DBEAFE" },
+    in_progress: { fg: "#B45309", bg: "#FEF3C7" },
+    done:        { fg: "#0E7E3E", bg: "#DCFCE7" },
+  };
+  const sb = STATUS_BADGE[status] || STATUS_BADGE.open;
+  const statusLabel = status === "in_progress" ? "In progress" : status.charAt(0).toUpperCase() + status.slice(1);
+  const createdAt = task.created_at ? String(task.created_at).split(".")[0].replace("T", " ") : null;
+
+  // Confirm-then-delete inline (avoids window.confirm chained inside modal which iOS handles weirdly).
+  const handleDeleteClick = () => {
+    if (window.confirm(`Delete task "${task.name}"? This cannot be undone.`)) {
+      onDelete && onDelete(task.id);
+    }
+  };
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 24,
+    }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: C.surface, borderRadius: 16, width: "100%", maxWidth: 820, maxHeight: "88vh",
+        display: "flex", flexDirection: "column",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.25)", overflow: "hidden",
+      }}>
+        {/* Header */}
+        <div style={{ padding: "20px 24px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: C.textPrimary, display: "flex", alignItems: "center", gap: 8 }}>
+                <Sparkles size={18} color={C.accent} /> {task.name}
+              </h2>
+              <span style={{
+                fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999,
+                background: sb.bg, color: sb.fg,
+              }}>{statusLabel}</span>
+            </div>
+            <div style={{ fontSize: 13, color: C.textSecondary, marginTop: 6 }}>
+              {task.department || "—"}
+              {createdAt && <> · <span style={{ color: C.textMuted }}>created {createdAt}</span></>}
+              {" · "}
+              {assignees.length > 0
+                ? `${assignees.length} assignee${assignees.length === 1 ? "" : "s"}`
+                : "unassigned"}
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.textMuted, padding: 4 }}><X size={20} /></button>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+          {/* Description */}
+          {(task.description || "").trim() && (
+            <div style={{ marginBottom: 18, padding: "12px 14px", background: C.surfaceAlt, borderRadius: 10, fontSize: 13, color: C.textSecondary, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+              {task.description}
+            </div>
+          )}
+
+          {/* Skills / keywords */}
+          {skillTokens.length > 0 && (
+            <div style={{ marginBottom: 20 }}>
+              <h3 style={{ margin: "0 0 8px", fontSize: 11, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.6px" }}>Skills / keywords</h3>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {skillTokens.map((s, i) => (
+                  <span key={i} style={{
+                    fontSize: 12, fontWeight: 600, padding: "4px 10px", borderRadius: 999,
+                    background: `${C.accent}15`, color: C.accentDark,
+                  }}>{s}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Assignees */}
+          <h3 style={{ margin: "0 0 10px", fontSize: 13, fontWeight: 700, color: C.textPrimary, textTransform: "uppercase", letterSpacing: "0.5px", display: "flex", alignItems: "center", gap: 6 }}>
+            <Users size={14} /> Assigned employees
+          </h3>
+          {assignees.length === 0 ? (
+            <div style={{ padding: 14, color: C.textMuted, fontSize: 13, border: `1px dashed ${C.border}`, borderRadius: 10 }}>
+              No employees were assigned to this task.
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {assignees.map(a => {
+                const sc = STATUS_COLOR[a.status] || STATUS_COLOR.Bench;
+                const allocPct = Math.max(0, Math.min(100, Number(a.allocation_pct || 0)));
+                const empPayload = a.name ? {
+                  code: a.code, name: a.name, position: a.position || "",
+                  department: a.department || "", location: a.location || "",
+                  competency: a.competency || "", status: a.status || "Bench",
+                  allocation_pct: a.allocation_pct ?? 0, hrs_90d: a.hrs_90d ?? 0,
+                  project_count: 0,
+                } : null;
+                return (
+                  <div
+                    key={a.code}
+                    onClick={() => empPayload && onOpenEmployee && onOpenEmployee(empPayload)}
+                    style={{
+                      padding: 14, border: `1px solid ${C.border}`, borderRadius: 12,
+                      cursor: empPayload ? "pointer" : "default",
+                      display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 12, alignItems: "flex-start",
+                      transition: "box-shadow 0.15s, transform 0.15s",
+                    }}
+                    onMouseEnter={e => { if (empPayload) { e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.06)"; e.currentTarget.style.transform = "translateY(-1px)"; } }}
+                    onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.transform = "translateY(0)"; }}
+                  >
+                    <div style={{
+                      width: 36, height: 36, borderRadius: "50%",
+                      background: a.name ? (avatarTint(a.name) + "22") : C.surfaceAlt,
+                      color: a.name ? avatarTint(a.name) : C.textMuted,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontWeight: 700, fontSize: 13, flexShrink: 0,
+                    }}>{a.name ? initials(a.name) : "?"}</div>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: C.textPrimary }}>{a.name || a.code}</div>
+                        {a.rank && (
+                          <span style={{
+                            fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 999,
+                            background: a.rank === 1 ? `${C.accent}22` : C.surfaceAlt,
+                            color: a.rank === 1 ? C.accentDark : C.textSecondary,
+                          }}>#{a.rank}</span>
+                        )}
+                        {a.status && (
+                          <span style={{
+                            fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 999,
+                            background: sc.bg, color: sc.fg,
+                          }}>{a.status}</span>
+                        )}
+                        {a.match_score != null && (
+                          <span style={{
+                            fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 999,
+                            background: `${C.info}15`, color: C.info,
+                          }}>
+                            <Star size={10} style={{ marginRight: 4, verticalAlign: "middle" }} />
+                            {a.match_score}/100
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ fontSize: 12, color: C.textMuted, marginTop: 4 }}>
+                        {a.position || "—"}
+                        {a.competency && a.competency !== a.position && ` · ${a.competency}`}
+                        {a.allocation_pct != null && ` · ${Math.round(allocPct)}% allocated at time of selection`}
+                        {a.hrs_90d != null && ` · ${Math.round(Number(a.hrs_90d))}h / 90d`}
+                      </div>
+                      {a.reasoning && (
+                        <div style={{ fontSize: 13, color: C.textSecondary, marginTop: 8, lineHeight: 1.5 }}>
+                          {a.reasoning}
+                        </div>
+                      )}
+                    </div>
+                    {empPayload && (
+                      <div style={{ alignSelf: "center", color: C.textMuted, flexShrink: 0 }}>
+                        <ArrowRight size={16} />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Footer — status + delete */}
+        <div style={{ padding: "12px 24px", borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: C.surfaceAlt }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>Status</span>
+            <select
+              value={status}
+              onChange={e => onToggleStatus && onToggleStatus(task.id, e.target.value)}
+              style={{
+                padding: "7px 12px", borderRadius: 8, border: `1px solid ${C.border}`,
+                background: C.surface, color: C.textPrimary, fontSize: 13, fontWeight: 600, cursor: "pointer",
+              }}
+            >
+              <option value="open">Open</option>
+              <option value="in_progress">In progress</option>
+              <option value="done">Done</option>
+            </select>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={handleDeleteClick} style={{
+              padding: "9px 14px", borderRadius: 8, border: `1px solid ${C.danger}`,
+              background: "transparent", color: C.danger, fontWeight: 600, fontSize: 13, cursor: "pointer",
+              display: "inline-flex", alignItems: "center", gap: 6,
+            }}>
+              <Trash2 size={14} /> Delete
+            </button>
+            <button onClick={onClose} style={{
+              padding: "9px 16px", borderRadius: 8, border: `1px solid ${C.border}`,
+              background: C.surface, color: C.textSecondary, fontWeight: 600, fontSize: 13, cursor: "pointer",
+            }}>Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── Main Page ───
 const AvailabilityEnginePage = () => {
   const [kpis, setKpis] = useState(null);
@@ -715,6 +961,9 @@ const AvailabilityEnginePage = () => {
 
   // Employee detail drawer state
   const [detailEmp, setDetailEmp] = useState(null);
+
+  // Saved-task detail modal state
+  const [selectedTask, setSelectedTask] = useState(null);
 
   const searchDebounce = useRef(null);
 
@@ -789,8 +1038,26 @@ const AvailabilityEnginePage = () => {
     if (!bestFitProject) return;
     setSavingTask(true);
     try {
+      // Snapshot employee info alongside the AI reasoning so the task
+      // detail modal renders rich info even after the assignees fall out
+      // of the current filtered employee list (or move depts, etc.).
       const reasoningByCode = {};
-      bestFitRecs.forEach(r => { reasoningByCode[r.code] = { rank: r.rank, match_score: r.match_score, reasoning: r.reasoning }; });
+      bestFitRecs.forEach(r => {
+        const e = r.employee || {};
+        reasoningByCode[r.code] = {
+          rank: r.rank,
+          match_score: r.match_score,
+          reasoning: r.reasoning,
+          name: e.name || null,
+          position: e.position || null,
+          department: e.department || null,
+          location: e.location || null,
+          status: e.status || null,
+          allocation_pct: e.allocation_pct ?? null,
+          competency: e.competency || null,
+          hrs_90d: e.hrs_90d ?? null,
+        };
+      });
       const body = {
         ...bestFitProject,
         assigned_employee_codes: selectedCodes,
@@ -859,7 +1126,7 @@ const AvailabilityEnginePage = () => {
       </div>
 
       {/* Tasks panel (collapsible) */}
-      <SavedTasksPanel tasks={tasks} onDelete={handleDeleteTask} onToggleStatus={handleToggleStatus} />
+      <SavedTasksPanel tasks={tasks} onDelete={handleDeleteTask} onToggleStatus={handleToggleStatus} onOpen={setSelectedTask} />
 
       {/* Search + status + skill + Create Task row */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 180px 220px 180px", gap: 12, marginBottom: 20 }}>
@@ -938,6 +1205,13 @@ const AvailabilityEnginePage = () => {
         saving={savingTask}
       />
       <EmployeeDetailModal emp={detailEmp} onClose={() => setDetailEmp(null)} />
+      <TaskDetailModal
+        task={selectedTask}
+        onClose={() => setSelectedTask(null)}
+        onOpenEmployee={(emp) => { setSelectedTask(null); setDetailEmp(emp); }}
+        onToggleStatus={(id, status) => { handleToggleStatus(id, status); setSelectedTask(t => t && t.id === id ? { ...t, status } : t); }}
+        onDelete={(id) => { handleDeleteTask(id); setSelectedTask(null); }}
+      />
     </div>
   );
 };

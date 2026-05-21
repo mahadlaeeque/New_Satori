@@ -91,6 +91,7 @@ def init_db():
     _migrate_add_data_scope_tables()
     _migrate_add_system_settings()
     _migrate_add_availability_tasks()
+    _migrate_add_chat_tables()
 
 
 def _migrate_rename_polypack_to_ffc():
@@ -937,3 +938,82 @@ def _migrate_add_availability_tasks():
         print("[DB] Migration: availability_tasks table ready")
     except Exception as e:
         print(f"[DB] availability_tasks migration error: {e}")
+
+
+def _migrate_add_chat_tables():
+    """Idempotent — ensures chat_conversations, chat_messages, and the legacy
+    chat_history table exist. These ARE defined inside _init_postgres()
+    already, but if anything earlier in that single-transaction init fails
+    the chat tables silently never get created — and the chat handler's
+    try/except hides the missing-table error, so the UI just shows an
+    empty history list. This standalone migration creates them with its
+    own connection so it succeeds independently of any earlier failure."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        if USE_POSTGRES:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS chat_conversations (
+                    id            SERIAL PRIMARY KEY,
+                    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    title         TEXT NOT NULL DEFAULT 'New conversation',
+                    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id              SERIAL PRIMARY KEY,
+                    conversation_id INTEGER NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+                    role            TEXT NOT NULL,
+                    content         TEXT NOT NULL,
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_conv ON chat_messages(conversation_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_conversations_user ON chat_conversations(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_conversations_updated ON chat_conversations(updated_at DESC)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS chat_history (
+                    id          SERIAL PRIMARY KEY,
+                    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    query       TEXT NOT NULL,
+                    response    TEXT,
+                    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        else:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS chat_conversations (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    title         TEXT NOT NULL DEFAULT 'New conversation',
+                    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id INTEGER NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+                    role            TEXT NOT NULL,
+                    content         TEXT NOT NULL,
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_conv ON chat_messages(conversation_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_conversations_user ON chat_conversations(user_id)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS chat_history (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    query       TEXT NOT NULL,
+                    response    TEXT,
+                    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        conn.commit()
+        conn.close()
+        print("[DB] Migration: chat_conversations + chat_messages + chat_history tables ready")
+    except Exception as e:
+        print(f"[DB] chat_tables migration error: {e}")
