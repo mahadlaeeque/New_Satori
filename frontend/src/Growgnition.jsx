@@ -6599,6 +6599,7 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [showAdd, setShowAdd] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [editingFeaturesFor, setEditingFeaturesFor] = useState(null); // user object
   const [editingUserFor, setEditingUserFor] = useState(null);
   const [resettingPwFor, setResettingPwFor] = useState(null);
@@ -6696,18 +6697,32 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
             Add team members and control which features each can access.
           </div>
         </div>
-        <button
-          onClick={() => setShowAdd(true)}
-          style={{
-            display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 18px",
-            border: "none", borderRadius: 10,
-            background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})`,
-            color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
-            boxShadow: "0 2px 8px rgba(51,51,51,0.18)"
-          }}
-        >
-          <Plus size={16} /> Add User
-        </button>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button
+            onClick={() => setShowImport(true)}
+            title="Bulk-create users from the Practice_Heads_List BigQuery table"
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 16px",
+              border: `1px solid ${COLORS.border}`, borderRadius: 10,
+              background: COLORS.surface, color: COLORS.textPrimary,
+              fontSize: 13, fontWeight: 600, cursor: "pointer",
+            }}
+          >
+            <UserPlus size={16} /> Import Practice Heads
+          </button>
+          <button
+            onClick={() => setShowAdd(true)}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 18px",
+              border: "none", borderRadius: 10,
+              background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})`,
+              color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
+              boxShadow: "0 2px 8px rgba(51,51,51,0.18)"
+            }}
+          >
+            <Plus size={16} /> Add User
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -6845,6 +6860,12 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
           features={features}
           onClose={() => setShowAdd(false)}
           onCreated={() => { setShowAdd(false); fetchAll(); }}
+        />
+      )}
+      {showImport && (
+        <ImportPracticeHeadsModal
+          onClose={() => setShowImport(false)}
+          onImported={() => { setShowImport(false); fetchAll(); }}
         />
       )}
       {editingFeaturesFor && (
@@ -6986,6 +7007,301 @@ const FeaturePicker = ({ features, selected, onChange, disabled = false }) => {
           </div>
         </div>
       ))}
+    </div>
+  );
+};
+
+// Bulk-import users from the Practice_Heads_List BigQuery table.
+// Two-step flow: fetch preview → admin unticks rows they don't want →
+// confirm POST. Backend creates users with role=user, all features
+// granted, and a `department` scope entry per row.
+const ImportPracticeHeadsModal = ({ onClose, onImported }) => {
+  const [loading, setLoading] = useState(true);
+  const [rows, setRows] = useState([]);
+  const [warning, setWarning] = useState("");
+  const [error, setError] = useState("");
+  const [selected, setSelected] = useState({}); // {email: bool}
+  const [importing, setImporting] = useState(false);
+  const [resultModal, setResultModal] = useState(null);
+
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/admin/users/practice-heads-preview`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) {
+          const txt = await res.text();
+          throw new Error(`HTTP ${res.status}: ${txt.slice(0, 200)}`);
+        }
+        const data = await res.json();
+        setRows(data.rows || []);
+        setWarning(data.warning || "");
+        // Default: tick every row that would create (skip already-exists).
+        const sel = {};
+        for (const r of (data.rows || [])) {
+          sel[r.email] = !!r.would_create;
+        }
+        setSelected(sel);
+      } catch (e) {
+        setError(String(e.message || e));
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  const toggle = (email) => setSelected(s => ({ ...s, [email]: !s[email] }));
+  const selectAllReady = () => {
+    const sel = {};
+    for (const r of rows) sel[r.email] = !!r.would_create;
+    setSelected(sel);
+  };
+  const selectNone = () => {
+    const sel = {};
+    for (const r of rows) sel[r.email] = false;
+    setSelected(sel);
+  };
+  const selectedEmails = Object.entries(selected).filter(([_, v]) => v).map(([e]) => e);
+  const readyToCreateCount = rows.filter(r => r.would_create && selected[r.email]).length;
+
+  const handleImport = async () => {
+    if (selectedEmails.length === 0) return;
+    setImporting(true);
+    setError("");
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch(`${API_BASE}/api/admin/users/practice-heads-import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ emails: selectedEmails }),
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`HTTP ${res.status}: ${txt.slice(0, 200)}`);
+      }
+      const data = await res.json();
+      setResultModal(data);
+    } catch (e) {
+      setError(String(e.message || e));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 24,
+    }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: COLORS.surface, borderRadius: 16, width: "100%", maxWidth: 980, maxHeight: "88vh",
+        display: "flex", flexDirection: "column",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.25)", overflow: "hidden",
+      }}>
+        <div style={{ padding: "20px 24px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: COLORS.textPrimary, display: "flex", alignItems: "center", gap: 8 }}>
+              <UserPlus size={20} color={COLORS.accent} /> Import Practice Heads
+            </h2>
+            <p style={{ margin: "6px 0 0", fontSize: 13, color: COLORS.textSecondary }}>
+              Bulk-create users from <code style={{ background: COLORS.surfaceAlt, padding: "1px 6px", borderRadius: 4 }}>Practice_Heads_List</code>.
+              Each new user is role <strong>user</strong>, gets every feature, and is scoped to their own practice (Employee_Hierarchy).
+            </p>
+          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: COLORS.textMuted, padding: 4 }}><X size={20} /></button>
+        </div>
+
+        <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+          {error && (
+            <div style={{ padding: "10px 14px", background: "#FEE2E2", color: "#991B1B", borderRadius: 8, fontSize: 13, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
+              <AlertTriangle size={16} /> {error}
+            </div>
+          )}
+          {warning && (
+            <div style={{ padding: "10px 14px", background: "#FEF3C7", color: "#92400E", borderRadius: 8, fontSize: 13, marginBottom: 16 }}>
+              {warning}
+            </div>
+          )}
+          {loading ? (
+            <div style={{ padding: 40, textAlign: "center", color: COLORS.textMuted, fontSize: 14 }}>Loading…</div>
+          ) : rows.length === 0 ? (
+            <div style={{ padding: 40, textAlign: "center", color: COLORS.textMuted, fontSize: 14, border: `1px dashed ${COLORS.border}`, borderRadius: 10 }}>
+              No rows in Practice_Heads_List.
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 12 }}>
+                <div style={{ fontSize: 13, color: COLORS.textSecondary }}>
+                  {readyToCreateCount} of {rows.length} selected for import
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button onClick={selectAllReady} style={{
+                    padding: "6px 12px", borderRadius: 6, border: `1px solid ${COLORS.border}`,
+                    background: COLORS.surface, color: COLORS.textSecondary, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                  }}>Select ready</button>
+                  <button onClick={selectNone} style={{
+                    padding: "6px 12px", borderRadius: 6, border: `1px solid ${COLORS.border}`,
+                    background: COLORS.surface, color: COLORS.textSecondary, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                  }}>Select none</button>
+                </div>
+              </div>
+              <div style={{ border: `1px solid ${COLORS.border}`, borderRadius: 10, overflow: "hidden" }}>
+                <div style={{
+                  display: "grid", gridTemplateColumns: "40px 1.4fr 1.6fr 1.5fr 1.2fr 1.2fr",
+                  padding: "10px 14px", background: COLORS.surfaceAlt, borderBottom: `1px solid ${COLORS.border}`,
+                  fontSize: 11, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase", letterSpacing: "0.5px",
+                }}>
+                  <div></div>
+                  <div>Name</div>
+                  <div>Email</div>
+                  <div>Practice</div>
+                  <div>Position</div>
+                  <div>Status</div>
+                </div>
+                {rows.map(r => {
+                  const isReady = r.would_create;
+                  const isSelected = !!selected[r.email];
+                  return (
+                    <div key={r.email} style={{
+                      display: "grid", gridTemplateColumns: "40px 1.4fr 1.6fr 1.5fr 1.2fr 1.2fr",
+                      padding: "12px 14px", borderTop: `1px solid ${COLORS.border}`,
+                      fontSize: 13, alignItems: "center",
+                      opacity: isReady ? 1 : 0.65,
+                    }}>
+                      <div>
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          disabled={!isReady}
+                          onChange={() => toggle(r.email)}
+                        />
+                      </div>
+                      <div style={{ fontWeight: 600, color: COLORS.textPrimary }}>{r.resource_name || "—"}</div>
+                      <div style={{ color: COLORS.textSecondary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.email}</div>
+                      <div style={{ color: COLORS.textSecondary }}>{r.hierarchy_node || r.department || "—"}</div>
+                      <div style={{ color: COLORS.textMuted, fontSize: 12 }}>{r.position || "—"}</div>
+                      <div>
+                        {isReady ? (
+                          <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 999, background: "#DCFCE7", color: "#0E7E3E" }}>Ready</span>
+                        ) : (
+                          <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 999, background: COLORS.surfaceAlt, color: COLORS.textMuted }}>Exists</span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ marginTop: 10, fontSize: 12, color: COLORS.textMuted }}>
+                Each created user gets a one-time random password — you'll see them in the summary after import so you can share them out of band.
+              </div>
+            </>
+          )}
+        </div>
+
+        <div style={{ padding: "14px 24px", borderTop: `1px solid ${COLORS.border}`, display: "flex", justifyContent: "flex-end", gap: 8, background: COLORS.surfaceAlt }}>
+          <button onClick={onClose} style={{
+            padding: "10px 18px", borderRadius: 8, border: `1px solid ${COLORS.border}`,
+            background: COLORS.surface, color: COLORS.textSecondary, fontWeight: 600, fontSize: 14, cursor: "pointer",
+          }}>Cancel</button>
+          <button
+            onClick={handleImport}
+            disabled={readyToCreateCount === 0 || importing || loading}
+            style={{
+              padding: "10px 20px", borderRadius: 8, border: "none",
+              background: readyToCreateCount > 0 && !importing ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})` : "#E5E7EB",
+              color: "#fff", fontWeight: 700, fontSize: 14,
+              cursor: readyToCreateCount > 0 && !importing ? "pointer" : "not-allowed",
+              opacity: readyToCreateCount > 0 && !importing ? 1 : 0.6,
+              display: "inline-flex", alignItems: "center", gap: 6,
+            }}
+          >
+            {importing ? "Importing…" : `Import ${readyToCreateCount} user${readyToCreateCount === 1 ? "" : "s"}`}
+          </button>
+        </div>
+
+        {resultModal && (
+          <ImportResultOverlay
+            result={resultModal}
+            onClose={() => {
+              setResultModal(null);
+              onImported && onImported();
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+};
+
+// Shows the per-row summary after the import call — includes the temp
+// passwords for newly-created users so the admin can share them.
+const ImportResultOverlay = ({ result, onClose }) => {
+  const created = (result.results || []).filter(r => r.status === "created");
+  const skipped = (result.results || []).filter(r => r.status === "skipped");
+  const errored = (result.results || []).filter(r => r.status === "error");
+  return (
+    <div style={{
+      position: "absolute", inset: 0, background: "rgba(15,23,42,0.55)",
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 24, zIndex: 5,
+    }}>
+      <div style={{
+        background: COLORS.surface, borderRadius: 14, width: "100%", maxWidth: 720, maxHeight: "85%",
+        display: "flex", flexDirection: "column", overflow: "hidden",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+      }}>
+        <div style={{ padding: "18px 22px", borderBottom: `1px solid ${COLORS.border}` }}>
+          <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: COLORS.textPrimary }}>
+            Import complete
+          </h3>
+          <p style={{ margin: "6px 0 0", fontSize: 13, color: COLORS.textSecondary }}>
+            Created {created.length} · Skipped {skipped.length} · Errored {errored.length}
+          </p>
+        </div>
+        <div style={{ flex: 1, overflowY: "auto", padding: 18 }}>
+          {created.length > 0 && (
+            <>
+              <h4 style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>Created — share these temp passwords privately</h4>
+              <div style={{ border: `1px solid ${COLORS.border}`, borderRadius: 8, marginBottom: 16, overflow: "hidden" }}>
+                {created.map((r, i) => (
+                  <div key={r.email} style={{
+                    padding: "10px 14px", borderTop: i === 0 ? "none" : `1px solid ${COLORS.border}`,
+                    display: "grid", gridTemplateColumns: "1.5fr 2fr 1.5fr", gap: 12, alignItems: "center", fontSize: 13,
+                  }}>
+                    <div style={{ fontWeight: 600, color: COLORS.textPrimary }}>{r.name}</div>
+                    <div style={{ color: COLORS.textSecondary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.email}</div>
+                    <div style={{ fontFamily: "monospace", fontSize: 12, color: COLORS.accent, fontWeight: 700, userSelect: "all" }}>{r.temp_password}</div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          {skipped.length > 0 && (
+            <>
+              <h4 style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>Skipped</h4>
+              <div style={{ fontSize: 13, color: COLORS.textSecondary, marginBottom: 12 }}>
+                {skipped.map(r => r.email).join(", ")}
+              </div>
+            </>
+          )}
+          {errored.length > 0 && (
+            <>
+              <h4 style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 700, color: "#991B1B", textTransform: "uppercase", letterSpacing: "0.5px" }}>Errors</h4>
+              <div style={{ fontSize: 13, color: "#991B1B" }}>
+                {errored.map(r => <div key={r.email}>{r.email}: {r.message}</div>)}
+              </div>
+            </>
+          )}
+        </div>
+        <div style={{ padding: "12px 22px", borderTop: `1px solid ${COLORS.border}`, display: "flex", justifyContent: "flex-end", background: COLORS.surfaceAlt }}>
+          <button onClick={onClose} style={{
+            padding: "9px 18px", borderRadius: 8, border: "none",
+            background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`,
+            color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer",
+          }}>Done</button>
+        </div>
+      </div>
     </div>
   );
 };

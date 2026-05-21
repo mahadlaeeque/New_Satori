@@ -836,6 +836,258 @@ def admin_set_user_features(user_id: int, body: AdminFeaturesUpdate, _: dict = D
     return {"message": "Features updated", "features": [f for f in body.features if f in ALL_FEATURE_IDS]}
 
 
+# ── Practice Heads bulk import ──────────────────────────────────────────────
+# Reads `Practice_Heads_List` from BigQuery and creates Satori user accounts
+# in one shot. Each head gets:
+#   - role: user (not admin)
+#   - features: the full FEATURE_CATALOG
+#   - department scope: their EmployeeHierarchyNode (so they only see their
+#     own practice's data once row-level scoping is active)
+# Preview vs import is a two-step flow so the admin can untick rows in the UI.
+
+def _read_practice_heads_from_bq() -> list[dict]:
+    """Pull every row of Practice_Heads_List as a list of plain dicts.
+    Columns: employee_code, resource_name, EmployeePosition, EmployeeEmail,
+    EmployeeHierarchyNode, EmployeeLocation, employee_status, employee_type,
+    Department. Returns [] on any BQ error (logged) so the import UI degrades
+    gracefully rather than 500ing."""
+    sql = f"""
+        SELECT
+          employee_code,
+          resource_name,
+          EmployeePosition,
+          EmployeeEmail,
+          EmployeeHierarchyNode,
+          EmployeeLocation,
+          employee_status,
+          employee_type,
+          Department
+        FROM {_bq_avail('Practice_Heads_List')}
+        WHERE EmployeeEmail IS NOT NULL AND TRIM(EmployeeEmail) != ''
+        ORDER BY resource_name
+    """
+    sql = normalize_bq_project(sql)
+    r = bq_run_query(sql, max_rows=500)
+    if "error" in r:
+        print(f"[practice-heads] BQ read error: {r['error']}")
+        return []
+    return [
+        {
+            "employee_code":        (row.get("employee_code") or "").strip(),
+            "resource_name":        (row.get("resource_name") or "").strip(),
+            "position":             (row.get("EmployeePosition") or "").strip(),
+            "email":                (row.get("EmployeeEmail") or "").strip().lower(),
+            "hierarchy_node":       (row.get("EmployeeHierarchyNode") or "").strip(),
+            "location":             (row.get("EmployeeLocation") or "").strip(),
+            "employee_status":      (row.get("employee_status") or "").strip(),
+            "employee_type":        (row.get("employee_type") or "").strip(),
+            "department":           (row.get("Department") or "").strip(),
+        }
+        for row in (r.get("rows") or [])
+    ]
+
+
+def _random_temp_password(n: int = 12) -> str:
+    """A friendly random temp password — alnum, no ambiguous chars (0/O/1/l)."""
+    import secrets, string
+    alphabet = "".join(c for c in (string.ascii_letters + string.digits)
+                       if c not in "0Ol1I")
+    return "".join(secrets.choice(alphabet) for _ in range(n))
+
+
+@app.get("/api/admin/users/practice-heads-preview")
+def admin_practice_heads_preview(_: dict = Depends(require_admin)):
+    """Return the Practice_Heads_List rows annotated with which would be
+    created vs already exist (matched by lowercased email). The frontend
+    renders this as a confirm-table before the actual import."""
+    rows = _read_practice_heads_from_bq()
+    if not rows:
+        return {"rows": [], "warning": "Practice_Heads_List is empty or unreachable."}
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT LOWER(email) AS email FROM users")
+    existing = {r["email"] for r in cur.fetchall()}
+    db.close()
+    out = []
+    for r in rows:
+        already = r["email"] in existing
+        out.append({
+            **r,
+            "would_create": not already,
+            "status": "already_exists" if already else "ready",
+        })
+    return {
+        "rows": out,
+        "summary": {
+            "total":      len(out),
+            "to_create":  sum(1 for r in out if r["would_create"]),
+            "skipped":    sum(1 for r in out if not r["would_create"]),
+        },
+    }
+
+
+@app.post("/api/admin/users/practice-heads-import")
+def admin_practice_heads_import(body: dict, admin: dict = Depends(require_admin)):
+    """Create users for the selected Practice_Heads_List rows.
+
+    Body: { emails: ["a@b.com", ...] }     # the lowercased emails to import.
+                                            # If omitted, every "ready" row is imported.
+
+    Each created user gets: role=user, full FEATURE_CATALOG granted, and a
+    `department` data-scope entry with their EmployeeHierarchyNode. Returns
+    per-row status + a temporary password so the admin can pass it on."""
+    import bcrypt as _bcrypt
+    from database import USE_POSTGRES
+
+    selected_emails = {(e or "").strip().lower() for e in (body.get("emails") or [])}
+
+    rows = _read_practice_heads_from_bq()
+    if not rows:
+        raise HTTPException(status_code=502, detail="Could not read Practice_Heads_List from BigQuery.")
+
+    db = get_db(); cur = db.cursor()
+    # Admin's company is reused — matches admin_create_user above.
+    cur.execute("SELECT company_id FROM users WHERE id = ?", (int(admin["sub"]),))
+    me = cur.fetchone()
+    if not me:
+        db.close()
+        raise HTTPException(status_code=500, detail="Admin user not found")
+    company_id = me["company_id"]
+
+    cur.execute("SELECT LOWER(email) AS email FROM users")
+    existing = {r["email"] for r in cur.fetchall()}
+
+    results = []
+    created_count = 0
+    skipped_count = 0
+    errored_count = 0
+
+    feature_ids = [f["id"] for f in FEATURE_CATALOG]
+
+    for r in rows:
+        email = r["email"]
+        name = r["resource_name"] or email.split("@")[0]
+        practice = r["hierarchy_node"] or r["department"]
+
+        # Honour the selection if the caller sent one; otherwise default to
+        # every row that's not already in the system.
+        if selected_emails and email not in selected_emails:
+            continue
+
+        if not email or "@" not in email:
+            results.append({"email": email, "name": name, "status": "error",
+                             "message": "missing or invalid email"})
+            errored_count += 1
+            continue
+
+        if email in existing:
+            results.append({"email": email, "name": name, "status": "skipped",
+                             "message": "user with this email already exists"})
+            skipped_count += 1
+            continue
+
+        try:
+            temp_password = _random_temp_password(12)
+            pw_hash = _bcrypt.hashpw(temp_password.encode(), _bcrypt.gensalt()).decode()
+            if USE_POSTGRES:
+                cur.execute(
+                    "INSERT INTO users (email, password, full_name, role, company_id) "
+                    "VALUES (?, ?, ?, ?, ?) RETURNING id",
+                    (email, pw_hash, name, "user", company_id),
+                )
+                row = cur.fetchone()
+                new_id = row["id"] if isinstance(row, dict) else row[0]
+            else:
+                cur.execute(
+                    "INSERT INTO users (email, password, full_name, role, company_id) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (email, pw_hash, name, "user", company_id),
+                )
+                new_id = cur.lastrowid
+
+            # Grant every feature in the catalog (per user's choice: full features).
+            for fid in feature_ids:
+                if USE_POSTGRES:
+                    cur.execute(
+                        "INSERT INTO user_features (user_id, feature_id) VALUES (?, ?) "
+                        "ON CONFLICT DO NOTHING",
+                        (new_id, fid),
+                    )
+                else:
+                    cur.execute(
+                        "INSERT OR IGNORE INTO user_features (user_id, feature_id) VALUES (?, ?)",
+                        (new_id, fid),
+                    )
+
+            # Seed department scope so they only see their own practice once
+            # the row-level scope wiring lands. Stores both the scope value
+            # and a "scope is enforced" policy row.
+            if practice:
+                if USE_POSTGRES:
+                    cur.execute(
+                        "INSERT INTO user_data_scope_policy (user_id, dimension, enforced) "
+                        "VALUES (?, ?, ?) ON CONFLICT (user_id, dimension) DO UPDATE "
+                        "SET enforced = EXCLUDED.enforced",
+                        (new_id, "department", 1),
+                    )
+                    cur.execute(
+                        "INSERT INTO user_data_scope (user_id, dimension, value) "
+                        "VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+                        (new_id, "department", practice),
+                    )
+                else:
+                    cur.execute(
+                        "INSERT OR REPLACE INTO user_data_scope_policy (user_id, dimension, enforced) "
+                        "VALUES (?, ?, ?)",
+                        (new_id, "department", 1),
+                    )
+                    cur.execute(
+                        "INSERT OR IGNORE INTO user_data_scope (user_id, dimension, value) "
+                        "VALUES (?, ?, ?)",
+                        (new_id, "department", practice),
+                    )
+
+            db.commit()  # commit per-row so a single bad row doesn't roll back the whole batch
+            existing.add(email)
+            results.append({
+                "email":         email,
+                "name":          name,
+                "practice":      practice,
+                "status":        "created",
+                "user_id":       new_id,
+                "temp_password": temp_password,
+            })
+            created_count += 1
+        except Exception as e:
+            db.rollback() if hasattr(db, "rollback") else None
+            print(f"[practice-heads] error creating {email}: {e}")
+            results.append({"email": email, "name": name, "status": "error",
+                             "message": str(e)})
+            errored_count += 1
+
+    db.close()
+
+    # Audit a single batch entry rather than per-user — keeps the log clean.
+    try:
+        audit_log.record(
+            user=admin,
+            action="user.bulk_import",
+            resource_type="practice_heads",
+            resource_id="batch",
+            detail={"created": created_count, "skipped": skipped_count, "errored": errored_count},
+        )
+    except Exception:
+        pass
+
+    return {
+        "results": results,
+        "summary": {
+            "created":  created_count,
+            "skipped":  skipped_count,
+            "errored":  errored_count,
+        },
+    }
+
+
 # ── System Settings helpers + endpoints ──────────────────────────────────────
 
 def _get_system_setting(key: str, default: str = "") -> str:
@@ -1122,6 +1374,46 @@ def _get_user_plant_scope(user_id: int):
         db = get_db(); cur = db.cursor()
         cur.execute(
             "SELECT value FROM user_data_scope WHERE user_id = ? AND dimension = 'plant'",
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        db.close()
+        if not rows:
+            return None
+        return [r["value"] if isinstance(r, dict) else r[0] for r in rows]
+    except Exception:
+        return None
+
+
+def _get_user_dept_scope(user_id: int):
+    """Returns the list of department/practice values the user is restricted
+    to (matches `Employee_Data.Employee_Hierarchy`), or None when unrestricted.
+
+    Practice Heads imported via /api/admin/users/practice-heads-import get one
+    scope entry each (their own practice). The chat / dashboard / report /
+    Availability Engine handlers honour this by appending a "WHERE
+    Employee_Hierarchy IN (...)" filter, both as a prompt addon for the AI
+    AND as a server-side post-filter safety net.
+    """
+    try:
+        db = get_db(); cur = db.cursor()
+        # Honour the per-user enforcement policy: scope is only applied when
+        # the policy row exists with enforced=1. This lets admins import a
+        # user with scope values but temporarily disable enforcement during
+        # transitions without losing the values.
+        cur.execute(
+            "SELECT enforced FROM user_data_scope_policy "
+            "WHERE user_id = ? AND dimension = 'department'",
+            (user_id,),
+        )
+        policy = cur.fetchone()
+        if policy is not None:
+            enforced = policy["enforced"] if isinstance(policy, dict) else policy[0]
+            if not enforced:
+                db.close()
+                return None
+        cur.execute(
+            "SELECT value FROM user_data_scope WHERE user_id = ? AND dimension = 'department'",
             (user_id,),
         )
         rows = cur.fetchall()
@@ -2827,6 +3119,9 @@ ANALYST_COMMON_SENSE_COMPACT = """ANALYST COMMON SENSE (apply silently):
 - Name searches → fuzzy: LOWER(employee_name) LIKE '%mahad%'.
 - STRING numerics (need SAFE_CAST): allocation_percent, TICKET_HOURS, Open_Pipeline, Q1_ACH, col_2026_Target, Q1_Visits.
 - Already FLOAT64/INT64 (NEVER REPLACE): Coverage_Ratio, Hist_Win_Rate, Open_Deals, Win_Rate_by, is_*.
+- Timesheet_Data.DATE_KEY: type varies — DATE on capability-agent-prod, INT64 YYYYMMDD elsewhere. ALWAYS filter with `COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))) >= <cutoff>`. Plain `PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))` errors when DATE_KEY is DATE (CAST gives ISO "2025-07-01" which `%Y%m%d` rejects).
+- Allocation_data.Date: type unreliable across environments — DON'T filter on it. Aggregate MAX(allocation_percent) per employee across all rows; the latest peak still wins for Bench / Partial / Allocated classification.
+- "Utilization" / "hours worked" → Timesheet_Data, not Allocation_data. SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) grouped by TICKET_USER_ID, joined to Employee_Data via CAST(Employee_Code AS STRING) = CAST(TICKET_USER_ID AS STRING). Optional 90-day window via the COALESCE pattern above.
 - TMC has roughly 1,190 active employees. If your headcount is in the tens of thousands you counted attendance rows, not people.
 - Apply defaults silently; only ask when the answer materially depends on a choice you can't infer."""
 
@@ -4270,12 +4565,24 @@ def _bq_avail(prefix: str) -> str:
     return f"`{BQ_FULL}.{prefix}`"
 
 
-def _avail_kpis_sql() -> str:
+def _dept_scope_clause(dept_scope: list | None) -> str:
+    """Produce the ' AND Employee_Hierarchy IN (...)' fragment to append to
+    the active-employees WHERE clause. Returns empty string for unrestricted
+    users (admins, or non-admins with no scope rows). Values are quoted with
+    BigQuery's safe-quote rules (' replaced with '')."""
+    if not dept_scope:
+        return ""
+    quoted = ", ".join("'" + str(v).replace("'", "''") + "'" for v in dept_scope)
+    return f" AND COALESCE(NULLIF(TRIM(Employee_Hierarchy), ''), 'Unspecified') IN ({quoted})"
+
+
+def _avail_kpis_sql(dept_scope: list | None = None) -> str:
     return f"""
         WITH active_emp AS (
           SELECT CAST(Employee_Code AS STRING) AS emp_id
           FROM {_bq_avail('Employee_Data')}
           WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
+                {_dept_scope_clause(dept_scope)}
         ),
         emp_alloc AS (
           -- No date filter here: Allocation_data.Date type varies across
@@ -4325,7 +4632,7 @@ def _avail_kpis_sql() -> str:
     """
 
 
-def _avail_skills_sql(limit: int = 50, min_count: int = 5) -> str:
+def _avail_skills_sql(limit: int = 50, min_count: int = 5, dept_scope: list | None = None) -> str:
     """Combined skill/competency tag list. Union of Allocation_data.emp_competency
     (latest per employee) and Employee_Data.Employee_Position, with per-tag
     DISTINCT-employee counts. Tags with fewer than min_count employees are
@@ -4336,6 +4643,7 @@ def _avail_skills_sql(limit: int = 50, min_count: int = 5) -> str:
                  COALESCE(NULLIF(TRIM(Employee_Position), ''), '') AS position
           FROM {_bq_avail('Employee_Data')}
           WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
+                {_dept_scope_clause(dept_scope)}
         ),
         latest_alloc AS (
           -- One competency per employee. ANY_VALUE instead of ROW_NUMBER
@@ -4367,7 +4675,7 @@ def _avail_skills_sql(limit: int = 50, min_count: int = 5) -> str:
     """
 
 
-def _avail_employees_sql(limit: int = 500) -> str:
+def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> str:
     """Per-employee card data. One row per active employee with allocation %,
     project count, latest competency, 90d timesheet hours, and a derived
     status band (Bench / Partial / Allocated)."""
@@ -4381,6 +4689,7 @@ def _avail_employees_sql(limit: int = 500) -> str:
                  COALESCE(NULLIF(TRIM(Employee_Location), ''), '') AS location
           FROM {_bq_avail('Employee_Data')}
           WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
+                {_dept_scope_clause(dept_scope)}
         ),
         alloc AS (
           -- No Date filter: Allocation_data.Date type unreliable on
@@ -4427,12 +4736,13 @@ def _avail_employees_sql(limit: int = 500) -> str:
     """
 
 
-def _avail_departments_sql() -> str:
+def _avail_departments_sql(dept_scope: list | None = None) -> str:
     """Distinct department list for the Create-Task modal dropdown."""
     return f"""
         SELECT DISTINCT COALESCE(NULLIF(TRIM(Employee_Hierarchy), ''), 'Unspecified') AS department
         FROM {_bq_avail('Employee_Data')}
         WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
+              {_dept_scope_clause(dept_scope)}
         ORDER BY department
     """
 
@@ -4440,7 +4750,8 @@ def _avail_departments_sql() -> str:
 @app.get("/api/availability/kpis")
 def availability_kpis(user: dict = Depends(get_current_user)):
     """Return the 6 KPI counts shown at the top of the engine."""
-    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_kpis_sql()))
+    dept_scope = _get_user_dept_scope(int(user["sub"]))
+    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_kpis_sql(dept_scope=dept_scope)))
     r = bq_run_query(sql, max_rows=1)
     if "error" in r:
         print(f"[/api/availability/kpis] BQ error: {r['error']}")
@@ -4462,7 +4773,8 @@ def availability_kpis(user: dict = Depends(get_current_user)):
 @app.get("/api/availability/skills")
 def availability_skills(user: dict = Depends(get_current_user)):
     """Return the skill/competency tag row with per-tag DISTINCT-employee counts."""
-    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_skills_sql()))
+    dept_scope = _get_user_dept_scope(int(user["sub"]))
+    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_skills_sql(dept_scope=dept_scope)))
     r = bq_run_query(sql, max_rows=100)
     if "error" in r:
         print(f"[/api/availability/skills] BQ error: {r['error']}")
@@ -4474,7 +4786,8 @@ def availability_skills(user: dict = Depends(get_current_user)):
 @app.get("/api/availability/departments")
 def availability_departments(user: dict = Depends(get_current_user)):
     """Distinct department list, used by the Create-Task / Project modal dropdown."""
-    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_departments_sql()))
+    dept_scope = _get_user_dept_scope(int(user["sub"]))
+    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_departments_sql(dept_scope=dept_scope)))
     r = bq_run_query(sql, max_rows=500)
     if "error" in r:
         print(f"[/api/availability/departments] BQ error: {r['error']}")
@@ -4504,7 +4817,8 @@ def availability_employees(
     UI typically wants the full list paged client-side. If we ever scale past
     ~3k active employees we'd push these into the SQL WHERE clause instead.
     """
-    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_employees_sql(limit=max(50, min(int(limit), 2000)))))
+    dept_scope = _get_user_dept_scope(int(user["sub"]))
+    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_employees_sql(limit=max(50, min(int(limit), 2000)), dept_scope=dept_scope)))
     r = bq_run_query(sql, max_rows=2000)
     if "error" in r:
         print(f"[/api/availability/employees] BQ error: {r['error']}")
@@ -4563,6 +4877,28 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
         raise HTTPException(status_code=400, detail="Employee code is required.")
     # Defensive: escape single quotes in the code to prevent SQL injection.
     safe_code = emp_code.replace("'", "''")
+
+    # Honour department scope: a scoped user can only drill into employees
+    # in their own department. One small lookup against Employee_Data to
+    # check; cheap and correct.
+    dept_scope = _get_user_dept_scope(int(user["sub"]))
+    if dept_scope:
+        check_sql = normalize_bq_project(f"""
+            SELECT COALESCE(NULLIF(TRIM(Employee_Hierarchy), ''), 'Unspecified') AS dept
+            FROM {_bq_avail('Employee_Data')}
+            WHERE CAST(Employee_Code AS STRING) = '{safe_code}'
+            LIMIT 1
+        """)
+        cr = bq_run_query(check_sql, max_rows=1)
+        if "error" not in cr:
+            crows = cr.get("rows") or []
+            if crows:
+                emp_dept = (crows[0].get("dept") or "").strip()
+                if emp_dept and emp_dept not in dept_scope:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"You're scoped to {', '.join(dept_scope)} and don't have access to this employee.",
+                    )
 
     # Project allocations — every project this employee has touched, with
     # peak allocation % and the competency they brought to it. No Date
@@ -4712,9 +5048,19 @@ def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user
         raise HTTPException(status_code=400, detail="Department is required.")
     max_to_rank = max(5, min(int(body.get("max_candidates_to_rank") or 25), 50))
 
+    # Honour department scope: a practice-head user can only Find Best Fit
+    # for projects in their own practice. Block at the door rather than
+    # silently returning an empty pool.
+    dept_scope = _get_user_dept_scope(int(user["sub"]))
+    if dept_scope and department not in dept_scope:
+        raise HTTPException(
+            status_code=403,
+            detail=f"You're scoped to {', '.join(dept_scope)} — can't create tasks for {department!r}.",
+        )
+
     # 1) Pull the candidate pool — active employees in this department, sorted
     #    by availability (Bench first) then by light skill-match heuristic.
-    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_employees_sql(limit=2000)))
+    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_employees_sql(limit=2000, dept_scope=dept_scope)))
     r = bq_run_query(sql, max_rows=2000)
     if "error" in r:
         raise HTTPException(status_code=500, detail=r["error"])
@@ -5908,9 +6254,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 _FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
-
-_FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
-
 
 class SPAStaticFiles(StaticFiles):
     """StaticFiles that falls back to index.html for any unknown path so React
