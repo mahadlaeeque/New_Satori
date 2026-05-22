@@ -1868,9 +1868,35 @@ const AgentPage = () => {
       const data = await res.json();
       setIsTyping(false);
       setMessages(prev => [...prev, { role: "assistant", text: data.reply || "(no reply)", timestamp: new Date() }]);
-      if (data.conversation_id) setConversationId(data.conversation_id);
+      const newConvId = data.conversation_id;
+      const isFirstTurn = !conversationId && newConvId;
+      if (newConvId) setConversationId(newConvId);
       fetchRecentQueries();
+
+      // Optimistic insert into the sidebar so the brand-new conversation
+      // shows up instantly with the first user message as the title — exactly
+      // how ChatGPT behaves. The server-side fetch a moment later refreshes
+      // it with the canonical title/timestamp the backend stored.
+      if (isFirstTurn) {
+        const optimisticTitle = (trimmed || "New conversation").slice(0, 60);
+        setConversations(prev => {
+          if (prev?.some?.(c => c.id === newConvId)) return prev;
+          return [
+            {
+              id: newConvId,
+              title: optimisticTitle,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              message_count: 2,
+            },
+            ...(prev || []),
+          ];
+        });
+      }
+      // Server-side refresh — immediate + small delay so we cover the
+      // common Postgres commit-visibility lag without flickering.
       fetchConversations();
+      setTimeout(() => { fetchConversations(); }, 700);
     } catch (err) {
       console.error("[/api/chat] network error", err);
       setMessages(prev => [...prev, { role: "assistant", text: `Network error: ${err?.message || "fetch failed"}`, timestamp: new Date() }]);

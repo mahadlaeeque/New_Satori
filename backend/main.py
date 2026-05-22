@@ -4708,15 +4708,29 @@ def _avail_kpis_sql(dept_scope: list | None = None) -> str:
                 {_dept_scope_clause(dept_scope)}
         ),
         emp_alloc AS (
-          -- No date filter here: Allocation_data.Date type varies across
-          -- environments (sometimes DATE, sometimes STRING / INT64) so a
-          -- direct comparison errors on capability-agent-prod. Aggregating
-          -- across all rows + MAX preserves the "ever been allocated"
-          -- signal, matching the legacy /api/availability/engine dashboard
-          -- pattern (main.py ~line 2475).
+          -- 90-day window anchored to MAX(Date) in Allocation_data so the
+          -- bench/partial/allocated bands reflect CURRENT state, not lifetime.
+          -- Without this filter, anyone who's ever hit 100% gets stuck in
+          -- 'Allocated' forever (1,096/1,139 rows on prod). NULL-safe: if
+          -- Allocation_data.Date is entirely unparseable, fall back to
+          -- lifetime aggregation so we don't blank everyone.
           SELECT {emp_id_alloc} AS emp_id,
                  MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct
           FROM {_bq_avail('Allocation_data')}
+          WHERE (SELECT MAX(COALESCE(
+                   SAFE_CAST(CAST(Date AS STRING) AS DATE),
+                   SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
+                 )) FROM {_bq_avail('Allocation_data')}) IS NULL
+             OR COALESCE(
+                  SAFE_CAST(CAST(Date AS STRING) AS DATE),
+                  SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
+                ) >= DATE_SUB(
+                  (SELECT MAX(COALESCE(
+                    SAFE_CAST(CAST(Date AS STRING) AS DATE),
+                    SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
+                  )) FROM {_bq_avail('Allocation_data')}),
+                  INTERVAL 90 DAY
+                )
           GROUP BY emp_id
         ),
         emp_ts AS (
@@ -4830,14 +4844,28 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
                 {_dept_scope_clause(dept_scope)}
         ),
         alloc AS (
-          -- No Date filter: Allocation_data.Date type unreliable on
-          -- capability-agent-prod (see emp_alloc CTE in _avail_kpis_sql).
-          -- MAX across all rows preserves the "ever been allocated" signal.
+          -- 90-day window matching emp_alloc in _avail_kpis_sql so cards
+          -- and KPI counts agree. NULL-safe fallback to lifetime aggregation
+          -- if Allocation_data.Date is entirely unparseable.
           SELECT {emp_id_alloc} AS emp_id,
                  MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct,
                  COUNT(DISTINCT project_id) AS project_count,
                  ANY_VALUE(emp_competency) AS competency
           FROM {_bq_avail('Allocation_data')}
+          WHERE (SELECT MAX(COALESCE(
+                   SAFE_CAST(CAST(Date AS STRING) AS DATE),
+                   SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
+                 )) FROM {_bq_avail('Allocation_data')}) IS NULL
+             OR COALESCE(
+                  SAFE_CAST(CAST(Date AS STRING) AS DATE),
+                  SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
+                ) >= DATE_SUB(
+                  (SELECT MAX(COALESCE(
+                    SAFE_CAST(CAST(Date AS STRING) AS DATE),
+                    SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
+                  )) FROM {_bq_avail('Allocation_data')}),
+                  INTERVAL 90 DAY
+                )
           GROUP BY emp_id
         ),
         emp_ts AS (
@@ -6469,21 +6497,6 @@ def health_check():
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-_FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
-from fastapi.staticfiles import StaticFiles
-from starlette.exceptions import HTTPException as StarletteHTTPException
-
-_FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
-from fastapi.staticfiles import StaticFiles
-
-_FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
-from fastapi.staticfiles import StaticFiles
-from starlette.exceptions import HTTPException as StarletteHTTPException
-
-_FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
-from fastapi.staticfiles import StaticFiles
-from starlette.exceptions import HTTPException as StarletteHTTPException
-
 class SPAStaticFiles(StaticFiles):
     """StaticFiles that falls back to index.html for any unknown path so React
     Router's client-side routing works on direct visits / refresh."""
@@ -6505,4 +6518,3 @@ else:
             "ok": True,
             "message": "Satori v2 backend up. React frontend not built into this container.",
         }
-
