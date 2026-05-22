@@ -4676,19 +4676,23 @@ def _dept_scope_clause(dept_scope: list | None) -> str:
 def _norm_emp_id(col: str) -> str:
     """Normalize an employee-ID column for cross-table joining.
 
-    Different source systems write the same employee with different shapes:
-      - Employee_Code might be `1234` (INT) on one feed
-      - Allocation_data.employee_id might be `00001234` (zero-padded STRING)
-      - Timesheet_Data.TICKET_USER_ID might be `1234.0` (FLOAT-cast STRING)
+    Different source systems write the same employee with different shapes
+    (confirmed via /api/availability/_diag on capability-agent-prod):
+      - Employee_Data.Employee_Code        = 'E-1712' (letter prefix + dash)
+      - Allocation_data.employee_id        = 'E-2141', 'I-2024' (varies)
+      - Timesheet_Data.TICKET_USER_ID      = '1643'   (digits only — no prefix)
 
-    Stripping a trailing `.0` (REGEXP_REPLACE), then LTRIM('0'), gives a
-    canonical numeric string that joins reliably across all three tables.
-    Wrapped via NULLIF + COALESCE so an entirely-zero value (e.g. '0' or
-    '000') normalises to '0' rather than '' (which would join everything-
-    to-everything)."""
+    REGEXP_EXTRACT pulls the first run of digits out of the value, which
+    canonicalises all three shapes to the same numeric string ('1712',
+    '2141', '1643'). LTRIM('0') then collapses zero-padded variants so
+    '00001234' and '1234' also match.
+
+    Wrapped with NULLIF + COALESCE so a value with no digits at all
+    (or an all-zero value like '000') falls to '0' instead of '' — empty
+    string would join every padless row to every other padless row."""
     return (
-        f"COALESCE(NULLIF(LTRIM(REGEXP_REPLACE("
-        f"CAST({col} AS STRING), r'\\.0+$', ''), '0'), ''), '0')"
+        f"COALESCE(NULLIF(LTRIM("
+        f"REGEXP_EXTRACT(CAST({col} AS STRING), r'\\d+'), '0'), ''), '0')"
     )
 
 
