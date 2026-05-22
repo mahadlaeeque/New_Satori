@@ -845,12 +845,13 @@ def admin_set_user_features(user_id: int, body: AdminFeaturesUpdate, _: dict = D
 #     own practice's data once row-level scoping is active)
 # Preview vs import is a two-step flow so the admin can untick rows in the UI.
 
-def _read_practice_heads_from_bq() -> list[dict]:
+def _read_practice_heads_from_bq() -> tuple[list[dict], str | None]:
     """Pull every row of Practice_Heads_List as a list of plain dicts.
     Columns: employee_code, resource_name, EmployeePosition, EmployeeEmail,
     EmployeeHierarchyNode, EmployeeLocation, employee_status, employee_type,
-    Department. Returns [] on any BQ error (logged) so the import UI degrades
-    gracefully rather than 500ing."""
+    Department. Returns (rows, error_msg) — error_msg is None on success,
+    otherwise a specific human-readable explanation (table not found,
+    permission denied, etc.) so the import UI can show what actually failed."""
     sql = f"""
         SELECT
           employee_code,
@@ -869,8 +870,21 @@ def _read_practice_heads_from_bq() -> list[dict]:
     sql = normalize_bq_project(sql)
     r = bq_run_query(sql, max_rows=500)
     if "error" in r:
-        print(f"[practice-heads] BQ read error: {r['error']}")
-        return []
+        err = str(r["error"])
+        print(f"[practice-heads] BQ read error against {BQ_FULL}.Practice_Heads_List: {err}")
+        # Classify the most common failure modes so the UI message is useful.
+        low = err.lower()
+        if "not found" in low or "does not exist" in low or "404" in low:
+            msg = (f"Practice_Heads_List doesn't exist in {BQ_FULL}. "
+                   f"Either upload it to that dataset, or check that Cloud Run's "
+                   f"VERTEX_PROJECT env var points to the project where the table lives.")
+        elif "permission" in low or "denied" in low or "403" in low:
+            msg = (f"Permission denied reading {BQ_FULL}.Practice_Heads_List. "
+                   f"The Satori runtime service account needs roles/bigquery.dataViewer "
+                   f"+ roles/bigquery.jobUser on this project.")
+        else:
+            msg = f"BigQuery error reading {BQ_FULL}.Practice_Heads_List: {err}"
+        return [], msg
     return [
         {
             "employee_code":        (row.get("employee_code") or "").strip(),
@@ -900,9 +914,15 @@ def admin_practice_heads_preview(_: dict = Depends(require_admin)):
     """Return the Practice_Heads_List rows annotated with which would be
     created vs already exist (matched by lowercased email). The frontend
     renders this as a confirm-table before the actual import."""
-    rows = _read_practice_heads_from_bq()
+    rows, err = _read_practice_heads_from_bq()
+    if err:
+        return {"rows": [], "warning": err, "bq_project": BQ_PROJECT, "bq_dataset": BQ_DATASET}
     if not rows:
-        return {"rows": [], "warning": "Practice_Heads_List is empty or unreachable."}
+        return {"rows": [], "warning": (
+            f"Practice_Heads_List exists in {BQ_FULL} but no rows came back. "
+            f"Likely cause: every row has an empty EmployeeEmail. "
+            f"Check the table contents in BigQuery."
+        )}
     db = get_db(); cur = db.cursor()
     cur.execute("SELECT LOWER(email) AS email FROM users")
     existing = {r["email"] for r in cur.fetchall()}
@@ -940,9 +960,11 @@ def admin_practice_heads_import(body: dict, admin: dict = Depends(require_admin)
 
     selected_emails = {(e or "").strip().lower() for e in (body.get("emails") or [])}
 
-    rows = _read_practice_heads_from_bq()
+    rows, err = _read_practice_heads_from_bq()
+    if err:
+        raise HTTPException(status_code=502, detail=err)
     if not rows:
-        raise HTTPException(status_code=502, detail="Could not read Practice_Heads_List from BigQuery.")
+        raise HTTPException(status_code=502, detail=f"Practice_Heads_List in {BQ_FULL} returned no rows with non-empty EmployeeEmail.")
 
     db = get_db(); cur = db.cursor()
     # Admin's company is reused — matches admin_create_user above.
@@ -2527,26 +2549,41 @@ def get_chat_history(user: dict = Depends(get_current_user), limit: int = 20):
 # ── Chat conversations: list / load / delete saved chats ──
 @app.get("/api/chat/conversations")
 def list_chat_conversations(user: dict = Depends(get_current_user), limit: int = 50):
-    """List the current user's conversations, newest first."""
+    """List the current user's conversations, newest first. If the underlying
+    table is missing (startup migration silently failed) we run the migration
+    on the fly and retry once before giving up — so a stale DB self-heals on
+    first visit to the chat sidebar."""
     uid = int(user["sub"])
-    db = get_db(); cur = db.cursor()
+
+    def _query():
+        db = get_db(); cur = db.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT c.id, c.title, c.created_at, c.updated_at,
+                       (SELECT COUNT(*) FROM chat_messages m WHERE m.conversation_id = c.id) AS message_count
+                FROM chat_conversations c
+                WHERE c.user_id = ?
+                ORDER BY c.updated_at DESC
+                LIMIT ?
+                """,
+                (uid, limit),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            try: db.close()
+            except Exception: pass
+
     try:
-        cur.execute(
-            """
-            SELECT c.id, c.title, c.created_at, c.updated_at,
-                   (SELECT COUNT(*) FROM chat_messages m WHERE m.conversation_id = c.id) AS message_count
-            FROM chat_conversations c
-            WHERE c.user_id = ?
-            ORDER BY c.updated_at DESC
-            LIMIT ?
-            """,
-            (uid, limit),
-        )
-        rows = [dict(r) for r in cur.fetchall()]
+        rows = _query()
     except Exception as e:
-        print(f"[/api/chat/conversations] error: {e}")
-        rows = []
-    db.close()
+        print(f"[/api/chat/conversations] first attempt failed, self-healing migration: {e}")
+        try:
+            _ensure_chat_tables_exist()
+            rows = _query()
+        except Exception as e2:
+            print(f"[/api/chat/conversations] retry also failed: {e2}")
+            rows = []
     return {"conversations": rows}
 
 
@@ -2580,12 +2617,28 @@ def delete_chat_conversation(conv_id: int, user: dict = Depends(get_current_user
     return {"ok": True}
 
 
+def _ensure_chat_tables_exist():
+    """Self-heal in case the startup migration silently failed. Safe to call
+    repeatedly — every statement is `CREATE TABLE IF NOT EXISTS`. Called from
+    `_save_chat_turn` so a fresh DB still works without a service restart."""
+    try:
+        from database import USE_POSTGRES, _migrate_add_chat_tables
+        _migrate_add_chat_tables()
+    except Exception as e:
+        print(f"[_ensure_chat_tables_exist] migration retry failed: {e}")
+
+
 def _save_chat_turn(user_id: int, conv_id, user_message: str, ai_reply: str) -> int:
     """Persist a (user, assistant) turn to chat_conversations + chat_messages.
     If conv_id is None or 0, creates a fresh conversation. Returns the
     conv_id used (so the frontend can adopt it for subsequent turns)."""
     from database import USE_POSTGRES
-    db = get_db(); cur = db.cursor()
+    print(f"[_save_chat_turn] user={user_id} conv_id={conv_id} msg_len={len(user_message or '')} reply_len={len(ai_reply or '')}")
+    try:
+        db = get_db(); cur = db.cursor()
+    except Exception as e:
+        print(f"[_save_chat_turn] get_db FAILED: {e}")
+        return conv_id
     try:
         if not conv_id:
             # Build a 60-char title from the first user message.
@@ -2596,6 +2649,9 @@ def _save_chat_turn(user_id: int, conv_id, user_message: str, ai_reply: str) -> 
                     (user_id, title),
                 )
                 row = cur.fetchone()
+                if row is None:
+                    print("[_save_chat_turn] RETURNING gave None — likely table missing")
+                    raise RuntimeError("chat_conversations RETURNING returned None")
                 conv_id = row["id"] if isinstance(row, dict) else row[0]
             else:
                 cur.execute(
@@ -2603,6 +2659,7 @@ def _save_chat_turn(user_id: int, conv_id, user_message: str, ai_reply: str) -> 
                     (user_id, title),
                 )
                 conv_id = cur.lastrowid
+            print(f"[_save_chat_turn] created new conv_id={conv_id}")
         else:
             # Touch updated_at so list ordering reflects most-recent activity.
             cur.execute(
@@ -2618,10 +2675,49 @@ def _save_chat_turn(user_id: int, conv_id, user_message: str, ai_reply: str) -> 
             (conv_id, "assistant", ai_reply or ""),
         )
         db.commit()
+        print(f"[_save_chat_turn] committed conv_id={conv_id}")
     except Exception as e:
-        print(f"[_save_chat_turn] error: {e}")
+        # If the tables don't exist (e.g. startup migration silently failed
+        # against a Cloud SQL instance with a tighter schema), retry the
+        # migration and the save once. This keeps chat working without
+        # requiring a service redeploy.
+        import traceback as _tb
+        print(f"[_save_chat_turn] first attempt failed: {e}\n{_tb.format_exc()}")
+        try: db.close()
+        except Exception: pass
+        _ensure_chat_tables_exist()
+        try:
+            db = get_db(); cur = db.cursor()
+            if not conv_id:
+                title = (user_message or "New conversation").strip().split("\n")[0][:60]
+                if USE_POSTGRES:
+                    cur.execute(
+                        "INSERT INTO chat_conversations (user_id, title) VALUES (?, ?) RETURNING id",
+                        (user_id, title),
+                    )
+                    row = cur.fetchone()
+                    conv_id = row["id"] if isinstance(row, dict) else row[0]
+                else:
+                    cur.execute(
+                        "INSERT INTO chat_conversations (user_id, title) VALUES (?, ?)",
+                        (user_id, title),
+                    )
+                    conv_id = cur.lastrowid
+            cur.execute(
+                "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, ?, ?)",
+                (conv_id, "user", user_message or ""),
+            )
+            cur.execute(
+                "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, ?, ?)",
+                (conv_id, "assistant", ai_reply or ""),
+            )
+            db.commit()
+            print(f"[_save_chat_turn] recovered after migration retry, conv_id={conv_id}")
+        except Exception as e2:
+            print(f"[_save_chat_turn] retry also failed: {e2}")
     finally:
-        db.close()
+        try: db.close()
+        except Exception: pass
     return conv_id
 
 
@@ -4576,10 +4672,32 @@ def _dept_scope_clause(dept_scope: list | None) -> str:
     return f" AND COALESCE(NULLIF(TRIM(Employee_Hierarchy), ''), 'Unspecified') IN ({quoted})"
 
 
+def _norm_emp_id(col: str) -> str:
+    """Normalize an employee-ID column for cross-table joining.
+
+    Different source systems write the same employee with different shapes:
+      - Employee_Code might be `1234` (INT) on one feed
+      - Allocation_data.employee_id might be `00001234` (zero-padded STRING)
+      - Timesheet_Data.TICKET_USER_ID might be `1234.0` (FLOAT-cast STRING)
+
+    Stripping a trailing `.0` (REGEXP_REPLACE), then LTRIM('0'), gives a
+    canonical numeric string that joins reliably across all three tables.
+    Wrapped via NULLIF + COALESCE so an entirely-zero value (e.g. '0' or
+    '000') normalises to '0' rather than '' (which would join everything-
+    to-everything)."""
+    return (
+        f"COALESCE(NULLIF(LTRIM(REGEXP_REPLACE("
+        f"CAST({col} AS STRING), r'\\.0+$', ''), '0'), ''), '0')"
+    )
+
+
 def _avail_kpis_sql(dept_scope: list | None = None) -> str:
+    emp_id_emp   = _norm_emp_id("Employee_Code")
+    emp_id_alloc = _norm_emp_id("employee_id")
+    emp_id_ts    = _norm_emp_id("TICKET_USER_ID")
     return f"""
         WITH active_emp AS (
-          SELECT CAST(Employee_Code AS STRING) AS emp_id
+          SELECT {emp_id_emp} AS emp_id
           FROM {_bq_avail('Employee_Data')}
           WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
                 {_dept_scope_clause(dept_scope)}
@@ -4591,7 +4709,7 @@ def _avail_kpis_sql(dept_scope: list | None = None) -> str:
           -- across all rows + MAX preserves the "ever been allocated"
           -- signal, matching the legacy /api/availability/engine dashboard
           -- pattern (main.py ~line 2475).
-          SELECT CAST(employee_id AS STRING) AS emp_id,
+          SELECT {emp_id_alloc} AS emp_id,
                  MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct
           FROM {_bq_avail('Allocation_data')}
           GROUP BY emp_id
@@ -4604,7 +4722,10 @@ def _avail_kpis_sql(dept_scope: list | None = None) -> str:
           -- Window is anchored to MAX(date) in the data, not CURRENT_DATE,
           -- so the "last 90 days" stays meaningful even when the data
           -- is older than the server clock (e.g. a year-old QVD import).
-          SELECT CAST(TICKET_USER_ID AS STRING) AS emp_id,
+          --
+          -- TICKET_USER_ID is normalised via _norm_emp_id so leading
+          -- zeros / float-cast suffixes don't break the join to active_emp.
+          SELECT {emp_id_ts} AS emp_id,
                  SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) AS hrs_90d
           FROM {_bq_avail('Timesheet_Data')}
           WHERE COALESCE(
@@ -4644,9 +4765,11 @@ def _avail_skills_sql(limit: int = 50, min_count: int = 5, dept_scope: list | No
     (latest per employee) and Employee_Data.Employee_Position, with per-tag
     DISTINCT-employee counts. Tags with fewer than min_count employees are
     hidden to keep the row digestible."""
+    emp_id_emp   = _norm_emp_id("Employee_Code")
+    emp_id_alloc = _norm_emp_id("employee_id")
     return f"""
         WITH active_emp AS (
-          SELECT CAST(Employee_Code AS STRING) AS emp_id,
+          SELECT {emp_id_emp} AS emp_id,
                  COALESCE(NULLIF(TRIM(Employee_Position), ''), '') AS position
           FROM {_bq_avail('Employee_Data')}
           WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
@@ -4658,7 +4781,7 @@ def _avail_skills_sql(limit: int = 50, min_count: int = 5, dept_scope: list | No
           -- and ORDER BY Date errors on capability-agent-prod. ANY_VALUE
           -- picks a representative competency per employee non-deterministically,
           -- which is fine for the tag-count aggregation downstream.
-          SELECT CAST(employee_id AS STRING) AS emp_id,
+          SELECT {emp_id_alloc} AS emp_id,
                  ANY_VALUE(TRIM(emp_competency)) AS emp_competency
           FROM {_bq_avail('Allocation_data')}
           WHERE emp_competency IS NOT NULL AND TRIM(emp_competency) != ''
@@ -4686,9 +4809,12 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
     """Per-employee card data. One row per active employee with allocation %,
     project count, latest competency, 90d timesheet hours, and a derived
     status band (Bench / Partial / Allocated)."""
+    emp_id_emp   = _norm_emp_id("Employee_Code")
+    emp_id_alloc = _norm_emp_id("employee_id")
+    emp_id_ts    = _norm_emp_id("TICKET_USER_ID")
     return f"""
         WITH active_emp AS (
-          SELECT CAST(Employee_Code AS STRING) AS emp_id,
+          SELECT {emp_id_emp} AS emp_id,
                  Employee_Code AS code,
                  Resource_Name AS name,
                  COALESCE(NULLIF(TRIM(Employee_Position), ''), '') AS position,
@@ -4702,7 +4828,7 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
           -- No Date filter: Allocation_data.Date type unreliable on
           -- capability-agent-prod (see emp_alloc CTE in _avail_kpis_sql).
           -- MAX across all rows preserves the "ever been allocated" signal.
-          SELECT CAST(employee_id AS STRING) AS emp_id,
+          SELECT {emp_id_alloc} AS emp_id,
                  MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct,
                  COUNT(DISTINCT project_id) AS project_count,
                  ANY_VALUE(emp_competency) AS competency
@@ -4712,8 +4838,10 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
         emp_ts AS (
           -- Same MAX-date-anchored 90-day window as _avail_kpis_sql so
           -- the engine reflects whatever data is loaded rather than the
-          -- server's wall-clock relative to it.
-          SELECT CAST(TICKET_USER_ID AS STRING) AS emp_id,
+          -- server's wall-clock relative to it. TICKET_USER_ID is normalised
+          -- (leading zeros stripped, '.0' float suffix removed) so the join
+          -- back to active_emp matches regardless of column type / padding.
+          SELECT {emp_id_ts} AS emp_id,
                  SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) AS hrs_90d
           FROM {_bq_avail('Timesheet_Data')}
           WHERE COALESCE(
@@ -4880,6 +5008,82 @@ def availability_employees(
     return {"employees": out, "total": len(out)}
 
 
+@app.get("/api/availability/_diag")
+def availability_diag(_: dict = Depends(require_admin)):
+    """Admin-only diagnostic endpoint — surfaces raw row counts and a small
+    sample of IDs from each upstream table, plus the count of rows that join
+    successfully under the normalised-ID rule. If a join shows 0 overlap,
+    the per-table sample makes the format mismatch obvious (leading zeros,
+    `.0` suffixes, weird prefixes, etc.). Intentionally cheap — total budget
+    well under one BQ slot-minute."""
+    norm_emp   = _norm_emp_id("Employee_Code")
+    norm_alloc = _norm_emp_id("employee_id")
+    norm_ts    = _norm_emp_id("TICKET_USER_ID")
+    sql = f"""
+        WITH emp_sample AS (
+          SELECT DISTINCT
+            CAST(Employee_Code AS STRING) AS raw,
+            {norm_emp} AS norm
+          FROM {_bq_avail('Employee_Data')}
+          WHERE Employee_Code IS NOT NULL
+          LIMIT 5
+        ),
+        alloc_sample AS (
+          SELECT DISTINCT
+            CAST(employee_id AS STRING) AS raw,
+            {norm_alloc} AS norm
+          FROM {_bq_avail('Allocation_data')}
+          WHERE employee_id IS NOT NULL
+          LIMIT 5
+        ),
+        ts_sample AS (
+          SELECT DISTINCT
+            CAST(TICKET_USER_ID AS STRING) AS raw,
+            {norm_ts} AS norm
+          FROM {_bq_avail('Timesheet_Data')}
+          WHERE TICKET_USER_ID IS NOT NULL
+          LIMIT 5
+        ),
+        emp_norm AS (
+          SELECT DISTINCT {norm_emp} AS emp_id
+          FROM {_bq_avail('Employee_Data')}
+          WHERE Employee_Code IS NOT NULL
+        ),
+        alloc_norm AS (
+          SELECT DISTINCT {norm_alloc} AS emp_id
+          FROM {_bq_avail('Allocation_data')}
+          WHERE employee_id IS NOT NULL
+        ),
+        ts_norm AS (
+          SELECT DISTINCT {norm_ts} AS emp_id
+          FROM {_bq_avail('Timesheet_Data')}
+          WHERE TICKET_USER_ID IS NOT NULL
+        )
+        SELECT
+          (SELECT COUNT(*) FROM {_bq_avail('Employee_Data')})                AS emp_total_rows,
+          (SELECT COUNT(*) FROM {_bq_avail('Allocation_data')})              AS alloc_total_rows,
+          (SELECT COUNT(*) FROM {_bq_avail('Timesheet_Data')})               AS ts_total_rows,
+          (SELECT COUNT(*) FROM emp_norm)                                    AS emp_distinct_norm,
+          (SELECT COUNT(*) FROM alloc_norm)                                  AS alloc_distinct_norm,
+          (SELECT COUNT(*) FROM ts_norm)                                     AS ts_distinct_norm,
+          (SELECT COUNT(*) FROM emp_norm e JOIN alloc_norm a USING (emp_id)) AS emp_alloc_join,
+          (SELECT COUNT(*) FROM emp_norm e JOIN ts_norm    t USING (emp_id)) AS emp_ts_join,
+          ARRAY(SELECT AS STRUCT raw, norm FROM emp_sample)                  AS emp_sample,
+          ARRAY(SELECT AS STRUCT raw, norm FROM alloc_sample)                AS alloc_sample,
+          ARRAY(SELECT AS STRUCT raw, norm FROM ts_sample)                   AS ts_sample
+    """
+    sql = normalize_bq_project(sql)
+    r = bq_run_query(sql, max_rows=1)
+    if "error" in r:
+        return {"error": r["error"], "project": BQ_PROJECT, "dataset": BQ_DATASET}
+    rows = r.get("rows") or []
+    return {
+        "project": BQ_PROJECT,
+        "dataset": BQ_DATASET,
+        "summary": rows[0] if rows else None,
+    }
+
+
 @app.get("/api/availability/employees/{code}/detail")
 def availability_employee_detail(code: str, user: dict = Depends(get_current_user)):
     """Return drill-down detail for one employee: projects + timesheet
@@ -4915,6 +5119,9 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
                         detail=f"You're scoped to {', '.join(dept_scope)} and don't have access to this employee.",
                     )
 
+    # Normalised lookup key: stripped of leading zeros + trailing '.0' so a
+    # `1234` code matches `00001234` or `1234.0` in feeder tables.
+    norm_target = _norm_emp_id(f"'{safe_code}'")
     # Project allocations — every project this employee has touched, with
     # peak allocation % and the competency they brought to it. No Date
     # filter (Allocation_data.Date type unreliable on prod, see _avail_kpis_sql).
@@ -4925,7 +5132,7 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
           MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS allocation_pct,
           COUNT(*) AS records
         FROM {_bq_avail('Allocation_data')}
-        WHERE CAST(employee_id AS STRING) = '{safe_code}'
+        WHERE {_norm_emp_id('employee_id')} = {norm_target}
         GROUP BY project_id, competency
         ORDER BY allocation_pct DESC, records DESC
         LIMIT 50
@@ -4948,6 +5155,8 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
     # Timesheet breakdown over last 90d — top projects by hours, with
     # ticket counts and last-entry date. Uses the same type-agnostic
     # DATE_KEY filter as the list endpoints (handles DATE + INT64 shapes).
+    # TICKET_USER_ID match is normalised so leading zeros / `.0` suffixes
+    # don't break the per-employee lookup.
     ts_sql = f"""
         WITH t AS (
           SELECT
@@ -4958,7 +5167,7 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
               SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))
             ) AS d
           FROM {_bq_avail('Timesheet_Data')}
-          WHERE CAST(TICKET_USER_ID AS STRING) = '{safe_code}'
+          WHERE {_norm_emp_id('TICKET_USER_ID')} = {norm_target}
         )
         SELECT
           project,
