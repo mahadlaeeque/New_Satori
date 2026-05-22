@@ -6497,6 +6497,9 @@ def health_check():
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+_FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
+
+
 class SPAStaticFiles(StaticFiles):
     """StaticFiles that falls back to index.html for any unknown path so React
     Router's client-side routing works on direct visits / refresh."""
