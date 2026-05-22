@@ -215,6 +215,29 @@ def require_admin(user: dict = Depends(get_current_user)) -> dict:
     return user
 
 
+# Email that identifies the company-wide superadmin. Used to gate the System
+# Settings page and data-scope configuration endpoints. These affect how
+# every user (including other admins) sees data, so we lock them to the
+# single bootstrap account rather than the entire admin role.
+SUPERADMIN_EMAIL = (os.environ.get("SUPERADMIN_EMAIL") or "superadmin@sfml.com").strip().lower()
+
+
+def _user_is_superadmin(user: dict) -> bool:
+    """True if the JWT-resolved user is the configured superadmin account."""
+    if (user.get("role") or "").lower() != "admin":
+        return False
+    return (user.get("email") or "").strip().lower() == SUPERADMIN_EMAIL
+
+
+def require_superadmin(user: dict = Depends(get_current_user)) -> dict:
+    """Guard for company-wide configuration endpoints (System Settings,
+    data scope dimensions, per-user scope assignments). Only the bootstrap
+    superadmin account passes - other admins get 403."""
+    if not _user_is_superadmin(user):
+        raise HTTPException(status_code=403, detail="Superadmin access required")
+    return user
+
+
 # ── Feature Catalog ──
 # Source of truth for the three navigable features in the app. Frontend uses these
 # IDs to render the sidebar; admin uses these IDs to grant per-user access.
@@ -602,20 +625,28 @@ def get_me(user: dict = Depends(get_current_user)):
 
 @app.get("/api/me/permissions")
 def get_my_permissions(user: dict = Depends(get_current_user)):
-    """Return the current user's role, accessible feature IDs, and data-scope
-    policy. Frontend uses this to filter the sidebar and show scope badges."""
+    """Return the current user's role, accessible feature IDs, data-scope
+    policy, and the is_superadmin flag the frontend uses to gate the
+    System Settings page."""
     uid = int(user["sub"])
     role = user.get("role", "user")
-    plant_scope = _get_user_plant_scope(uid) if role.lower() != "admin" else None
+    is_admin = role.lower() == "admin"
+    dept_scope = _get_user_dept_scope(uid) if not is_admin else None
+    practice_scope = _get_user_scope_values(uid, "practice_node") if not is_admin else None
     return {
         "role": role,
+        "is_superadmin": _user_is_superadmin(user),
         "features": _features_for_user(uid, role),
         # data_scope: null = see all; [] or [...] = restricted
         "data_scope": {
-            "plant": {
-                "enforced": plant_scope is not None,
-                "values": plant_scope or [],
-            }
+            "department": {
+                "enforced": dept_scope is not None,
+                "values": dept_scope or [],
+            },
+            "practice_node": {
+                "enforced": practice_scope is not None,
+                "values": practice_scope or [],
+            },
         },
     }
 
@@ -1185,48 +1216,48 @@ class AdminDimensionToggle(BaseModel):
 
 # Supported dimensions. Plant is always company-enabled and cannot be
 # disabled. Others are off by default — admin can turn them on.
+# Workforce-scoping dimensions. Both pull distinct values from Employee_Data
+# in the active BigQuery project (capability-agent-prod.Satori_Project on prod).
+# Department maps to Employee_Hierarchy (top-level practice grouping).
+# Practice Node maps to EmployeeHierarchyNode (the same column the Practice
+# Heads import seeds against the user_data_scope table).
 _SCOPE_DIMENSIONS = {
-    "plant": {"label": "Plant", "bq_sql": (
-        "SELECT plant_id AS value, plant_name AS label "
-        "FROM `sfml-491907.sap_hana_mirror.plants` "
-        "WHERE plant_id NOT LIKE '0%' AND plant_id NOT LIKE '9%' "
-        "ORDER BY plant_id"
+    "department": {"label": "Department", "bq_sql": (
+        "SELECT DISTINCT TRIM(Employee_Hierarchy) AS value, TRIM(Employee_Hierarchy) AS label "
+        "FROM `__BQ_FULL__`.Employee_Data "
+        "WHERE Employee_Hierarchy IS NOT NULL AND TRIM(Employee_Hierarchy) != '' "
+        "ORDER BY value LIMIT 200"
     )},
-    "material_type": {"label": "Material Type", "bq_sql": (
-        "SELECT DISTINCT material_type AS value, material_type AS label "
-        "FROM `sfml-491907.sap_hana_mirror.material_master` "
-        "WHERE material_type IS NOT NULL ORDER BY material_type LIMIT 200"
-    )},
-    "storage_location": {"label": "Storage Location", "bq_sql": (
-        "SELECT DISTINCT storage_location AS value, storage_location AS label "
-        "FROM `sfml-491907.sap_hana_mirror.fact_material_stock_daily` "
-        "WHERE stock_type='STORAGE' AND storage_location IS NOT NULL AND storage_location != '' "
-        "ORDER BY storage_location LIMIT 200"
-    )},
-    "order_type": {"label": "Order Type", "bq_sql": (
-        "SELECT DISTINCT order_type AS value, order_type AS label "
-        "FROM `sfml-491907.sap_hana_mirror.orders` ORDER BY order_type LIMIT 100"
-    )},
-    "po_type": {"label": "PO Type", "bq_sql": (
-        "SELECT DISTINCT purchase_order_type AS value, purchase_order_type AS label "
-        "FROM `sfml-491907.sap_hana_mirror.purchase_order_header` ORDER BY purchase_order_type LIMIT 100"
+    "practice_node": {"label": "Practice Node", "bq_sql": (
+        "SELECT DISTINCT TRIM(EmployeeHierarchyNode) AS value, TRIM(EmployeeHierarchyNode) AS label "
+        "FROM `__BQ_FULL__`.Employee_Data "
+        "WHERE EmployeeHierarchyNode IS NOT NULL AND TRIM(EmployeeHierarchyNode) != '' "
+        "ORDER BY value LIMIT 500"
     )},
 }
 
 
 @app.get("/api/admin/lookups/{dimension}")
-def admin_lookup_dimension(dimension: str, _: dict = Depends(require_admin)):
+def admin_lookup_dimension(dimension: str, _: dict = Depends(require_superadmin)):
     """Return selectable values for a scope dimension (from BigQuery).
-    Used to populate the plant / material-type / etc. checkboxes in the admin UI."""
+    Used to populate the department / practice-node checkboxes in the
+    System Settings page."""
     if dimension not in _SCOPE_DIMENSIONS:
         raise HTTPException(status_code=400, detail=f"Unknown dimension '{dimension}'. Allowed: {list(_SCOPE_DIMENSIONS)}")
-    sql = _SCOPE_DIMENSIONS[dimension]["bq_sql"]
-    rows = _sap_query(sql, max_rows=300)
+    # __BQ_FULL__ placeholder lets the dimension config stay project-agnostic;
+    # swap it for the live BQ_FULL value at lookup time so the same dict works
+    # across migrations between projects.
+    sql = _SCOPE_DIMENSIONS[dimension]["bq_sql"].replace("__BQ_FULL__", BQ_FULL)
+    r = bq_run_query(normalize_bq_project(sql), max_rows=500)
+    if "error" in r:
+        print(f"[/api/admin/lookups/{dimension}] BQ error: {r['error']}")
+        raise HTTPException(status_code=500, detail=r["error"])
+    rows = r.get("rows") or []
     return {"dimension": dimension, "label": _SCOPE_DIMENSIONS[dimension]["label"], "values": rows}
 
 
 @app.get("/api/admin/users/{user_id}/scope")
-def admin_get_user_scope(user_id: int, _: dict = Depends(require_admin)):
+def admin_get_user_scope(user_id: int, _: dict = Depends(require_superadmin)):
     """Get a user's data-scope policy (per-dimension enforcement flag + allowed values)."""
     db = get_db()
     cur = db.cursor()
@@ -1254,7 +1285,7 @@ def admin_get_user_scope(user_id: int, _: dict = Depends(require_admin)):
 @app.put("/api/admin/users/{user_id}/scope")
 def admin_set_user_scope(
     user_id: int, body: AdminScopeUpdate, request: Request,
-    admin: dict = Depends(require_admin),
+    admin: dict = Depends(require_superadmin),
 ):
     """Set a user's scope for one dimension. Replaces the allowed-value list.
     Setting enforced=False means 'see all' for that dimension (values are cleared)."""
@@ -1306,7 +1337,7 @@ def admin_set_user_scope(
 
 
 @app.get("/api/admin/scope-dimensions")
-def admin_get_scope_dimensions(_: dict = Depends(require_admin)):
+def admin_get_scope_dimensions(_: dict = Depends(require_superadmin)):
     """Return company-level dimension settings (which dimensions the admin has enabled).
     Plant is always present and enabled. Others default to disabled."""
     db = get_db()
@@ -1320,21 +1351,22 @@ def admin_get_scope_dimensions(_: dict = Depends(require_admin)):
     # Build full catalog, merging stored state with defaults
     result = {}
     for dim, meta in _SCOPE_DIMENSIONS.items():
+        # Default-on for both workforce dimensions. Neither is locked - the
+        # superadmin can turn either off if the company decides scoping by
+        # one of them is too restrictive.
         result[dim] = {
             "label": meta["label"],
-            "enabled": stored.get(dim, dim == "plant"),  # plant always enabled by default
-            "locked": dim == "plant",  # plant cannot be disabled
+            "enabled": stored.get(dim, True),
+            "locked": False,
         }
     return {"dimensions": result}
 
 
 @app.put("/api/admin/scope-dimensions")
-def admin_set_scope_dimension(body: AdminDimensionToggle, admin: dict = Depends(require_admin)):
+def admin_set_scope_dimension(body: AdminDimensionToggle, admin: dict = Depends(require_superadmin)):
     """Toggle a company-level scope dimension on or off. Plant dimension cannot be disabled."""
     if body.dimension not in _SCOPE_DIMENSIONS:
         raise HTTPException(status_code=400, detail=f"Unknown dimension '{body.dimension}'")
-    if body.dimension == "plant":
-        raise HTTPException(status_code=400, detail="The plant dimension is always enabled and cannot be disabled.")
     db = get_db()
     cur = db.cursor()
     if USE_POSTGRES_FLAG():
@@ -1405,6 +1437,36 @@ def _get_user_plant_scope(user_id: int):
             return None
         return [r["value"] if isinstance(r, dict) else r[0] for r in rows]
     except Exception:
+        return None
+
+
+def _get_user_scope_values(user_id: int, dimension: str) -> "list[str] | None":
+    """Return the allowed values for any scope dimension on this user.
+    None = unrestricted (no enforcement policy). [] = explicitly empty.
+    Mirrors _get_user_dept_scope but parameterised on the dimension name."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute(
+            "SELECT enforced FROM user_data_scope_policy "
+            "WHERE user_id = ? AND dimension = ?",
+            (user_id, dimension),
+        )
+        pol = cur.fetchone()
+        if not pol:
+            db.close(); return None
+        enforced = pol["enforced"] if isinstance(pol, dict) else pol[0]
+        if not bool(enforced):
+            db.close(); return None
+        cur.execute(
+            "SELECT value FROM user_data_scope "
+            "WHERE user_id = ? AND dimension = ? ORDER BY value",
+            (user_id, dimension),
+        )
+        rows = cur.fetchall()
+        db.close()
+        return [(r["value"] if isinstance(r, dict) else r[0]) for r in rows]
+    except Exception as e:
+        print(f"[_get_user_scope_values] error for dimension={dimension}: {e}")
         return None
 
 

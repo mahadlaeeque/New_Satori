@@ -8461,7 +8461,7 @@ const NAV_ITEMS = [
   { id: "_divider_admin", label: "ADMIN", isDivider: true, adminOnly: true },
   { id: "users", label: "User Management", icon: Users, component: UserManagementPage, adminOnly: true },
   { id: "audit", label: "Audit Log", icon: Shield, component: AuditLogPage, adminOnly: true },
-  { id: "settings", label: "System Settings", icon: Settings, component: SystemSettingsPage, adminOnly: true },
+  { id: "settings", label: "System Settings", icon: Settings, component: SystemSettingsPage, superAdminOnly: true },
 ];
 
 // ─── Global fetch interceptor — fires "auth:session-expired" on any 401 ───
@@ -9427,10 +9427,15 @@ export default function App() {
   // Compute the visible sidebar items based on the user's role + feature grants.
   // Drop dividers that have no visible items below them.
   const isAdmin = (permissions?.role || currentUser?.role || "").toLowerCase() === "admin";
+  // superAdminOnly items (currently just System Settings) require BOTH admin
+  // role AND the bootstrap superadmin email. Backend sets is_superadmin in
+  // /api/me/permissions; we treat a missing flag as false for safety.
+  const isSuperAdmin = Boolean(permissions?.is_superadmin);
   const allowedFeatures = new Set(permissions?.features || []);
   const visibleNav = (() => {
     const filtered = NAV_ITEMS.filter((item) => {
       if (item.isDivider) return true; // keep for now; we'll prune empty sections after
+      if (item.superAdminOnly) return isSuperAdmin;
       if (item.adminOnly) return isAdmin;
       if (item.requiresFeature) return isAdmin || allowedFeatures.has(item.requiresFeature);
       return true;
@@ -9441,7 +9446,9 @@ export default function App() {
       const item = filtered[i];
       if (item.isDivider) {
         const hasFollower = filtered.slice(i + 1).some(
-          (n) => !n.isDivider && (!n.adminOnly || isAdmin)
+          (n) => !n.isDivider
+            && (!n.superAdminOnly || isSuperAdmin)
+            && (!n.adminOnly || isAdmin)
         );
         // also drop if next divider comes before any non-divider
         const nextDividerIdx = filtered.slice(i + 1).findIndex((n) => n.isDivider);
