@@ -885,7 +885,7 @@ def _read_practice_heads_from_bq() -> tuple[list[dict], str | None]:
         else:
             msg = f"BigQuery error reading {BQ_FULL}.Practice_Heads_List: {err}"
         return [], msg
-    return [
+    rows_out = [
         {
             "employee_code":        (row.get("employee_code") or "").strip(),
             "resource_name":        (row.get("resource_name") or "").strip(),
@@ -899,6 +899,7 @@ def _read_practice_heads_from_bq() -> tuple[list[dict], str | None]:
         }
         for row in (r.get("rows") or [])
     ]
+    return rows_out, None
 
 
 def _random_temp_password(n: int = 12) -> str:
