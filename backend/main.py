@@ -2173,8 +2173,33 @@ def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None, dept_scope
     # Gemini's prompt examples still hard-code the legacy name; without this
     # rewrite every chat turn would target the old project and fail.
     sql_stripped = normalize_bq_project(sql_stripped)
-    print(f"[CHAT-SQL] Running: {sql_stripped[:200]}")
+
+    # If the dept-scope enforcer refused the SQL (workforce table without
+    # Employee_Data join), short-circuit with a clear message that Gemini
+    # will see in the tool result -- otherwise BQ returns 0 rows and Gemini
+    # interprets that as "no matching data" and keeps retrying.
+    if "SCOPE_REFUSED" in sql_stripped[:80].upper():
+        print("[CHAT-SQL] SCOPE_REFUSED short-circuit -- telling Gemini to add JOIN")
+        return ("SCOPE_REFUSED: This query touches a workforce table "
+                "(Attendance_Data / Allocation_data / Timesheet_Data / "
+                "Practice_Heads_List) but does NOT join to Employee_Data. "
+                "I cannot run this safely for a department-scoped user. "
+                "Re-run with a LEFT JOIN to Employee_Data on the "
+                "digits-only employee id, e.g.:\n"
+                "  LEFT JOIN `Employee_Data` e ON "
+                "LTRIM(REGEXP_REPLACE(CAST(<their_emp_col> AS STRING), "
+                "r'[^0-9]', ''), '0') = "
+                "LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), "
+                "r'[^0-9]', ''), '0')\n"
+                "Then issue exactly ONE more run_sql call with the joined "
+                "query. Do not give up.")
+
+    print(f"[CHAT-SQL] Running: {sql_stripped[:300]}")
     result = run_query(sql_stripped, max_rows=500)
+    if "error" in result:
+        print(f"[CHAT-SQL] BQ ERROR: {result.get('error')}")
+    else:
+        print(f"[CHAT-SQL] BQ OK rows={len(result.get('rows') or [])} cols={result.get('columns')}")
     if "error" in result:
         return f"Query error: {result['error']}"
     if not result.get("rows"):
@@ -2531,13 +2556,44 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
             config=genai.types.GenerateContentConfig(
                 system_instruction=system_prompt_final,
                 temperature=0.5,
-                max_output_tokens=1024,
+                max_output_tokens=2048,
                 # Cap thinking so a complex post-rounds compose still has output budget
                 # left for the actual answer — but allow some reasoning.
                 thinking_config=genai.types.ThinkingConfig(thinking_budget=1024),
             ),
         )
-        reply = response.text or "I wasn't able to generate a response. Please try again."
+        reply = response.text
+        if not reply:
+            # Post-MAX_ROUNDS empty - surface the last successful tool result
+            # so the user at least sees the rows instead of a generic apology.
+            last_tool = ""
+            try:
+                for _c in reversed(contents):
+                    if getattr(_c, "role", "") != "user":
+                        continue
+                    for _p in getattr(_c, "parts", []) or []:
+                        fr = getattr(_p, "function_response", None)
+                        if fr and getattr(fr, "response", None):
+                            resp_obj = fr.response
+                            _last = resp_obj.get("result") if isinstance(resp_obj, dict) else None
+                            if _last and "SCOPE_REFUSED" not in str(_last) and "Query error" not in str(_last):
+                                last_tool = str(_last)[:800]
+                                break
+                    if last_tool:
+                        break
+            except Exception:
+                pass
+            if last_tool:
+                reply = ("I ran out of tool rounds without finishing a "
+                         f"clean summary. Here are the rows I retrieved:\n\n{last_tool}\n\n"
+                         "Ask me to re-summarise these in plain language.")
+            else:
+                reply = ("I wasn't able to generate a response after 5 tool "
+                         "rounds. The query may have repeatedly errored. "
+                         "Try rephrasing the question - if you ask for "
+                         "attendance, be explicit about the month and "
+                         "department (e.g. 'attendance for Cloud Engineering "
+                         "in March 2026').")
         # Last-ditch: if the final response contains SQL, extract and execute it
         sql_match = re.search(r"```(?:sql)?\s*([\s\S]+?)\s*```", reply, re.IGNORECASE)
         extracted_sql = sql_match.group(1).strip() if sql_match else None
