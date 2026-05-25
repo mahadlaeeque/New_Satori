@@ -27,7 +27,7 @@ BRAND_TEAL = "0A5F89"
 # Used by every report-related Gemini prompt so the AI can plan JOINs and be
 # honest about what data is and isn't available. Kept in sync with
 # `_DASHBOARD_SAP_SCHEMAS` in main.py — both describe the same mirror.
-_REPORT_SAP_SCHEMAS = """Detailed table schemas (BigQuery project `sfml-491907`, dataset `sap_hana_mirror`). Column TYPES are shown in parentheses — use them correctly.
+_REPORT_SAP_SCHEMAS = """Detailed table schemas (BigQuery project `capability-agent-prod`, dataset `sap_hana_mirror`). Column TYPES are shown in parentheses — use them correctly.
 
 PRIMARY DW REPORTING TABLES (preferred for stock + movement reports):
 - fact_material_stock_daily — daily OPENING/CLOSING BALANCE. **3-row-per-key model**: stock_type (STRING — 'STORAGE' / 'SPECIAL' / 'RATE'), plant (STRING), storage_location (STRING — only on STORAGE rows; NULL for SPECIAL/RATE), material_id (STRING), material_type (STRING), base_unit_of_measure (STRING), posting_date (DATE), cumulative_qty (NUMERIC). Per-material qty = SUM(STORAGE.cumulative_qty)+SUM(SPECIAL.cumulative_qty); rate = MAX(RATE.cumulative_qty); value = qty × rate. NO `stock_value` / `stock_qty` columns. Plants populated: 1100/2100/3100. Date range 2025-04-15 → current.
@@ -163,10 +163,10 @@ HOW TO BEHAVE:
    - Update `all_columns` and `columns` to reflect the new SELECT list.
    - Preserve every field the user didn't ask to change (title, filters, group_by, order_by, format).
    Shape:
-   {{"ready": true, "config": {{"title": "...", "table": "...", "sql": "SELECT ... FROM `sfml-491907.sap_hana_mirror.<table>` ... LEFT JOIN ... LIMIT 200", "columns": [...], "all_columns": [...], "numeric_columns": [...], "total_columns": [...], "filters": "...", "group_by": "...", "order_by": "...", "aggregations": {{...}}, "format": "excel"}}}}
+   {{"ready": true, "config": {{"title": "...", "table": "...", "sql": "SELECT ... FROM `capability-agent-prod.Satori_Project.<table>` ... LEFT JOIN ... LIMIT 200", "columns": [...], "all_columns": [...], "numeric_columns": [...], "total_columns": [...], "filters": "...", "group_by": "...", "order_by": "...", "aggregations": {{...}}, "format": "excel"}}}}
 
 SQL RULES (apply when you rewrite the `sql`):
-- Use fully qualified names: `sfml-491907.sap_hana_mirror.<table>` (with backticks).
+- Use fully qualified names: `capability-agent-prod.Satori_Project.<table>` (with backticks).
 - Wrap STRING-YYYYMMDD date columns in `SAFE.PARSE_DATE('%Y%m%d', col)` when filtering. DW fact tables' `posting_date` is already DATE — compare directly.
 - For material_documents: each event has 2 rows; filter `debit_credit_indicator='S'` for one-row-per-event aggregation.
 - ISSUE/ADJUSTMENT in fact_material_movements_daily are signed — present with natural sign; flip only on explicit "absolute" requests; never `SUM(ABS(...))`.
@@ -185,12 +185,12 @@ REPORT_DESIGN_PROMPT = """You are a tabular report designer for Satori AI, an en
 
 The user has confirmed a report configuration. Generate ONLY the SQL query needed.
 
-You have access to BigQuery tables in project 'sfml-491907', dataset 'sap_hana_mirror'.
+You have access to BigQuery tables in project 'capability-agent-prod', dataset 'sap_hana_mirror'.
 PRIMARY DW REPORTING TABLES (preferred for stock & movement reports — pre-aggregated for performance):
 A) fact_material_stock_daily (148M rows) — daily OPENING/CLOSING BALANCE. **3-row-per-key model**: stock_type (STRING — 'STORAGE' / 'SPECIAL' / 'RATE'), plant (STRING), storage_location (STRING — populated only for STORAGE; NULL for SPECIAL/RATE), material_id (STRING), material_type (STRING), base_unit_of_measure (STRING), posting_date (DATE), cumulative_qty (NUMERIC). Per-material qty = SUM(STORAGE.cumulative_qty)+SUM(SPECIAL.cumulative_qty); rate = MAX(RATE.cumulative_qty); value = qty × rate. NO `stock_value` and NO `stock_qty` columns. Date range 2025-04-15 → current. Plants populated: 1100/2100/3100. For "current closing balance" filter to MAX(posting_date); for opening balance pick a specific posting_date. For sloc-filtered queries use the SPECIAL-stock attribution rule (LEFT JOIN a `sm` self-join of materials with STORAGE rows at the target sloc, then count STORAGE qty where sloc matches AND SPECIAL qty where sm.material_id IS NOT NULL).
 B) fact_material_movements_daily (651K rows) — daily Receipts / Issues / Adjustments per (plant, storage_location, material_id). Cols: posting_date (DATE), plant, storage_location, material_id, material_type, material_type_flag (STRING — 'H'/'S'), base_unit_of_measure, RECEIPT_QTY, RECEIPT_VALUE, ISSUE_QTY, ISSUE_VALUE, ADJUSTMENT_QTY, ADJUSTMENT_VALUE (all NUMERIC). ISSUE/ADJUSTMENT are mostly NEGATIVE but include positive reversal rows — for net positive magnitude use `-SUM(...)` or `ABS(SUM(...))`, NEVER `SUM(ABS(...))` (double-counts reversals). Date range 2025-05-01 → 2026-02-24.
 
-OTHER TABLES (use fully qualified names `sfml-491907.sap_hana_mirror.<table>`):
+OTHER TABLES (use fully qualified names `capability-agent-prod.Satori_Project.<table>`):
 1) plants — plant_id, plant_name, plant_name_2, city, country_code, region, purchasing_org, sales_org, distribution_channel, division, valuation_area. Active plant_ids: '1000','1100','1101','2100','3100' (all Lahore, PK).
 2) material_master — material_id, material_type (Z113/Z117/Z611/…), base_unit_of_measure (ST/M/EA/KG/…), creation_date (STRING YYYYMMDD), last_change_date.
 3) material_descriptions — material_id, language_key ('E'=English (~100%), 'N'=native (2 rows)), material_description. For readable names JOIN on material_id AND language_key='E'.
@@ -216,7 +216,7 @@ Notes:
 Return ONLY valid JSON:
 {
   "title": "Report Title",
-  "sql": "SELECT ... FROM `sfml-491907.sap_hana_mirror.<table>` ...",
+  "sql": "SELECT ... FROM `capability-agent-prod.Satori_Project.<table>` ...",
   "columns": ["Column1", "Column2", ...],
   "numeric_columns": ["Column2", ...],
   "total_columns": ["Column2", ...],
@@ -224,7 +224,7 @@ Return ONLY valid JSON:
 }
 
 RULES:
-- Always use fully qualified table names: `sfml-491907.sap_hana_mirror.TABLE_NAME`
+- Always use fully qualified table names: `capability-agent-prod.Satori_Project.TABLE_NAME`
 - Column names with spaces MUST be wrapped in backticks in SQL
 - Use LIMIT 200 max
 - numeric_columns: columns that contain numbers (for right-alignment and number formatting)

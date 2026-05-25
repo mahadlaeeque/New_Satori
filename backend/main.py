@@ -219,14 +219,18 @@ def require_admin(user: dict = Depends(get_current_user)) -> dict:
 # Settings page and data-scope configuration endpoints. These affect how
 # every user (including other admins) sees data, so we lock them to the
 # single bootstrap account rather than the entire admin role.
-SUPERADMIN_EMAIL = (os.environ.get("SUPERADMIN_EMAIL") or "superadmin@sfml.com").strip().lower()
+SUPERADMIN_EMAIL = (os.environ.get("SUPERADMIN_EMAIL") or "superadmin@tmcltd.com").strip().lower()
+# Legacy fallback: accept the old @sfml.com address too, so a Cloud Run
+# service that still has SUPERADMIN_EMAIL=superadmin@sfml.com in its env vars
+# keeps working after the @tmcltd.com rename ships.
+_SUPERADMIN_EMAILS = {SUPERADMIN_EMAIL, "superadmin@tmcltd.com", "superadmin@sfml.com"}
 
 
 def _user_is_superadmin(user: dict) -> bool:
     """True if the JWT-resolved user is the configured superadmin account."""
     if (user.get("role") or "").lower() != "admin":
         return False
-    return (user.get("email") or "").strip().lower() == SUPERADMIN_EMAIL
+    return (user.get("email") or "").strip().lower() in _SUPERADMIN_EMAILS
 
 
 def require_superadmin(user: dict = Depends(get_current_user)) -> dict:
@@ -1344,7 +1348,7 @@ def admin_get_scope_dimensions(_: dict = Depends(require_superadmin)):
     cur = db.cursor()
     cur.execute(
         "SELECT dimension, enabled FROM company_data_scope_dimensions WHERE company_id = ?",
-        ("SFML",),
+        ("TMC",),
     )
     stored = {r["dimension"]: bool(r["enabled"]) for r in cur.fetchall()}
     db.close()
@@ -1374,13 +1378,13 @@ def admin_set_scope_dimension(body: AdminDimensionToggle, admin: dict = Depends(
             "INSERT INTO company_data_scope_dimensions (company_id, dimension, enabled, updated_at) "
             "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
             "ON CONFLICT (company_id, dimension) DO UPDATE SET enabled=EXCLUDED.enabled, updated_at=CURRENT_TIMESTAMP",
-            ("SFML", body.dimension, 1 if body.enabled else 0),
+            ("TMC", body.dimension, 1 if body.enabled else 0),
         )
     else:
         cur.execute(
             "INSERT OR REPLACE INTO company_data_scope_dimensions (company_id, dimension, enabled, updated_at) "
             "VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-            ("SFML", body.dimension, 1 if body.enabled else 0),
+            ("TMC", body.dimension, 1 if body.enabled else 0),
         )
     db.commit()
     db.close()
@@ -1849,7 +1853,7 @@ _CHAT_SQL_TOOL = genai.types.Tool(function_declarations=[
         name="run_sql",
         description=(
             "Run a BigQuery SQL SELECT/WITH query against the company's SAP ERP mirror "
-            "(project sfml-491907, dataset sap_hana_mirror). "
+            "(project capability-agent-prod, dataset sap_hana_mirror). "
             "Use this when the injected enterprise data doesn't already contain the specific answer. "
             "PREFERRED reporting sources (DW fact tables): "
             "`fact_material_stock_daily` (daily opening/closing balance — 3-row-per-key model: stock_type ('STORAGE'/'SPECIAL'/'RATE'), plant, storage_location (only on STORAGE), material_id, material_type, base_unit_of_measure, posting_date DATE, cumulative_qty NUMERIC. Per-material qty = SUM(STORAGE)+SUM(SPECIAL); rate = MAX(RATE); value = qty × rate. NO `stock_value` column.); "
@@ -1867,7 +1871,7 @@ _CHAT_SQL_TOOL = genai.types.Tool(function_declarations=[
             properties={
                 "sql": genai.types.Schema(
                     type="STRING",
-                    description="A valid BigQuery SQL SELECT/WITH query with fully-qualified table names like `sfml-491907.sap_hana_mirror.fact_material_stock_daily`.",
+                    description="A valid BigQuery SQL SELECT/WITH query with fully-qualified table names like `capability-agent-prod.Satori_Project.fact_material_stock_daily`.",
                 ),
             },
             required=["sql"],
@@ -1970,8 +1974,8 @@ def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None) -> str:
             "ERROR: Your run_sql call had an empty `sql` argument. "
             "Re-invoke run_sql now with a complete SELECT or WITH query in the `sql` field — "
             "for example, for the user's question, write a single SQL string targeting "
-            "`sfml-491907.sap_hana_mirror.fact_material_stock_daily` (for opening/closing balance) "
-            "and/or `sfml-491907.sap_hana_mirror.fact_material_movements_daily` (for "
+            "`capability-agent-prod.Satori_Project.fact_material_stock_daily` (for opening/closing balance) "
+            "and/or `capability-agent-prod.Satori_Project.fact_material_movements_daily` (for "
             "receipts/issues/adjustments). Remember to zero-pad the material_id to 18 chars "
             "or use LTRIM(material_id,'0') = LTRIM('<user_input>','0')."
         )

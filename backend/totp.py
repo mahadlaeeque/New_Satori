@@ -76,7 +76,7 @@ def verify_code(secret: str, code: str, window: int = 1) -> bool:
         return False
 
 
-def provisioning_uri(secret: str, account: str, issuer: str = "Satori SFML") -> str:
+def provisioning_uri(secret: str, account: str, issuer: str = "Satori TMC") -> str:
     """otpauth://totp/ URI the Authenticator app encodes into the QR."""
     return pyotp.TOTP(secret).provisioning_uri(name=account, issuer_name=issuer)
 

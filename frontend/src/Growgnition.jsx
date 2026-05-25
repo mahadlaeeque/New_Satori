@@ -7392,7 +7392,7 @@ const AddUserModal = ({ features, onClose, onCreated }) => {
           </div>
           <div>
             <label style={_labelStyle}>Email</label>
-            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} style={_inputStyle} placeholder="jane@sfml.com" />
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} style={_inputStyle} placeholder="jane@tmcltd.com" />
           </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -7806,7 +7806,7 @@ const PrivacyPage = ({ onBack }) => (
 
     <h2 style={{ fontSize: 16, fontWeight: 700, color: COLORS.textPrimary, marginTop: 24, marginBottom: 8 }}>AI data flow</h2>
     <p style={{ fontSize: 13.5, lineHeight: 1.65, color: COLORS.textSecondary }}>
-      The Ask-Me-Anything assistant and dashboard / report builders send your prompts to Google Gemini (Vertex AI in <code style={{ background: COLORS.surfaceAlt, padding: "1px 6px", borderRadius: 4, fontFamily: "ui-monospace, monospace" }}>us-central1</code>). Prompts are PII-redacted server-side before they leave — emails, phone numbers, CNIC patterns, and long numeric runs are replaced with placeholders. Business-data context (BigQuery rows) is also injected so the AI can answer with real numbers. You can opt out of the data-context injection from the profile menu — your prompts still go to the AI, but with no SFML row data attached.
+      The Ask-Me-Anything assistant and dashboard / report builders send your prompts to Google Gemini (Vertex AI in <code style={{ background: COLORS.surfaceAlt, padding: "1px 6px", borderRadius: 4, fontFamily: "ui-monospace, monospace" }}>us-central1</code>). Prompts are PII-redacted server-side before they leave — emails, phone numbers, CNIC patterns, and long numeric runs are replaced with placeholders. Business-data context (BigQuery rows) is also injected so the AI can answer with real numbers. You can opt out of the data-context injection from the profile menu — your prompts still go to the AI, but with no TMC row data attached.
     </p>
 
     <h2 style={{ fontSize: 16, fontWeight: 700, color: COLORS.textPrimary, marginTop: 24, marginBottom: 8 }}>Exports</h2>
@@ -7820,7 +7820,7 @@ const PrivacyPage = ({ onBack }) => (
     </p>
 
     <div style={{ marginTop: 36, padding: "14px 18px", background: COLORS.surfaceAlt, borderRadius: 12, fontSize: 12.5, color: COLORS.textMuted }}>
-      Satori is built and operated by <strong>TallyMarks Consulting (TMC)</strong> for SFML's internal SAP-mirror reporting. For any data governance questions or compliance requests contact your TMC point of contact.
+      Satori is built and operated by <strong>TallyMarks Consulting (TMC)</strong> for internal capability and workforce reporting. For any data governance questions or compliance requests contact your TMC point of contact.
     </div>
   </div>
 );
@@ -8278,7 +8278,7 @@ const SystemSettingsPage = () => {
   };
 
   const DIM_DESCRIPTIONS = {
-    plant: "Restrict users to one or more production plants. Always enabled — this is the primary data boundary for SFML.",
+    plant: "Restrict users to one or more production plants. Always enabled — this is the primary data boundary for TMC.",
     material_type: "Restrict users to specific material types (Z113, Z117, Z611, etc.).",
     storage_location: "Restrict users to specific storage locations (TA01, WH01, etc.).",
     order_type: "Restrict users to specific internal order types (Z306, PMWO, etc.).",
@@ -9586,7 +9586,7 @@ export default function App() {
                   : activePage === "dashboards" ? "Build, view, and refine your custom dashboards"
                   : activePage === "ap" ? "Product Orders"
                   : activePage === "ar" ? "Dealer Orders"
-                  : activePage === "invoices" ? "SFML Sales Invoice Analytics"
+                  : activePage === "invoices" ? "TMC Sales Invoice Analytics"
                   : activePage === "stock" ? "Inventory & Stock Monitoring"
                   : "Real-time analytics · Updated just now"}
               </div>

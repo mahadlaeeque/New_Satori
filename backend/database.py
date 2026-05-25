@@ -92,6 +92,8 @@ def init_db():
     _migrate_add_system_settings()
     _migrate_add_availability_tasks()
     _migrate_add_chat_tables()
+    _migrate_rename_sfml_to_tmc()
+    _migrate_reset_passwords_to_welcome()
 
 
 def _migrate_rename_polypack_to_ffc():
@@ -251,7 +253,7 @@ def _migrate_add_governance_tables():
 
 def _migrate_add_data_scope_tables():
     """Idempotent migration: add the three data-scope tables and seed the plant
-    dimension as enabled for SFML. Safe to re-run on both SQLite and Postgres."""
+    dimension as enabled for TMC. Safe to re-run on both SQLite and Postgres."""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -286,7 +288,7 @@ def _migrate_add_data_scope_tables():
             cur.execute(
                 "INSERT INTO company_data_scope_dimensions (company_id, dimension, enabled) "
                 "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                ("SFML", "plant", 1),
+                ("TMC", "plant", 1),
             )
         else:
             cur.execute("""
@@ -318,7 +320,7 @@ def _migrate_add_data_scope_tables():
             """)
             cur.execute(
                 "INSERT OR IGNORE INTO company_data_scope_dimensions (company_id, dimension, enabled) VALUES (?, ?, ?)",
-                ("SFML", "plant", 1),
+                ("TMC", "plant", 1),
             )
         conn.commit()
         conn.close()
@@ -579,27 +581,27 @@ def _init_sqlite():
     if cur.execute("SELECT COUNT(*) AS count FROM companies").fetchone()["count"] == 0:
         cur.execute(
             "INSERT INTO companies (name, short_code) VALUES (?, ?)",
-            ("SFML", "SFML"),
+            ("TMC", "TMC"),
         )
         company_id = cur.lastrowid
 
         # superadmin: the only admin role at seed time
         cur.execute(
             "INSERT INTO users (email, password, full_name, role, company_id) VALUES (?, ?, ?, ?, ?)",
-            ("superadmin@sfml.com", _bcrypt.hashpw(b"blackmouse", _bcrypt.gensalt()).decode(), "Super Admin", "admin", company_id),
+            ("superadmin@tmcltd.com", _bcrypt.hashpw(b"welcome", _bcrypt.gensalt()).decode(), "Super Admin", "admin", company_id),
         )
 
-        # admin@sfml.com: regular user (despite the legacy email name)
+        # admin@tmcltd.com: regular user (despite the legacy email name)
         cur.execute(
             "INSERT INTO users (email, password, full_name, role, company_id) VALUES (?, ?, ?, ?, ?)",
-            ("admin@sfml.com", _bcrypt.hashpw(b"blackmouse", _bcrypt.gensalt()).decode(), "Anas", "user", company_id),
+            ("admin@tmcltd.com", _bcrypt.hashpw(b"welcome", _bcrypt.gensalt()).decode(), "Anas", "user", company_id),
         )
         admin_user_id = cur.lastrowid
 
         # second regular user
         cur.execute(
             "INSERT INTO users (email, password, full_name, role, company_id) VALUES (?, ?, ?, ?, ?)",
-            ("user@sfml.com", _bcrypt.hashpw(b"user123", _bcrypt.gensalt()).decode(), "Bilal", "user", company_id),
+            ("user@tmcltd.com", _bcrypt.hashpw(b"welcome", _bcrypt.gensalt()).decode(), "Bilal", "user", company_id),
         )
         bilal_user_id = cur.lastrowid
 
@@ -610,10 +612,10 @@ def _init_sqlite():
                     "INSERT OR IGNORE INTO user_features (user_id, feature_id) VALUES (?, ?)",
                     (uid, fid),
                 )
-        # Seed plant dimension as the default enabled scope dimension for SFML.
+        # Seed plant dimension as the default enabled scope dimension for TMC.
         cur.execute(
             "INSERT OR IGNORE INTO company_data_scope_dimensions (company_id, dimension, enabled) VALUES (?, ?, ?)",
-            ("SFML", "plant", 1),
+            ("TMC", "plant", 1),
         )
         conn.commit()
     conn.close()
@@ -814,27 +816,27 @@ def _init_postgres():
     if cur.fetchone()["count"] == 0:
         cur.execute(
             "INSERT INTO companies (name, short_code) VALUES (%s, %s) RETURNING id",
-            ("SFML", "SFML"),
+            ("TMC", "TMC"),
         )
         company_id = cur.fetchone()["id"]
 
         # superadmin: the only admin role at seed time
         cur.execute(
             "INSERT INTO users (email, password, full_name, role, company_id) VALUES (%s, %s, %s, %s, %s)",
-            ("superadmin@sfml.com", _bcrypt.hashpw(b"blackmouse", _bcrypt.gensalt()).decode(), "Super Admin", "admin", company_id),
+            ("superadmin@tmcltd.com", _bcrypt.hashpw(b"welcome", _bcrypt.gensalt()).decode(), "Super Admin", "admin", company_id),
         )
 
-        # admin@sfml.com: regular user (despite the legacy email name)
+        # admin@tmcltd.com: regular user (despite the legacy email name)
         cur.execute(
             "INSERT INTO users (email, password, full_name, role, company_id) VALUES (%s, %s, %s, %s, %s) RETURNING id",
-            ("admin@sfml.com", _bcrypt.hashpw(b"blackmouse", _bcrypt.gensalt()).decode(), "Anas", "user", company_id),
+            ("admin@tmcltd.com", _bcrypt.hashpw(b"welcome", _bcrypt.gensalt()).decode(), "Anas", "user", company_id),
         )
         admin_user_id = cur.fetchone()["id"]
 
         # second regular user
         cur.execute(
             "INSERT INTO users (email, password, full_name, role, company_id) VALUES (%s, %s, %s, %s, %s) RETURNING id",
-            ("user@sfml.com", _bcrypt.hashpw(b"user123", _bcrypt.gensalt()).decode(), "Bilal", "user", company_id),
+            ("user@tmcltd.com", _bcrypt.hashpw(b"welcome", _bcrypt.gensalt()).decode(), "Bilal", "user", company_id),
         )
         bilal_user_id = cur.fetchone()["id"]
 
@@ -844,10 +846,10 @@ def _init_postgres():
                     "INSERT INTO user_features (user_id, feature_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                     (uid, fid),
                 )
-        # Seed plant dimension as the default enabled scope dimension for SFML.
+        # Seed plant dimension as the default enabled scope dimension for TMC.
         cur.execute(
             "INSERT INTO company_data_scope_dimensions (company_id, dimension, enabled) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-            ("SFML", "plant", 1),
+            ("TMC", "plant", 1),
         )
         conn.commit()
     conn.close()
