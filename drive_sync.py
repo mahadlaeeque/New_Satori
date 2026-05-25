@@ -51,10 +51,61 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import datetime as _dt_top
 import os
 import re
 import sys
+import traceback
 from pathlib import Path
+
+
+# ── Tee stdout/stderr to a log file so we have a record even if the
+# terminal closes (Windows double-click runs auto-close the window the
+# moment the script exits, hiding every error message).
+class _Tee:
+    """Write to multiple file-like objects at once. Used as a replacement
+    for sys.stdout / sys.stderr so each line appears on the terminal AND
+    gets persisted to drive_sync.log next to this script."""
+    def __init__(self, *streams):
+        self._streams = streams
+    def write(self, data):
+        for s in self._streams:
+            try:
+                s.write(data)
+            except Exception:
+                pass
+    def flush(self):
+        for s in self._streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+
+_LOG_PATH = Path(__file__).resolve().parent / "drive_sync.log"
+try:
+    _logfile = open(_LOG_PATH, "a", encoding="utf-8", buffering=1)
+    _logfile.write("\n" + "=" * 72 + "\n")
+    _logfile.write(f"drive_sync run @ {_dt_top.datetime.now().isoformat(timespec='seconds')}\n")
+    _logfile.write("argv: " + " ".join(sys.argv) + "\n")
+    _logfile.write("=" * 72 + "\n")
+    sys.stdout = _Tee(sys.__stdout__, _logfile)
+    sys.stderr = _Tee(sys.__stderr__, _logfile)
+except Exception as _e:
+    print(f"[drive_sync] WARNING: could not open log file ({_e}); continuing without tee")
+
+
+def _pause_before_exit(code: int) -> None:
+    """On Windows, keep the terminal open so the user can read errors.
+    Skipped if stdin isn't a TTY (e.g. piped input or CI)."""
+    if os.name == "nt" and sys.stdin and sys.stdin.isatty():
+        try:
+            print("")
+            print(f"[drive_sync] finished with exit code {code}. "
+                  f"Log saved to {_LOG_PATH}")
+            input("Press Enter to close this window...")
+        except (EOFError, KeyboardInterrupt):
+            pass
 
 # Hard defaults — match the backend's BQ_PROJECT / BQ_DATASET env defaults
 # (see backend/main.py line 28-29). These can be overridden per-invocation
@@ -527,5 +578,61 @@ def main() -> int:
     return 0
 
 
+def _preflight() -> None:
+    """Validate dependencies + auth before doing any work, with friendly
+    messages instead of cryptic ImportError / AuthError mid-run."""
+    missing = []
+    try:
+        import google.cloud.bigquery  # noqa: F401
+    except ImportError:
+        missing.append("google-cloud-bigquery")
+    try:
+        import openpyxl  # noqa: F401
+    except ImportError:
+        missing.append("openpyxl")
+    if missing:
+        print("[drive_sync] FATAL - missing Python packages: " + ", ".join(missing))
+        print(f"[drive_sync] Install with: pip install {' '.join(missing)}")
+        raise SystemExit(2)
+
+    sa_key = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    if sa_key:
+        if not Path(sa_key).is_file():
+            print(f"[drive_sync] FATAL - GOOGLE_APPLICATION_CREDENTIALS "
+                  f"points to {sa_key!r} but that file does not exist.")
+            raise SystemExit(2)
+        print(f"[drive_sync] using service-account key: {sa_key}")
+    else:
+        try:
+            import google.auth
+            creds, project = google.auth.default()
+            print(f"[drive_sync] using Application Default Credentials "
+                  f"(project: {project or 'unset'})")
+        except Exception as e:
+            print("[drive_sync] FATAL - no credentials configured.")
+            print("[drive_sync] Either:")
+            print("[drive_sync]   1. Set GOOGLE_APPLICATION_CREDENTIALS to a "
+                  "service-account JSON key path, OR")
+            print("[drive_sync]   2. Run:  gcloud auth application-default login")
+            print(f"[drive_sync] Underlying error: {e}")
+            raise SystemExit(2)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    exit_code = 1
+    try:
+        _preflight()
+        exit_code = main()
+    except SystemExit as e:
+        exit_code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+    except KeyboardInterrupt:
+        print("\n[drive_sync] interrupted by Ctrl+C")
+        exit_code = 130
+    except Exception as e:
+        print("\n[drive_sync] UNCAUGHT EXCEPTION:")
+        print(traceback.format_exc())
+        print(f"[drive_sync] {type(e).__name__}: {e}")
+        exit_code = 1
+    finally:
+        _pause_before_exit(exit_code)
+    sys.exit(exit_code)
