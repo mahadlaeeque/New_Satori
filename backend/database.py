@@ -94,6 +94,7 @@ def init_db():
     _migrate_add_chat_tables()
     _migrate_rename_sfml_to_tmc()
     _migrate_reset_passwords_to_welcome()
+    _migrate_finalize_tmc_superadmin()
 
 
 def _migrate_rename_polypack_to_ffc():
@@ -1088,3 +1089,72 @@ def _migrate_reset_passwords_to_welcome():
         print("[DB] Migration: all user passwords reset to 'welcome' (one-time)")
     except Exception as e:
         print(f"[DB] Migration error (reset passwords, safe to ignore on fresh DB): {e}")
+
+
+def _migrate_finalize_tmc_superadmin():
+    """Force-finalize the TMC rebrand:
+      - companies.name + short_code -> 'TMC' if still 'SFML' (idempotent
+        re-run of the earlier migration, in case it didn't fire on the
+        crashed deploys).
+      - Superadmin email becomes 'superadmin@tmc.com' regardless of whether
+        the row is currently @sfml.com, @tmcltd.com, or already @tmc.com.
+      - Password reset to bcrypt('welcome').
+      - totp_secret_enc + totp_verified_at cleared so the next login forces
+        a fresh QR-code enrollment.
+    Idempotent: every UPDATE has a WHERE clause that only matches when
+    there's actual work to do."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        # 1. Company short_code + name -> TMC (catches any DB where the
+        # earlier rename didn't apply, e.g. if init_db crashed mid-way).
+        cur.execute(
+            "UPDATE companies SET name = ?, short_code = ? "
+            "WHERE short_code = ? OR name = ?",
+            ("TMC", "TMC", "SFML", "SFML"),
+        )
+
+        # 2. Pick the superadmin row. Could be at any of three email forms
+        # depending on which migrations fired.
+        candidates = ("superadmin@tmc.com", "superadmin@tmcltd.com",
+                      "superadmin@sfml.com")
+        super_id = None
+        for em in candidates:
+            cur.execute("SELECT id FROM users WHERE email = ?", (em,))
+            row = cur.fetchone()
+            if row:
+                super_id = row["id"] if isinstance(row, dict) else row[0]
+                break
+
+        if super_id is None:
+            # No superadmin found at any of the candidate emails - fall back
+            # to any admin-role row. Doesn't change emails for non-admins.
+            cur.execute("SELECT id FROM users WHERE role = 'admin' "
+                        "ORDER BY id ASC LIMIT 1")
+            row = cur.fetchone()
+            if row:
+                super_id = row["id"] if isinstance(row, dict) else row[0]
+
+        if super_id is not None:
+            # Avoid UNIQUE-constraint failure if another row is already at
+            # superadmin@tmc.com - delete the stale duplicate first.
+            cur.execute(
+                "DELETE FROM users WHERE email = ? AND id <> ?",
+                ("superadmin@tmc.com", super_id),
+            )
+            pw_hash = _bcrypt.hashpw(b"welcome", _bcrypt.gensalt()).decode()
+            cur.execute(
+                "UPDATE users SET email = ?, password = ?, "
+                "totp_secret_enc = NULL, totp_verified_at = NULL "
+                "WHERE id = ?",
+                ("superadmin@tmc.com", pw_hash, super_id),
+            )
+            print(f"[DB] Migration: superadmin id={super_id} -> "
+                  f"superadmin@tmc.com (TOTP cleared, password=welcome)")
+        else:
+            print("[DB] Migration: no superadmin row found to finalize")
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[DB] Migration error (finalize tmc superadmin, safe to ignore on fresh DB): {e}")

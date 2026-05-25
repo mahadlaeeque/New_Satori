@@ -219,11 +219,16 @@ def require_admin(user: dict = Depends(get_current_user)) -> dict:
 # Settings page and data-scope configuration endpoints. These affect how
 # every user (including other admins) sees data, so we lock them to the
 # single bootstrap account rather than the entire admin role.
-SUPERADMIN_EMAIL = (os.environ.get("SUPERADMIN_EMAIL") or "superadmin@tmcltd.com").strip().lower()
-# Legacy fallback: accept the old @sfml.com address too, so a Cloud Run
-# service that still has SUPERADMIN_EMAIL=superadmin@sfml.com in its env vars
-# keeps working after the @tmcltd.com rename ships.
-_SUPERADMIN_EMAILS = {SUPERADMIN_EMAIL, "superadmin@tmcltd.com", "superadmin@sfml.com"}
+SUPERADMIN_EMAIL = (os.environ.get("SUPERADMIN_EMAIL") or "superadmin@tmc.com").strip().lower()
+# Accept every email shape the superadmin has ever had, so an env-var that
+# still pins the old address or an in-flight migration that hasn't run yet
+# can't lock the superadmin out of System Settings.
+_SUPERADMIN_EMAILS = {
+    SUPERADMIN_EMAIL,
+    "superadmin@tmc.com",
+    "superadmin@tmcltd.com",
+    "superadmin@sfml.com",
+}
 
 
 def _user_is_superadmin(user: dict) -> bool:
