@@ -2011,6 +2011,15 @@ def _enforce_dept_scope_on_sql(sql: str, dept_scope: "list[str] | None") -> str:
     if not any(t in sql_upper for t in workforce_tables):
         return sql
 
+    # Only safe to inject Employee_Hierarchy when Employee_Data is in the SQL
+    # (directly queried or LEFT-JOINed). Otherwise the column doesn't exist on
+    # Attendance_Data / Allocation_data / Timesheet_Data alone and BQ raises
+    # 'Name Employee_Hierarchy not found'. The system prompt addon is
+    # responsible for steering Gemini to JOIN first; if the model failed to,
+    # we return SQL untouched and let the BQ error surface for diagnosis.
+    if "EMPLOYEE_DATA" not in sql_upper:
+        return sql
+
     quoted = ", ".join("'" + str(v).replace("'", "''") + "'" for v in dept_scope)
     scope_clause = (
         f"COALESCE(NULLIF(TRIM(Employee_Hierarchy), ''), 'Unspecified') IN ({quoted})"
@@ -2107,6 +2116,10 @@ def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None, dept_scope
         print(f"[CHAT-SQL] Plant scope enforced: allowed={plant_scope}")
     # ─────────────────────────────────────────────────────────────────────────
 
+    # Rewrite legacy ai-vertex-mahad project refs to the live BQ_PROJECT.
+    # Gemini's prompt examples still hard-code the legacy name; without this
+    # rewrite every chat turn would target the old project and fail.
+    sql_stripped = normalize_bq_project(sql_stripped)
     print(f"[CHAT-SQL] Running: {sql_stripped[:200]}")
     result = run_query(sql_stripped, max_rows=500)
     if "error" in result:
