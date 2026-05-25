@@ -2370,17 +2370,39 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                                 resp_obj = fr.response
                                 _last = resp_obj.get("result") if isinstance(resp_obj, dict) else None
                                 if _last:
-                                    last_tool = str(_last)[:400]
+                                    last_tool = str(_last)[:1200]
                                     break
                         if last_tool:
                             break
                 except Exception:
                     pass
+                # Also scan for the SQL Gemini attempted to run, so the user can
+                # see WHAT was tried even if no tool result came back cleanly.
+                last_sql = ""
+                try:
+                    for _c in reversed(contents):
+                        for _p in getattr(_c, "parts", []) or []:
+                            fc = getattr(_p, "function_call", None)
+                            if fc and getattr(fc, "args", None):
+                                _args = fc.args
+                                _sql = _args.get("sql") if isinstance(_args, dict) else None
+                                if _sql:
+                                    last_sql = str(_sql)[:600]
+                                    break
+                        if last_sql:
+                            break
+                except Exception:
+                    pass
+
                 if last_tool:
-                    reply = ("I couldn't compose a final answer. Last data I "
-                             f"saw from the tool was:\n\n{last_tool}\n\n"
-                             "Try rephrasing the question or ask me to "
-                             "summarise the rows above.")
+                    reply = ("I couldn't compose a final answer. Last tool "
+                             f"result I saw:\n\n{last_tool}\n\n"
+                             "Try rephrasing or ask me to retry with simpler "
+                             "filters.")
+                elif last_sql:
+                    reply = ("I attempted a query but didn't receive results "
+                             f"I could summarise. The SQL I tried was:\n\n```sql\n{last_sql}\n```\n\n"
+                             "Try rephrasing the question.")
                 else:
                     reply = "I wasn't able to generate a response. Please try again."
             return {"reply": reply}
@@ -2576,24 +2598,45 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                         if fr and getattr(fr, "response", None):
                             resp_obj = fr.response
                             _last = resp_obj.get("result") if isinstance(resp_obj, dict) else None
-                            if _last and "SCOPE_REFUSED" not in str(_last) and "Query error" not in str(_last):
-                                last_tool = str(_last)[:800]
+                            if _last:
+                                last_tool = str(_last)[:1200]
                                 break
                     if last_tool:
                         break
             except Exception:
                 pass
+            # Also gather the last SQL attempt so the user sees what was tried.
+            last_sql_pm = ""
+            try:
+                for _c in reversed(contents):
+                    for _p in getattr(_c, "parts", []) or []:
+                        fc = getattr(_p, "function_call", None)
+                        if fc and getattr(fc, "args", None):
+                            _args = fc.args
+                            _sql = _args.get("sql") if isinstance(_args, dict) else None
+                            if _sql:
+                                last_sql_pm = str(_sql)[:600]
+                                break
+                    if last_sql_pm:
+                        break
+            except Exception:
+                pass
+
             if last_tool:
                 reply = ("I ran out of tool rounds without finishing a "
-                         f"clean summary. Here are the rows I retrieved:\n\n{last_tool}\n\n"
+                         f"clean summary. Last tool result:\n\n{last_tool}\n\n"
                          "Ask me to re-summarise these in plain language.")
+            elif last_sql_pm:
+                reply = ("I tried multiple queries but none returned data I "
+                         f"could summarise. Last SQL I attempted:\n\n```sql\n{last_sql_pm}\n```\n\n"
+                         "Likely cause: column mismatch or dept-scope filter "
+                         "interaction. Tell me to 'try without the dept "
+                         "filter' or rephrase the question.")
             else:
-                reply = ("I wasn't able to generate a response after 5 tool "
-                         "rounds. The query may have repeatedly errored. "
-                         "Try rephrasing the question - if you ask for "
-                         "attendance, be explicit about the month and "
-                         "department (e.g. 'attendance for Cloud Engineering "
-                         "in March 2026').")
+                reply = ("I exhausted 5 tool rounds without a single "
+                         "function_call being made. The model may have "
+                         "rejected the request. Try rephrasing - e.g. "
+                         "'attendance breakdown for my department in March 2026'.")
         # Last-ditch: if the final response contains SQL, extract and execute it
         sql_match = re.search(r"```(?:sql)?\s*([\s\S]+?)\s*```", reply, re.IGNORECASE)
         extracted_sql = sql_match.group(1).strip() if sql_match else None
