@@ -1677,6 +1677,50 @@ When the user asks about an employee's attendance for a time window, ALWAYS incl
 
 Always check that present + absent + leave + holiday + weekend ≈ total. If something is missing (e.g., the table has a "Missing Punch" status), call it out as its own line. Don't leave the user wondering where the rest of the month went."""
 
+
+ATTENDANCE_BEHAVIOR_ADDON = """
+--- ATTENDANCE QUESTION DEFAULTS ---
+When the user asks about attendance for a period (a month, a week, a date range):
+
+1. PER-EMPLOYEE BREAKDOWN BY DEFAULT. Return one row per active employee in
+   scope with: employee_name, employee_email, present_days, late_days,
+   absent_days, leave_days, remote_days, missing_punch_days. Order by
+   absent_days DESC (worst attendance first). Cap at 50 rows.
+   Use COUNTIF(...) over Attendance_Data filtered to the period, joined to
+   Employee_Data via the standard digits-only employee-id rule.
+
+2. CALENDAR vs WORKING DAYS. For a named month (e.g. "March 2026"):
+     calendar_days = number of dates in the month (use DATE_DIFF(LAST_DAY,
+       FIRST_DAY, DAY) + 1).
+     weekend_days  = COUNTIF of dates where is_weekend = 1.
+     holiday_days  = COUNTIF of dates where is_holiday = 1 (de-duped).
+     working_days  = calendar_days - weekend_days - holiday_days.
+   Compute attendance rate against working_days, NOT calendar_days. State
+   the working-day count in your summary so the user can sanity-check.
+
+3. FOLLOW-UP HANDLING. If the user's next message asks "who missed the most
+   days" or "who was available every single day", re-use the SAME per-
+   employee table from your previous query. Single SQL turn — ORDER BY
+   absent_days DESC for "missed most", or filter present_days = working_days
+   for "every single day". Never re-aggregate at department level for a
+   per-employee follow-up.
+
+4. RESPONSE LAYOUT. Open with a 1-2 line summary stating: department name,
+   period, calendar days, weekend days, holiday days, working days,
+   average attendance rate. Then a bullet line per employee:
+     **<name>** - present X / W (Y%), absent Z, leave L, remote R, missing M
+   Where W = working_days. Cap detailed bullets at 15; below 15 say
+   "<N more employees - ask 'show all' for the full list'".
+
+5. NEVER report calendar_days as the denominator for attendance rate. Always
+   call out weekends + holidays separately.
+
+6. INJECTED-DATA EXCEPTION. If the user's turn already includes a TMC LIVE
+   DATA block with per-employee figures, format them per the rules above
+   instead of re-querying.
+--- END ATTENDANCE QUESTION DEFAULTS ---
+"""
+
 VOICE_SYSTEM_PROMPT_URDU = """### ABSOLUTE RULE #0 — NEVER FABRICATE DATA. TOOLS FIRST, ALWAYS. ###
 You have two tools: `run_sql(sql)` for BigQuery queries (use for every TMC figure) and `end_call(reason)` to hang up when the user says goodbye.
 
@@ -2017,13 +2061,17 @@ def _enforce_dept_scope_on_sql(sql: str, dept_scope: "list[str] | None") -> str:
         return sql
 
     # Only safe to inject Employee_Hierarchy when Employee_Data is in the SQL
-    # (directly queried or LEFT-JOINed). Otherwise the column doesn't exist on
-    # Attendance_Data / Allocation_data / Timesheet_Data alone and BQ raises
-    # 'Name Employee_Hierarchy not found'. The system prompt addon is
-    # responsible for steering Gemini to JOIN first; if the model failed to,
-    # we return SQL untouched and let the BQ error surface for diagnosis.
+    # (directly queried or LEFT-JOINed). If the SQL touches workforce data
+    # but doesn't join to Employee_Data, we CANNOT enforce the dept scope -
+    # silently passing the query through would leak cross-department rows
+    # to a scoped user. Instead return a refusal sentinel that Gemini sees
+    # as the tool result and retries with the required join.
     if "EMPLOYEE_DATA" not in sql_upper:
-        return sql
+        return ("SELECT 'SCOPE_REFUSED' AS _error, "
+                "'Re-run this query with a LEFT JOIN to Employee_Data via "
+                "the digits-only employee id - the dept-scope filter on "
+                "Employee_Hierarchy can only be applied through that join.' "
+                "AS _message LIMIT 0")
 
     quoted = ", ".join("'" + str(v).replace("'", "''") + "'" for v in dept_scope)
     scope_clause = (
@@ -2264,7 +2312,8 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
     system_prompt_final = (
         ANALYST_COMMON_SENSE + "\n\n" +
         (VOICE_SYSTEM_PROMPT_URDU if body.voice_mode else SYSTEM_PROMPT) +
-        _build_date_context() + scope_addon + "\n\n" + _schema_notes + "\n\n" + _live_snap
+        _build_date_context() + scope_addon + "\n\n" + _schema_notes + "\n\n" + _live_snap +
+        ATTENDANCE_BEHAVIOR_ADDON
     )
 
     try:
@@ -2279,7 +2328,36 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                     max_output_tokens=512,
                 ),
             )
-            reply = response.text or "I wasn't able to generate a response. Please try again."
+            reply = response.text
+            if not reply:
+                # Empty response usually means MAX_TOKENS / safety / a model
+                # glitch. Look at the last tool result we shoved into
+                # `contents` and surface that to the user so they know what
+                # actually happened instead of a generic apology.
+                last_tool = ""
+                try:
+                    for _c in reversed(contents):
+                        if getattr(_c, "role", "") != "user":
+                            continue
+                        for _p in getattr(_c, "parts", []) or []:
+                            fr = getattr(_p, "function_response", None)
+                            if fr and getattr(fr, "response", None):
+                                resp_obj = fr.response
+                                _last = resp_obj.get("result") if isinstance(resp_obj, dict) else None
+                                if _last:
+                                    last_tool = str(_last)[:400]
+                                    break
+                        if last_tool:
+                            break
+                except Exception:
+                    pass
+                if last_tool:
+                    reply = ("I couldn't compose a final answer. Last data I "
+                             f"saw from the tool was:\n\n{last_tool}\n\n"
+                             "Try rephrasing the question or ask me to "
+                             "summarise the rows above.")
+                else:
+                    reply = "I wasn't able to generate a response. Please try again."
             return {"reply": reply}
 
         # Text chat: allow up to 5 rounds of run_sql tool calls before finalizing
@@ -2309,7 +2387,36 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                 pass
 
             if not fcs:
-                reply = response.text or "I wasn't able to generate a response. Please try again."
+                reply = response.text
+            if not reply:
+                # Empty response usually means MAX_TOKENS / safety / a model
+                # glitch. Look at the last tool result we shoved into
+                # `contents` and surface that to the user so they know what
+                # actually happened instead of a generic apology.
+                last_tool = ""
+                try:
+                    for _c in reversed(contents):
+                        if getattr(_c, "role", "") != "user":
+                            continue
+                        for _p in getattr(_c, "parts", []) or []:
+                            fr = getattr(_p, "function_response", None)
+                            if fr and getattr(fr, "response", None):
+                                resp_obj = fr.response
+                                _last = resp_obj.get("result") if isinstance(resp_obj, dict) else None
+                                if _last:
+                                    last_tool = str(_last)[:400]
+                                    break
+                        if last_tool:
+                            break
+                except Exception:
+                    pass
+                if last_tool:
+                    reply = ("I couldn't compose a final answer. Last data I "
+                             f"saw from the tool was:\n\n{last_tool}\n\n"
+                             "Try rephrasing the question or ask me to "
+                             "summarise the rows above.")
+                else:
+                    reply = "I wasn't able to generate a response. Please try again."
                 # Detect stalling: AI said "let me query" but didn't call the tool
                 stall_phrases = ["please allow me", "please wait", "let me query", "let me retrieve",
                                  "let me check", "i'll query", "i will query", "need to query",
@@ -2541,7 +2648,8 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
     system_prompt_final = (
         ANALYST_COMMON_SENSE + "\n\n" +
         SYSTEM_PROMPT + _build_date_context() + scope_addon_stream + "\n\n" +
-        _schema_notes_s + "\n\n" + _live_snap_s
+        _schema_notes_s + "\n\n" + _live_snap_s +
+        ATTENDANCE_BEHAVIOR_ADDON
     )
 
     def generate():
