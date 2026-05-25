@@ -9382,6 +9382,30 @@ export default function App() {
     if (isLoggedIn && !permissions) refreshPermissions();
   }, [isLoggedIn, permissions, refreshPermissions]);
 
+  // ── Stale-currentUser refresh ──
+  // localStorage caches the user blob from login time. If anything on the
+  // server side changes (company rename, role flip, full-name edit) the
+  // cached blob can lag forever. Hit /api/me once per mount when logged in
+  // and replace both state + localStorage with the fresh value. Failure is
+  // silent — the cached blob is still good enough to render.
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    const token = localStorage.getItem("token");
+    if (!token) return;
+    const base = import.meta.env.VITE_API_BASE || "";
+    fetch(`${base}/api/me`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null)
+      .then(fresh => {
+        if (!fresh || typeof fresh !== "object") return;
+        setCurrentUser(prev => {
+          const merged = { ...(prev || {}), ...fresh };
+          try { localStorage.setItem("user", JSON.stringify(merged)); } catch {}
+          return merged;
+        });
+      })
+      .catch(() => {});
+  }, [isLoggedIn]);
+
   // ── Session expiry listener ──
   // The global fetch interceptor fires "auth:session-expired" whenever any
   // authenticated request receives a 401. We catch it here and force logout.
@@ -9724,24 +9748,4 @@ export default function App() {
       {/* Chat Agent */}
       <ChatAgent isOpen={chatOpen} onClose={() => setChatOpen(false)} dashboardContext={currentNav?.label} />
 
-      {/* Floating Mic + Help buttons (ports Old Satori FAB) — visible on every page */}
-      <FabButtons />
-
-
-      {/* Global Styles */}
-      <style>{`
-        @keyframes spin { to { transform: rotate(360deg); } }
-        @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); } 50% { box-shadow: 0 0 0 12px rgba(239,68,68,0); } }
-        @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
-        @keyframes wave { 0%, 100% { transform: scaleY(0.5); } 50% { transform: scaleY(1.5); } }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
-        ::-webkit-scrollbar { width: 6px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
-      `}</style>
-    </div>
-  );
-}
+      {/* Floating Mic + Help buttons (ports Old Satori 
