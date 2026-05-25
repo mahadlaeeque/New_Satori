@@ -321,11 +321,32 @@ def _infer_schema_from_csv(csv_path: Path) -> list:
                     s["float"] = False
 
     schema = []
-    for col_name, s in zip(cols, state):
-        # Sanitize column names so they're valid BQ identifiers.
-        safe = re.sub(r"[^A-Za-z0-9_]+", "_", col_name).strip("_") or "col"
-        if safe[0].isdigit():
-            safe = "_" + safe
+    used: dict[str, int] = {}  # tracks seen names -> next suffix to try
+    for idx, (col_name, s) in enumerate(zip(cols, state)):
+        # Sanitize column names so they're valid BQ identifiers. Blank /
+        # unnamed columns fall back to col_<position> (1-based) instead of
+        # the literal 'col' so two unnamed columns in the same sheet don't
+        # collide.
+        cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", col_name).strip("_")
+        if not cleaned:
+            cleaned = f"col_{idx + 1}"
+        if cleaned[0].isdigit():
+            cleaned = "_" + cleaned
+
+        # De-duplicate against any earlier column we've already taken. The
+        # first occurrence keeps its name; subsequent collisions get _2,
+        # _3, ... suffixes. This handles Excel sheets where a merged title
+        # cell leaves several header cells reading the same merged value,
+        # or duplicate column names typed by hand.
+        safe = cleaned
+        if safe in used:
+            suffix = used[safe]
+            while f"{cleaned}_{suffix}" in used:
+                suffix += 1
+            safe = f"{cleaned}_{suffix}"
+            used[cleaned] = suffix + 1
+        used[safe] = 2
+
         if not s["has_value"]:
             bq_type = "STRING"
         elif s["date"]:
