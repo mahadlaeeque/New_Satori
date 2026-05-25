@@ -1019,3 +1019,72 @@ def _migrate_add_chat_tables():
         print("[DB] Migration: chat_conversations + chat_messages + chat_history tables ready")
     except Exception as e:
         print(f"[DB] chat_tables migration error: {e}")
+
+
+def _migrate_rename_sfml_to_tmc():
+    """Idempotent migration: rename every SFML identifier to TMC on existing
+    databases. Covers: companies.short_code + name, seeded user emails
+    (superadmin/admin/user @sfml.com -> @tmcltd.com), and
+    company_data_scope_dimensions.company_id rows keyed by 'SFML'. Safe to
+    re-run - every UPDATE has a WHERE clause that only matches legacy rows."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE companies SET name = ?, short_code = ? WHERE short_code = ?",
+            ("TMC", "TMC", "SFML"),
+        )
+        for old_email, new_email in (
+            ("superadmin@sfml.com", "superadmin@tmcltd.com"),
+            ("admin@sfml.com",      "admin@tmcltd.com"),
+            ("user@sfml.com",       "user@tmcltd.com"),
+        ):
+            cur.execute("SELECT 1 FROM users WHERE email = ?", (new_email,))
+            if cur.fetchone():
+                cur.execute("DELETE FROM users WHERE email = ?", (old_email,))
+            else:
+                cur.execute(
+                    "UPDATE users SET email = ? WHERE email = ?",
+                    (new_email, old_email),
+                )
+        cur.execute(
+            "UPDATE company_data_scope_dimensions SET company_id = ? WHERE company_id = ?",
+            ("TMC", "SFML"),
+        )
+        conn.commit()
+        conn.close()
+        print("[DB] Migration: sfml -> tmc rename applied if needed")
+    except Exception as e:
+        print(f"[DB] Migration error (sfml -> tmc, safe to ignore on fresh DB): {e}")
+
+
+def _migrate_reset_passwords_to_welcome():
+    """One-shot migration: set every user.password to bcrypt('welcome').
+    Tracked via a marker row in system_settings (key='password_reset_v1') so
+    it only runs once even though init_db() is called on every cold start."""
+    MARKER_KEY = "password_reset_v1"
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM system_settings WHERE key = ?", (MARKER_KEY,))
+        row = cur.fetchone()
+        if row:
+            conn.close()
+            return
+        pw_hash = _bcrypt.hashpw(b"welcome", _bcrypt.gensalt()).decode()
+        cur.execute("UPDATE users SET password = ?", (pw_hash,))
+        if USE_POSTGRES:
+            cur.execute(
+                "INSERT INTO system_settings (key, value) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (MARKER_KEY, "done"),
+            )
+        else:
+            cur.execute(
+                "INSERT OR IGNORE INTO system_settings (key, value) VALUES (?, ?)",
+                (MARKER_KEY, "done"),
+            )
+        conn.commit()
+        conn.close()
+        print("[DB] Migration: all user passwords reset to 'welcome' (one-time)")
+    except Exception as e:
+        print(f"[DB] Migration error (reset passwords, safe to ignore on fresh DB): {e}")
