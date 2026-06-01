@@ -2243,31 +2243,32 @@ WAREHOUSE CONTEXT:
 
 OUTPUT (return ONLY the addon text, no preamble, no markdown headers):
 
-USER CONTEXT - {name} (department: {department})
+USER CONTEXT - {name} (departments: {department_list_quoted})
 
 DATA ACCESS POLICY (treat as a HARD rule for every query you write):
-- Workforce queries (Employee_Data, Attendance_Data, Allocation_data, Timesheet_Data, Practice_Heads_List): restrict to employees whose EmployeeHierarchyNode equals "{department}". NEVER return employee, attendance, allocation, timesheet, or practice data for any other department.
+- Workforce queries (Employee_Data, Attendance_Data, Allocation_data, Timesheet_Data, Practice_Heads_List): restrict to employees whose EmployeeHierarchyNode is in this exact list: {department_list_quoted}. {name} heads {departments_count} department(s) and ONLY those. NEVER return employee, attendance, allocation, timesheet, or practice data for any other department - not even by fuzzy / partial / similar-name match. "Cloud Engineering" is NOT "Cloud", "SAP Finance team" is NOT "Finance", etc. If the user names a dept not exactly in the list above, treat it as out of scope.
 - Sales queries (Sales_*, Account_Coverage_Plan__*, Project_Master): full visibility, no restriction.
 - Admin-only data (other users' login history, audit logs, system settings): NO access.
 
-REQUIRED SQL JOIN PATTERN (copy this verbatim - do not invent variants):
+REQUIRED SQL JOIN PATTERN (copy this verbatim - do not invent variants, the IN clause is REQUIRED even for a single dept):
 
-  -- Attendance scoped to {department}:
+  -- Attendance scoped to {name}'s departments:
   SELECT a.*, e.Resource_Name, e.EmployeeHierarchyNode
   FROM `capability-agent-prod.Satori_Project.Attendance_Data` a
   INNER JOIN `capability-agent-prod.Satori_Project.Employee_Data` e
     ON LTRIM(REGEXP_REPLACE(CAST(a.employee_id AS STRING), r'[^0-9]', ''), '0')
      = LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
-  WHERE e.EmployeeHierarchyNode = "{department}"
+  WHERE e.EmployeeHierarchyNode IN ({department_list_quoted})
     AND LOWER(COALESCE(e.Employee_Type, '')) IN ('mto','permanent','probation')
 
   -- Same shape for Allocation_data (join on a.employee_id) and
   -- Timesheet_Data (join on a.TICKET_USER_ID).
 
-Use INNER JOIN (not LEFT) when scoped, so employees outside the dept can't sneak in via NULL-matches.
+Use INNER JOIN (not LEFT) when scoped, so employees outside the dept can't sneak in via NULL-matches. The IN clause is REQUIRED even when {departments_count} = 1.
 
-OUT-OF-SCOPE BEHAVIOUR: if {name} asks about employees / attendance / allocation / timesheets / practice heads outside the {department} department, reply with EXACTLY:
-  "I don't have that data available for your role - it's outside the {department} department's scope."
+OUT-OF-SCOPE BEHAVIOUR: if {name} asks about employees / attendance / allocation / timesheets / practice heads in ANY department whose name is not EXACTLY one of {department_list_quoted}, reply with EXACTLY:
+  "I don't have that data available for your role - it's outside your department's scope ({department_list_human})."
+Do NOT fuzzy-match. Do NOT suggest a related-sounding dept. Do NOT show employee names or counts from any other dept. Just the refusal phrase.
 
 ADDRESSING: Greet and address {name} by their first name (first word of their name) whenever it sounds natural. Sign off with their first name when appropriate.
 """
@@ -2308,39 +2309,54 @@ def _compute_scope_policy(user: dict) -> str:
         return addon
 
     name = (user.get("name") or user.get("full_name") or "User").strip() or "User"
-    # Find the dept from the user_data_scope table (Practice Heads import
-    # writes a row there). Fall back to "your" if unknown.
+    first = name.split()[0] if name else "User"
+
+    # Load EVERY dept scope row for this user (no LIMIT 1) so practice
+    # heads who cover multiple leaves get all of them in the policy.
+    dept_values: list[str] = []
     try:
         from database import get_db
         db = get_db(); cur = db.cursor()
         cur.execute(
             "SELECT value FROM user_data_scope WHERE user_id = ? "
-            "AND dimension = 'department' LIMIT 1",
+            "AND dimension = 'department' ORDER BY value",
             (uid,),
         )
-        row = cur.fetchone()
+        rows = cur.fetchall() or []
         db.close()
-        dept = (row["value"] if isinstance(row, dict) and row else
-                (row[0] if row else None)) or "your"
+        for r in rows:
+            v = (r["value"] if isinstance(r, dict) else r[0])
+            if v:
+                dept_values.append(str(v).strip())
     except Exception as e:
-        print(f"[scope-agent] could not load dept for user {uid}: {e}")
-        dept = "your"
+        print(f"[scope-agent] could not load dept rows for user {uid}: {e}")
 
-    # Skip the Gemini call if dept is unknown - just produce a generic
-    # unrestricted policy so the chat keeps working.
-    if not dept or dept == "your":
+    # Empty -> unrestricted fallback so chat keeps working.
+    if not dept_values:
         addon = (
             f"\n\nUSER CONTEXT - {name}\n"
             f"DATA ACCESS POLICY: unrestricted (no department assigned).\n"
-            f"ADDRESSING: address {name.split()[0]} by their first name "
-            f"when natural.\n"
+            f"ADDRESSING: address {first} by their first name when natural.\n"
         )
         _scope_policy_cache[uid] = addon
+        print(f"[scope-agent] uid={uid} has no dept scope rows -> unrestricted fallback")
         return addon
+
+    # Build the formats the prompt template expects.
+    department_list_quoted = ", ".join(f'"{d}"' for d in dept_values)  # for SQL IN clause
+    department_list_human  = ", ".join(dept_values)                     # human-readable
+    departments_count      = len(dept_values)
 
     try:
         client = get_genai_client()
-        prompt = _SCOPE_AGENT_PROMPT.format(name=name, department=dept, role=role)
+        prompt = _SCOPE_AGENT_PROMPT.format(
+            name=name,
+            role=role,
+            department=department_list_human,  # legacy single-dept placeholder, kept for any leftover refs
+            department_list_quoted=department_list_quoted,
+            department_list_human=department_list_human,
+            departments_count=departments_count,
+        )
         resp = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[genai.types.Content(
@@ -2349,7 +2365,7 @@ def _compute_scope_policy(user: dict) -> str:
             )],
             config=genai.types.GenerateContentConfig(
                 temperature=0.2,
-                max_output_tokens=600,
+                max_output_tokens=800,
             ),
         )
         addon_text = (resp.text or "").strip()
@@ -2357,18 +2373,21 @@ def _compute_scope_policy(user: dict) -> str:
             raise RuntimeError("scope agent returned empty text")
         addon = "\n\n" + addon_text + "\n"
         _scope_policy_cache[uid] = addon
-        print(f"[scope-agent] computed policy for uid={uid} dept={dept!r}")
+        print(f"[scope-agent] computed policy for uid={uid} depts={dept_values}")
         return addon
     except Exception as e:
-        print(f"[scope-agent] FAILED for uid={uid} dept={dept!r}: {e}")
+        print(f"[scope-agent] FAILED for uid={uid} depts={dept_values}: {e}")
         # Static fallback so chat keeps working even if Gemini is down.
-        first = name.split()[0]
         addon = (
-            f"\n\nUSER CONTEXT - {name} (department: {dept})\n"
-            f"DATA ACCESS POLICY: Workforce queries restricted to "
-            f"EmployeeHierarchyNode = \"{dept}\". Sales tables unrestricted.\n"
-            f"OUT-OF-SCOPE REPLY: \"I don\'t have that data available for "
-            f"your role - it\'s outside the {dept} department\'s scope.\"\n"
+            f"\n\nUSER CONTEXT - {name} (departments: {department_list_human})\n"
+            f"DATA ACCESS POLICY: Workforce queries are HARD-restricted to "
+            f"EmployeeHierarchyNode IN ({department_list_quoted}). "
+            f"NEVER return rows for any other department. The IN clause is "
+            f"required on every workforce JOIN. Sales tables unrestricted.\n"
+            f"OUT-OF-SCOPE REPLY: if asked about any other department, "
+            f"reply EXACTLY: \"I don't have that data available for your "
+            f"role - it's outside your department's scope "
+            f"({department_list_human}).\" Do NOT fuzzy-match similar names.\n"
             f"ADDRESSING: call {first} by their first name when natural.\n"
         )
         _scope_policy_cache[uid] = addon
