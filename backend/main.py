@@ -1164,20 +1164,28 @@ def admin_resync_practice_head_scopes(admin: dict = Depends(require_admin)):
         raise HTTPException(status_code=502, detail=err)
     db = get_db()
     cur = db.cursor()
-    updated, missing = 0, 0
+    updated, missing, skipped_empty = 0, 0, 0
+    per_user = []  # detailed per-row outcome so the admin can verify all heads
     for r in rows:
         email = (r.get("email") or "").strip().lower()
+        name  = (r.get("resource_name") or "").strip()
         if not email:
+            per_user.append({"email": "", "name": name, "status": "skipped", "reason": "no email"})
             continue
         cur.execute("SELECT id FROM users WHERE email = ?", (email,))
         row = cur.fetchone()
         if not row:
             missing += 1
+            per_user.append({"email": email, "name": name, "status": "no_user",
+                             "reason": "no matching user account for this email"})
             continue
         uid = row["id"] if isinstance(row, dict) else row[0]
         dept_raw = r.get("department") or r.get("hierarchy_node") or ""
         leaves = [s.strip() for s in dept_raw.split(",") if s.strip()]
         if not leaves:
+            skipped_empty += 1
+            per_user.append({"email": email, "name": name, "status": "skipped",
+                             "reason": "empty Department and hierarchy_node in Practice_Heads_List"})
             continue
         cur.execute(
             "DELETE FROM user_data_scope WHERE user_id = ? AND dimension = ?",
@@ -1209,13 +1217,25 @@ def admin_resync_practice_head_scopes(admin: dict = Depends(require_admin)):
                     (uid, "department", leaf),
                 )
         updated += 1
+        per_user.append({"email": email, "name": name, "status": "updated",
+                         "leaves": leaves, "leaf_count": len(leaves)})
+        # Bust the in-process scope-policy cache so the next chat
+        # request recomputes the policy with the fresh scope rows.
         try:
             _scope_policy_cache.pop(int(uid), None)
         except Exception:
             pass
     db.commit()
     db.close()
-    return {"updated": updated, "no_user": missing, "total_rows": len(rows)}
+    return {
+        "summary": {
+            "updated":       updated,
+            "no_user":       missing,
+            "skipped_empty": skipped_empty,
+            "total_rows":    len(rows),
+        },
+        "per_user": per_user,
+    }
 
 
 # ── System Settings helpers + endpoints ──────────────────────────────────────
