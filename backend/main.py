@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional
-from database import get_db, init_db
+from database import get_db, init_db, USE_POSTGRES
 from auth import (
     verify_password, create_access_token, decode_token,
     create_typed_token, decode_typed_token,
@@ -1191,7 +1191,7 @@ def admin_resync_practice_head_scopes(admin: dict = Depends(require_admin)):
             "DELETE FROM user_data_scope WHERE user_id = ? AND dimension = ?",
             (uid, "department"),
         )
-        if USE_POSTGRES_FLAG():
+        if USE_POSTGRES:
             cur.execute(
                 "INSERT INTO user_data_scope_policy (user_id, dimension, enforced) "
                 "VALUES (?, ?, ?) ON CONFLICT (user_id, dimension) DO UPDATE "
@@ -1255,7 +1255,7 @@ def _get_system_setting(key: str, default: str = "") -> str:
 def _set_system_setting(key: str, value: str) -> None:
     """Upsert a key in system_settings."""
     db = get_db(); cur = db.cursor()
-    pg = USE_POSTGRES_FLAG()
+    pg = USE_POSTGRES
     if pg:
         cur.execute(
             "INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
@@ -1395,7 +1395,7 @@ def admin_set_user_scope(
         raise HTTPException(status_code=404, detail="User not found")
 
     # Upsert policy row
-    if USE_POSTGRES_FLAG():
+    if USE_POSTGRES:
         cur.execute(
             "INSERT INTO user_data_scope_policy (user_id, dimension, enforced, updated_at) "
             "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
@@ -1465,7 +1465,7 @@ def admin_set_scope_dimension(body: AdminDimensionToggle, admin: dict = Depends(
         raise HTTPException(status_code=400, detail=f"Unknown dimension '{body.dimension}'")
     db = get_db()
     cur = db.cursor()
-    if USE_POSTGRES_FLAG():
+    if USE_POSTGRES:
         cur.execute(
             "INSERT INTO company_data_scope_dimensions (company_id, dimension, enabled, updated_at) "
             "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
