@@ -1227,14 +1227,14 @@ class AdminDimensionToggle(BaseModel):
 # disabled. Others are off by default — admin can turn them on.
 # Workforce-scoping dimensions. Both pull distinct values from Employee_Data
 # in the active BigQuery project (capability-agent-prod.Satori_Project on prod).
-# Department maps to Employee_Hierarchy (top-level practice grouping).
+# Department maps to EmployeeHierarchyNode (top-level practice grouping).
 # Practice Node maps to EmployeeHierarchyNode (the same column the Practice
 # Heads import seeds against the user_data_scope table).
 _SCOPE_DIMENSIONS = {
     "department": {"label": "Department", "bq_sql": (
-        "SELECT DISTINCT TRIM(Employee_Hierarchy) AS value, TRIM(Employee_Hierarchy) AS label "
+        "SELECT DISTINCT TRIM(EmployeeHierarchyNode) AS value, TRIM(EmployeeHierarchyNode) AS label "
         "FROM `__BQ_FULL__`.Employee_Data "
-        "WHERE Employee_Hierarchy IS NOT NULL AND TRIM(Employee_Hierarchy) != '' "
+        "WHERE EmployeeHierarchyNode IS NOT NULL AND TRIM(EmployeeHierarchyNode) != '' "
         "ORDER BY value LIMIT 200"
     )},
     "practice_node": {"label": "Practice Node", "bq_sql": (
@@ -1481,12 +1481,12 @@ def _get_user_scope_values(user_id: int, dimension: str) -> "list[str] | None":
 
 def _get_user_dept_scope(user_id: int):
     """Returns the list of department/practice values the user is restricted
-    to (matches `Employee_Data.Employee_Hierarchy`), or None when unrestricted.
+    to (matches `Employee_Data.EmployeeHierarchyNode`), or None when unrestricted.
 
     Practice Heads imported via /api/admin/users/practice-heads-import get one
     scope entry each (their own practice). The chat / dashboard / report /
     Availability Engine handlers honour this by appending a "WHERE
-    Employee_Hierarchy IN (...)" filter, both as a prompt addon for the AI
+    EmployeeHierarchyNode IN (...)" filter, both as a prompt addon for the AI
     AND as a server-side post-filter safety net.
     """
     try:
@@ -1574,7 +1574,7 @@ You help users analyse attendance, employee availability, project allocation, ti
 DATA WAREHOUSE — `ai-vertex-mahad.Satori_Project` (10 tables):
 
 WORKFORCE TABLES
-1. `Employee_Data` — Employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name, Employee_Position, Employee_Email, Employee_Hierarchy (department), Employee_Location (city), Employee_Status, Employee_Type ('MTO'/'Permanent'/'Probation'/'Contract'). Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
+1. `Employee_Data` — Employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name, Employee_Position, Employee_Email, EmployeeHierarchyNode (department), Employee_Location (city), Employee_Status, Employee_Type ('MTO'/'Permanent'/'Probation'/'Contract'). Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
 2. `Attendance_Data` — Daily attendance per employee. Cols: attendance_date (DATE), employee_id (STRING/INT — CAST to STRING when joining), employee_name, employee_email, checkin_time (STRING HH:MM:SS), checkout_time (STRING), attendance_status_text ('Present'/'Absent'/'Late'/'Leave'/etc.), is_present (0/1), is_absent (0/1), is_on_leave (0/1), is_remote (0/1), is_holiday (0/1), is_weekend (0/1), leave_type_name. For "late": LOWER(attendance_status_text) = 'late'.
 3. `Allocation_data` — Weekly project allocation. Cols: project_id, employee_id (STRING "E-1234"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Actual'/'Forecast'), Forecast_Flag, Date. Allocated = MAX(pct) >= 90; Partial = 1-89; Bench = 0/NULL.
 4. `Timesheet_Data` — Ticket/project hours. Cols: TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY, TICKET_DESCRIPTION, TICKET_SUBJECT. Join to employees on CAST(Employee_Code AS STRING) = CAST(TICKET_USER_ID AS STRING).
@@ -1599,13 +1599,13 @@ JOINS — CRITICAL JOIN-KEY NORMALIZATION:
 - Employee_Data → Allocation_data: same pattern, on a.employee_id.
 - Employee_Data → Timesheet_Data: same pattern, on t.TICKET_USER_ID.
 - Always use LEFT JOIN (not INNER) so attendance rows aren't dropped when the lookup table doesn't have a matching row.
-- Employee_Hierarchy is the DEPARTMENT field. Group by COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''), 'Unspecified') AS department.
+- EmployeeHierarchyNode is the DEPARTMENT field. Group by COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified') AS department.
 - Sales tables: share `AM` (Sales_Pipeline_Health uses `Salesperson` ≈ AM).
 
 DATA QUALITY:
 - allocation_percent, TICKET_HOURS, Sales_* USD/visit fields, win-rate decimals — STRING. Always SAFE_CAST AS FLOAT64 / INT64 before arithmetic.
 - Win-rate columns are decimals (0.32 = 32%); multiply by 100 for display.
-- For department grouping: COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified').
+- For department grouping: COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''), 'Unspecified').
 
 INJECTED-DATA PRECEDENCE:
 1. When a "TMC LIVE DATA (from BigQuery)" block appears in the user turn, SCAN IT FIRST.
@@ -1810,7 +1810,7 @@ User: "Who are the top absentees this month?"
 
 [F] DEPARTMENT-LEVEL ATTENDANCE
 User: "Attendance rate by department for March?"
-  → run_sql: SELECT COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''),'Unspecified') AS dept, ROUND(100.0*SUM(a.is_present)/NULLIF(COUNT(*),0),1) AS rate FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` a LEFT JOIN `{BQ_FULL}.Employee_Data` e ON UPPER(TRIM(e.Resource_Name))=UPPER(TRIM(a.employee_name)) WHERE a.attendance_date BETWEEN DATE '2026-03-01' AND DATE '2026-03-31' GROUP BY dept ORDER BY rate DESC LIMIT 10
+  → run_sql: SELECT COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''),'Unspecified') AS dept, ROUND(100.0*SUM(a.is_present)/NULLIF(COUNT(*),0),1) AS rate FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` a LEFT JOIN `{BQ_FULL}.Employee_Data` e ON UPPER(TRIM(e.Resource_Name))=UPPER(TRIM(a.employee_name)) WHERE a.attendance_date BETWEEN DATE '2026-03-01' AND DATE '2026-03-31' GROUP BY dept ORDER BY rate DESC LIMIT 10
   → Speak: "SAP Finance leads March at 94 percent, SAP Supply Chain at 91, Professional Services at 89, KPO at 85, and Emerging Tech at 82."
 
 [G] BENCH SIZE
@@ -1843,7 +1843,7 @@ CRITICAL: If you are not sure which exact column to use, STILL CALL run_sql with
 ═══ KEY TABLES (ai-vertex-mahad.Satori_Project) ═══
 
 WORKFORCE
-  • Employee_Data — Employee_Code, Resource_Name, Employee_Position, Employee_Hierarchy (department), Employee_Location, Employee_Type, Joining_Date, Gender. Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation','contractual fixed term').
+  • Employee_Data — Employee_Code, Resource_Name, Employee_Position, EmployeeHierarchyNode (department), Employee_Location, Employee_Type, Joining_Date, Gender. Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation','contractual fixed term').
   • Attendance_Data — attendance_date (DATE), employee_id, employee_name, employee_email, checkin_time (STRING HH:MM:SS — for the moment they checked in), checkout_time (STRING HH:MM:SS — for the moment they checked out), attendance_status_text ('Present'/'Absent'/'Weekend'/'Holiday'/'On Leave'/'Missing Punch'/'Remote Work'), is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1). NO 'Late' status — closest concept is 'Missing Punch'.
   • Allocation_data — project_id, employee_id, emp_name, allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Allocated'/'Bench'), Date, Week, Year, Month.
   • Timesheet_Data — TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (INT YYYYMMDD — use SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)) for date filters).
@@ -1855,7 +1855,7 @@ SALES
   • Sales_Plan_vs_Pipeline — AM, col_2026_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio, Status.
   • Sales_Hunting_Gap — AM, City, Hunting_Target, Hunting_Achieved, Hunting_Gap.
 
-DEPARTMENTS (real Employee_Hierarchy values): SAP Supply Chain, SAP Finance, SAP ABAP & Fiori, SAP HCM & SLCM, Professional Services, Emerging Tech, KPO, SAP SF & Workday, SAP EAM, SAP Basis, LMS & UniTime, SAP Controlling, PMO Islamabad, Qlik, SAP Analytics, Cloud, Account Management, Finance, BOD, Marketing, HR Ops, IT, Admin, Textile.
+DEPARTMENTS (real EmployeeHierarchyNode values): SAP Supply Chain, SAP Finance, SAP ABAP & Fiori, SAP HCM & SLCM, Professional Services, Emerging Tech, KPO, SAP SF & Workday, SAP EAM, SAP Basis, LMS & UniTime, SAP Controlling, PMO Islamabad, Qlik, SAP Analytics, Cloud, Account Management, Finance, BOD, Marketing, HR Ops, IT, Admin, Textile.
 
 JOIN RULE (the only working one): Employee_Data ↔ Attendance/Allocation on names:
   ON UPPER(TRIM(e.Resource_Name)) = UPPER(TRIM(a.employee_name))
@@ -2011,7 +2011,7 @@ def _dept_scope_addon_str(dept_scope: "list[str] | None") -> str:
     """Build the system-prompt fragment that tells Gemini the user is scoped
     to one or more departments / practices. Returns empty string when the
     user has no scope (admin or unrestricted). The addon names the exact
-    BigQuery column (Employee_Hierarchy) so the model knows where to filter."""
+    BigQuery column (EmployeeHierarchyNode) so the model knows where to filter."""
     if dept_scope is None:
         return ""
     if not dept_scope:  # empty list = no access
@@ -2029,10 +2029,10 @@ def _dept_scope_addon_str(dept_scope: "list[str] | None") -> str:
         f"{', '.join(dept_scope)}.\n"
         f"Every SQL query you write against workforce tables (Employee_Data, "
         f"Allocation_data, Timesheet_Data, Attendance_Data, Practice_Heads_List) "
-        f"MUST include an AND clause that filters by Employee_Hierarchy. "
-        f"Use: AND Employee_Hierarchy IN ({quoted}) on Employee_Data, and join "
+        f"MUST include an AND clause that filters by EmployeeHierarchyNode. "
+        f"Use: AND EmployeeHierarchyNode IN ({quoted}) on Employee_Data, and join "
         f"to Employee_Data via the employee id (REGEXP_EXTRACT digits, LTRIM "
-        f"leading zeros) for tables that don't carry Employee_Hierarchy directly. "
+        f"leading zeros) for tables that don't carry EmployeeHierarchyNode directly. "
         f"NEVER return employee, attendance, allocation, timesheet, or practice "
         f"data for departments outside this list. Sales tables (Sales_*) are NOT "
         f"department-scoped - those remain visible to scoped users.\n"
@@ -2041,7 +2041,7 @@ def _dept_scope_addon_str(dept_scope: "list[str] | None") -> str:
 
 
 def _enforce_dept_scope_on_sql(sql: str, dept_scope: "list[str] | None") -> str:
-    """Server-side safety net: rewrite SQL to inject the Employee_Hierarchy
+    """Server-side safety net: rewrite SQL to inject the EmployeeHierarchyNode
     filter when the user has a dept scope AND the SQL references a workforce
     table. Best-effort - if the SQL doesn't contain a recognisable workforce
     table reference, it's returned untouched.
@@ -2060,7 +2060,7 @@ def _enforce_dept_scope_on_sql(sql: str, dept_scope: "list[str] | None") -> str:
     if not any(t in sql_upper for t in workforce_tables):
         return sql
 
-    # Only safe to inject Employee_Hierarchy when Employee_Data is in the SQL
+    # Only safe to inject EmployeeHierarchyNode when Employee_Data is in the SQL
     # (directly queried or LEFT-JOINed). If the SQL touches workforce data
     # but doesn't join to Employee_Data, we CANNOT enforce the dept scope -
     # silently passing the query through would leak cross-department rows
@@ -2070,12 +2070,12 @@ def _enforce_dept_scope_on_sql(sql: str, dept_scope: "list[str] | None") -> str:
         return ("SELECT 'SCOPE_REFUSED' AS _error, "
                 "'Re-run this query with a LEFT JOIN to Employee_Data via "
                 "the digits-only employee id - the dept-scope filter on "
-                "Employee_Hierarchy can only be applied through that join.' "
+                "EmployeeHierarchyNode can only be applied through that join.' "
                 "AS _message LIMIT 0")
 
     quoted = ", ".join("'" + str(v).replace("'", "''") + "'" for v in dept_scope)
     scope_clause = (
-        f"COALESCE(NULLIF(TRIM(Employee_Hierarchy), ''), 'Unspecified') IN ({quoted})"
+        f"COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') IN ({quoted})"
     )
 
     # Find the outermost (depth-0) WHERE keyword, same scanning approach as
@@ -2147,7 +2147,7 @@ USER:
 
 WAREHOUSE CONTEXT:
 - Workforce data tables in `capability-agent-prod.Satori_Project`:
-  * Employee_Data (Employee_Hierarchy column = department)
+  * Employee_Data (EmployeeHierarchyNode column = department)
   * Attendance_Data (joined via employee_id)
   * Allocation_data (joined via employee_id)
   * Timesheet_Data (joined via TICKET_USER_ID)
@@ -2159,19 +2159,19 @@ OUTPUT (return ONLY the addon text, no preamble, no markdown headers):
 USER CONTEXT - {name} (department: {department})
 
 DATA ACCESS POLICY (treat as a HARD rule for every query you write):
-- Workforce queries (Employee_Data, Attendance_Data, Allocation_data, Timesheet_Data, Practice_Heads_List): restrict to employees whose Employee_Hierarchy equals "{department}". NEVER return employee, attendance, allocation, timesheet, or practice data for any other department.
+- Workforce queries (Employee_Data, Attendance_Data, Allocation_data, Timesheet_Data, Practice_Heads_List): restrict to employees whose EmployeeHierarchyNode equals "{department}". NEVER return employee, attendance, allocation, timesheet, or practice data for any other department.
 - Sales queries (Sales_*, Account_Coverage_Plan__*, Project_Master): full visibility, no restriction.
 - Admin-only data (other users' login history, audit logs, system settings): NO access.
 
 REQUIRED SQL JOIN PATTERN (copy this verbatim - do not invent variants):
 
   -- Attendance scoped to {department}:
-  SELECT a.*, e.Resource_Name, e.Employee_Hierarchy
+  SELECT a.*, e.Resource_Name, e.EmployeeHierarchyNode
   FROM `capability-agent-prod.Satori_Project.Attendance_Data` a
   INNER JOIN `capability-agent-prod.Satori_Project.Employee_Data` e
     ON LTRIM(REGEXP_REPLACE(CAST(a.employee_id AS STRING), r'[^0-9]', ''), '0')
      = LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
-  WHERE e.Employee_Hierarchy = "{department}"
+  WHERE e.EmployeeHierarchyNode = "{department}"
     AND LOWER(COALESCE(e.Employee_Type, '')) IN ('mto','permanent','probation')
 
   -- Same shape for Allocation_data (join on a.employee_id) and
@@ -2279,7 +2279,7 @@ def _compute_scope_policy(user: dict) -> str:
         addon = (
             f"\n\nUSER CONTEXT - {name} (department: {dept})\n"
             f"DATA ACCESS POLICY: Workforce queries restricted to "
-            f"Employee_Hierarchy = \"{dept}\". Sales tables unrestricted.\n"
+            f"EmployeeHierarchyNode = \"{dept}\". Sales tables unrestricted.\n"
             f"OUT-OF-SCOPE REPLY: \"I don\'t have that data available for "
             f"your role - it\'s outside the {dept} department\'s scope.\"\n"
             f"ADDRESSING: call {first} by their first name when natural.\n"
@@ -3461,7 +3461,7 @@ def attendance_overview_data(user: dict = Depends(get_current_user)):
     SELECT
       COUNT(*) AS total_orders,
       COUNT(DISTINCT attendance_status_text) AS unique_order_types,
-      (SELECT COUNT(DISTINCT COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified'))
+      (SELECT COUNT(DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''), 'Unspecified'))
          FROM {_TMC_DATASET}.Employee_Data) AS unique_plants,
       (SELECT COUNT(DISTINCT Employee_Position)
          FROM {_TMC_DATASET}.Employee_Data) AS unique_profit_centers
@@ -3472,8 +3472,8 @@ def attendance_overview_data(user: dict = Depends(get_current_user)):
 
     top_depts_sql = f"""
     SELECT
-      COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''), 'Unspecified') AS dealer_name,
-      COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''), 'Unspecified') AS dealer_code,
+      COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified') AS dealer_name,
+      COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified') AS dealer_code,
       COUNT(*) AS amount,
       COUNT(*) AS qty
     FROM {_TMC_DATASET}.Attendance_Data a
@@ -3488,7 +3488,7 @@ def attendance_overview_data(user: dict = Depends(get_current_user)):
 
     qty_by_dept_sql = f"""
     SELECT
-      COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''), 'Unspecified') AS name,
+      COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified') AS name,
       SUM(a.is_present) AS qty
     FROM {_TMC_DATASET}.Attendance_Data a
     LEFT JOIN {_TMC_DATASET}.Employee_Data e
@@ -3500,7 +3500,7 @@ def attendance_overview_data(user: dict = Depends(get_current_user)):
 
     stacked_sql = f"""
     SELECT
-      COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''), 'Unspecified') AS dealer_name,
+      COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified') AS dealer_name,
       a.attendance_status_text AS product,
       COUNT(*) AS qty
     FROM {_TMC_DATASET}.Attendance_Data a
@@ -3519,13 +3519,13 @@ def attendance_overview_data(user: dict = Depends(get_current_user)):
       a.attendance_status_text                   AS product,
       CAST(a.employee_id AS STRING)              AS dealer_code,
       a.employee_name                            AS dealer_name,
-      COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''), 'Unspecified') AS plant_name,
+      COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified') AS plant_name,
       a.attendance_status_text                   AS short_text,
       a.attendance_date                          AS shipment_date,
       CAST(a.is_present AS FLOAT64)              AS qty,
       CAST(NULL AS FLOAT64)                      AS amount,
       e.Employee_Location                        AS zone,
-      e.Employee_Hierarchy                       AS region,
+      e.EmployeeHierarchyNode                       AS region,
       e.Employee_Position                        AS district
     FROM {_TMC_DATASET}.Attendance_Data a
     LEFT JOIN {_TMC_DATASET}.Employee_Data e
@@ -3560,7 +3560,7 @@ def availability_overview_data(user: dict = Depends(get_current_user)):
       COUNTIF(max_pct >= 90)              AS unique_dealers,
       COUNTIF(max_pct BETWEEN 1 AND 89)   AS total_products,
       COUNTIF(COALESCE(max_pct, 0) = 0)   AS total_qty,
-      (SELECT COUNT(DISTINCT COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified'))
+      (SELECT COUNT(DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''), 'Unspecified'))
          FROM {_TMC_DATASET}.Employee_Data) AS unique_plants
     FROM latest_alloc
     """
@@ -3579,7 +3579,7 @@ def availability_overview_data(user: dict = Depends(get_current_user)):
 
     qty_by_dept_sql = f"""
     SELECT
-      COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''), 'Unspecified') AS name,
+      COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified') AS name,
       ROUND(AVG(SAFE_CAST(a.allocation_percent AS FLOAT64)), 1) AS qty
     FROM {_TMC_DATASET}.Allocation_data a
     LEFT JOIN {_TMC_DATASET}.Employee_Data e
@@ -3604,13 +3604,13 @@ def availability_overview_data(user: dict = Depends(get_current_user)):
       e.Employee_Position                                                   AS product,
       l.emp_id                                                              AS dealer_code,
       e.Resource_Name                                                       AS dealer_name,
-      COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''), 'Unspecified')        AS plant_name,
+      COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified')        AS plant_name,
       CASE
         WHEN l.max_pct >= 90              THEN 'Allocated'
         WHEN l.max_pct BETWEEN 1 AND 89   THEN 'Partial'
         ELSE 'Bench' END                                                    AS dealer_code_status,
       e.Employee_Location                                                   AS zone,
-      e.Employee_Hierarchy                                                  AS region,
+      e.EmployeeHierarchyNode                                                  AS region,
       e.Employee_Position                                                   AS district,
       l.avg_pct                                                             AS qty,
       l.max_pct                                                             AS amount,
@@ -3637,7 +3637,7 @@ def workforce_overview_data(user: dict = Depends(get_current_user)):
       CURRENT_DATE()                                                              AS as_of_date,
       COUNT(*)                                                                    AS total_material_lines,
       COUNT(*)                                                                    AS unique_materials,
-      COUNT(DISTINCT COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified')) AS unique_plants,
+      COUNT(DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''), 'Unspecified')) AS unique_plants,
       CAST(COUNTIF(LOWER(COALESCE(Employee_Type,'')) IN ('mto','permanent','probation')) AS FLOAT64) AS total_qty,
       CAST(COUNT(DISTINCT Employee_Location) AS FLOAT64)                          AS total_value_local
     FROM {_TMC_DATASET}.Employee_Data
@@ -3653,8 +3653,8 @@ def workforce_overview_data(user: dict = Depends(get_current_user)):
       GROUP BY emp_id
     )
     SELECT
-      COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''), 'Unspecified') AS plant_id,
-      COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''), 'Unspecified') AS plant_name,
+      COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified') AS plant_id,
+      COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified') AS plant_name,
       COUNT(*)                                                       AS unique_materials,
       CAST(COUNT(*) AS FLOAT64)                                      AS total_qty,
       ROUND(AVG(COALESCE(a.avg_pct, 0)), 1)                          AS total_value_local
@@ -3679,7 +3679,7 @@ def workforce_overview_data(user: dict = Depends(get_current_user)):
 
     data_sql = f"""
     SELECT
-      COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''), 'Unspecified') AS plant_id,
+      COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified') AS plant_id,
       CAST(e.Employee_Code AS STRING)                                AS material_id,
       e.Employee_Position                                            AS material_type,
       e.Resource_Name                                                AS material_description,
@@ -3769,7 +3769,7 @@ def sales_pipeline_data(user: dict = Depends(get_current_user)):
 _DASHBOARD_SAP_SCHEMAS = """Detailed table schemas (BigQuery project `ai-vertex-mahad`, dataset `Satori_Project`). Column TYPES are shown in parentheses — use them correctly.
 
 WORKFORCE TABLES:
-- `Employee_Data` — employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name (STRING), Employee_Position (STRING), Employee_Email (STRING), Employee_Hierarchy (STRING — department), Employee_Location (STRING — city), Employee_Status (STRING), Employee_Type (STRING — 'MTO'/'Permanent'/'Probation'/'Contract'). Active employees = Employee_Type IN ('MTO','Permanent','Probation').
+- `Employee_Data` — employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name (STRING), Employee_Position (STRING), Employee_Email (STRING), EmployeeHierarchyNode (STRING — department), Employee_Location (STRING — city), Employee_Status (STRING), Employee_Type (STRING — 'MTO'/'Permanent'/'Probation'/'Contract'). Active employees = Employee_Type IN ('MTO','Permanent','Probation').
 - `Attendance_Data` — daily attendance per employee. Cols: attendance_date (DATE), employee_id (INT64 — CAST AS STRING to join), employee_name (STRING), checkin_time (STRING HH:MM:SS), checkout_time (STRING), attendance_status_text (STRING — 'Present'/'Absent'/'Late'/'Leave'/etc), is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 — 0/1). For "late": LOWER(attendance_status_text)='late'.
 - `Allocation_data` — weekly project allocation. Cols: project_id (STRING), employee_id (STRING — "E-1234"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency (STRING), Flag (STRING — 'Actual'/'Forecast'), Forecast_Flag (STRING), Date (DATE). Allocated = MAX(pct)>=90; Partial = 1-89; Bench = 0/NULL.
 - `Timesheet_Data` — ticket/project hours. Cols: TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (INT64 — YYYYMMDD), TICKET_DESCRIPTION, TICKET_SUBJECT.
@@ -3807,7 +3807,7 @@ DATA QUALITY (READ TWICE — these are the column-type rules that break queries)
 - ✅ DO instead: ROUND(Coverage_Ratio * 100, 1), ROUND(Hist_Win_Rate * 100, 1), SUM(is_present).
 - Win-rate columns are decimals (0.32 = 32%); multiply by 100 for display.
 - For Headcount/Total Employees: ALWAYS use COUNT(DISTINCT employee_id) — never COUNT(*) on Attendance_Data (that counts attendance rows, ~30× too high).
-- Use COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified') for clean department grouping.
+- Use COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''), 'Unspecified') for clean department grouping.
 - attendance_date is DATE — compare directly with DATE_SUB / CURRENT_DATE.
 - DATE_KEY (Timesheet) is INT64 in YYYYMMDD form — use SAFE.PARSE_DATE('%Y-%m-%d', CAST(DATE_KEY AS STRING)).
 
@@ -3937,7 +3937,7 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
       "type": "bar", "variant": "horizontal",
       "labelKey": "department",
       "valueKeys": ["attendance_pct"],
-      "sql": "SELECT COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'Unspecified') AS department, ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1) AS attendance_pct FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` a JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` e ON CAST(e.Employee_Code AS STRING)=CAST(a.employee_id AS STRING) WHERE attendance_date BETWEEN DATE_SUB(CURRENT_DATE(),INTERVAL 30 DAY) AND CURRENT_DATE() {{where}} GROUP BY department ORDER BY attendance_pct DESC LIMIT 50"}}
+      "sql": "SELECT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') AS department, ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1) AS attendance_pct FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` a JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` e ON CAST(e.Employee_Code AS STRING)=CAST(a.employee_id AS STRING) WHERE attendance_date BETWEEN DATE_SUB(CURRENT_DATE(),INTERVAL 30 DAY) AND CURRENT_DATE() {{where}} GROUP BY department ORDER BY attendance_pct DESC LIMIT 50"}}
   ]
 }}}}
 
@@ -3970,12 +3970,12 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
 - Attendance %: ROUND(100.0 * SUM(is_present) / NULLIF(COUNT(*),0), 1).
 - Bench classify on MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per Employee_Code.
 - Win rate display: multiply Hist_Win_Rate by 100.
-- Department grouping: COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified') AS department.
+- Department grouping: COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''), 'Unspecified') AS department.
 - Join keys (CRITICAL — direct CAST-to-STRING returns 0 matches because Employee_Code is stored like 'E-2141' while employee_id is '2141'). Use LTRIM(REGEXP_REPLACE(CAST(<col> AS STRING), r'[^0-9]', ''), '0') on BOTH sides:
     LEFT JOIN ... e ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
                      = LTRIM(REGEXP_REPLACE(CAST(a.employee_id   AS STRING), r'[^0-9]', ''), '0')
   And ALWAYS use LEFT JOIN (not plain JOIN) so attendance rows survive even if Employee_Data has no matching row.
-- Employee_Hierarchy is the DEPARTMENT — never call it anything else.
+- EmployeeHierarchyNode is the DEPARTMENT — never call it anything else.
 - 📅 Date scope: today's date is May 2026. When the user says "last month" you mean April 2026; "this month" means May 2026. If they name a month (e.g. "March 2026"), use that exact month's first/last day.
 - {{where}} placement: the runtime substitutes either `AND field='value' AND ...` or empty string into the spot where you wrote {{where}}. Your query MUST already have its own WHERE — write the placeholder as ` {{where}}` right after your last WHERE condition (with a leading space). If no filters apply at runtime, the placeholder becomes ''.
 - LIMIT every chart query to 50 rows.
@@ -4011,7 +4011,7 @@ CRITICAL — KPI + CHART CONTRACT (every field must match the SQL):
 - Always include `id`, `title`, `type`, `labelKey`, `valueKeys`, `sql` on every chart.
 - Always include `id`, `title`, `format`, `sql` on every KPI.
 
-SQL RULES (same as the refine prompt — fully qualify with `ai-vertex-mahad.Satori_Project.<table>`, SAFE_CAST every STRING-typed numeric, multiply Hist_Win_Rate by 100, COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'Unspecified') for department, CAST-to-STRING joins, LIMIT 50, and place the {{where}} placeholder right after your last WHERE condition with a leading space so the runtime can append filters).
+SQL RULES (same as the refine prompt — fully qualify with `ai-vertex-mahad.Satori_Project.<table>`, SAFE_CAST every STRING-typed numeric, multiply Hist_Win_Rate by 100, COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') for department, CAST-to-STRING joins, LIMIT 50, and place the {{where}} placeholder right after your last WHERE condition with a leading space so the runtime can append filters).
 
 DASHBOARD LIMITS & OPTIONS: bar (variants: vertical, horizontal, stacked) / line / pie; KPI formats number/usd/percent; KPI icons (Users, UserCheck, Briefcase, Calendar, Clock, TrendingUp, DollarSign, Target, Award, Activity); max 6 KPIs / 4 charts / 5 filters.
 
@@ -4577,7 +4577,7 @@ def _autofix_dashboard_sql(sql: str) -> str:
     # The two columns are stored in different formats: Employee_Code looks like
     # "E-2141" while employee_id is the numeric "2141" (or zero-padded). The
     # CAST-to-STRING join used by the AI doesn't bridge that gap, so every join
-    # returns zero matches and Employee_Hierarchy comes back NULL → 'Unspecified'.
+    # returns zero matches and EmployeeHierarchyNode comes back NULL → 'Unspecified'.
     # Rewrite the comparison to strip non-digits + leading zeros on both sides.
     def _norm_key(col_expr):
         return f"LTRIM(REGEXP_REPLACE(CAST({col_expr} AS STRING), r'[^0-9]', ''), '0')"
@@ -4754,7 +4754,7 @@ def _autofix_dashboard_sql(sql: str) -> str:
 _REPAIR_PROMPT = """You are a BigQuery SQL repair assistant. The query below failed with the given error against the TMC Satori warehouse. Output ONLY the fixed SQL — no prose, no markdown fence, no commentary.
 
 ═══ TMC SCHEMA (use ONLY these tables/columns) ═══
-- `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, Employee_Position, Employee_Hierarchy (department), Employee_Location, Employee_Type, Employee_Status.
+- `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, Employee_Position, EmployeeHierarchyNode (department), Employee_Location, Employee_Type, Employee_Status.
 - `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), employee_id (INT64), employee_name (STRING), checkin_time, checkout_time, attendance_status_text, is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 0/1).
 - `{BQ_FULL}.Allocation_data` — project_id, employee_id (STRING "E-1234"), allocation_percent (STRING), emp_competency, Flag ('Allocated'/'Bench'), Date.
 - `{BQ_FULL}.Timesheet_Data` — TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (INT64 YYYYMMDD).
@@ -4781,7 +4781,7 @@ GOAL: The user clicked one category on a dashboard chart. Show them the row-leve
 detail behind that single category so they understand WHO/WHAT makes up the number.
 
 ═══ TMC SCHEMA ═══
-- `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, Employee_Position, Employee_Hierarchy (department), Employee_Location, Employee_Type, Employee_Status.
+- `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, Employee_Position, EmployeeHierarchyNode (department), Employee_Location, Employee_Type, Employee_Status.
 - `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), employee_id (INT64), employee_name (STRING), checkin_time, checkout_time, attendance_status_text, is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 0/1).
 - `{BQ_FULL}.Allocation_data` — project_id, employee_id (STRING), allocation_percent (STRING), emp_competency, Flag, Date.
 - `{BQ_FULL}.Timesheet_Data` — TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (INT64 YYYYMMDD).
@@ -4799,7 +4799,7 @@ detail behind that single category so they understand WHO/WHAT makes up the numb
 - Output ONLY raw SQL — one SELECT statement, no markdown, no commentary.
 
 ═══ DRILL-DOWN RECIPES ═══
-When the parent chart is grouped by DEPARTMENT (Employee_Hierarchy) and the user clicks department='Qlik':
+When the parent chart is grouped by DEPARTMENT (EmployeeHierarchyNode) and the user clicks department='Qlik':
   SELECT
     e.Resource_Name AS employee,
     e.Employee_Position AS position,
@@ -4812,7 +4812,7 @@ When the parent chart is grouped by DEPARTMENT (Employee_Hierarchy) and the user
     ON UPPER(TRIM(e.Resource_Name)) = UPPER(TRIM(a.employee_name))
    AND a.is_weekend=0 AND a.is_holiday=0
    AND a.attendance_date BETWEEN <parent_start> AND <parent_end>
-  WHERE COALESCE(NULLIF(TRIM(e.Employee_Hierarchy),''),'Unspecified') = 'Qlik'
+  WHERE COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''),'Unspecified') = 'Qlik'
     AND LOWER(e.Employee_Type) IN ('mto','permanent','probation')
   GROUP BY employee, position
   ORDER BY attendance_pct DESC
@@ -5002,8 +5002,8 @@ def _repair_widget_sql(failed_sql: str, error_msg: str, widget_meta: dict) -> st
 # Order matters: most-specific aliases first so partial matches don't shadow.
 _FILTER_FIELD_MAP = {
     # workforce — labels users see vs columns in BQ
-    "department":         "COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'Unspecified')",
-    "Employee_Hierarchy": "Employee_Hierarchy",
+    "department":         "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified')",
+    "EmployeeHierarchyNode": "EmployeeHierarchyNode",
     "employee_type":      "LOWER(Employee_Type)",
     "Employee_Type":      "LOWER(Employee_Type)",
     "location":           "Employee_Location",
@@ -5187,8 +5187,8 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
     import re as _re
     filter_options = {}
     field_to_probe = {
-        "department":         "SELECT DISTINCT COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'Unspecified') AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Hierarchy IS NOT NULL ORDER BY v",
-        "Employee_Hierarchy": "SELECT DISTINCT COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'Unspecified') AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Hierarchy IS NOT NULL ORDER BY v",
+        "department":         "SELECT DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeeHierarchyNode IS NOT NULL ORDER BY v",
+        "EmployeeHierarchyNode": "SELECT DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeeHierarchyNode IS NOT NULL ORDER BY v",
         "employee_type":      "SELECT DISTINCT Employee_Type AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Type IS NOT NULL ORDER BY v",
         "Employee_Type":      "SELECT DISTINCT Employee_Type AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Type IS NOT NULL ORDER BY v",
         "location":           "SELECT DISTINCT Employee_Location AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Location IS NOT NULL ORDER BY v",
@@ -5350,14 +5350,14 @@ def _bq_avail(prefix: str) -> str:
 
 
 def _dept_scope_clause(dept_scope: list | None) -> str:
-    """Produce the ' AND Employee_Hierarchy IN (...)' fragment to append to
+    """Produce the ' AND EmployeeHierarchyNode IN (...)' fragment to append to
     the active-employees WHERE clause. Returns empty string for unrestricted
     users (admins, or non-admins with no scope rows). Values are quoted with
     BigQuery's safe-quote rules (' replaced with '')."""
     if not dept_scope:
         return ""
     quoted = ", ".join("'" + str(v).replace("'", "''") + "'" for v in dept_scope)
-    return f" AND COALESCE(NULLIF(TRIM(Employee_Hierarchy), ''), 'Unspecified') IN ({quoted})"
+    return f" AND COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') IN ({quoted})"
 
 
 def _norm_emp_id(col: str) -> str:
@@ -5524,7 +5524,7 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
                  Employee_Code AS code,
                  Resource_Name AS name,
                  COALESCE(NULLIF(TRIM(Employee_Position), ''), '') AS position,
-                 COALESCE(NULLIF(TRIM(Employee_Hierarchy), ''), 'Unspecified') AS department,
+                 COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS department,
                  COALESCE(NULLIF(TRIM(Employee_Location), ''), '') AS location
           FROM {_bq_avail('Employee_Data')}
           WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
@@ -5602,7 +5602,7 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
 def _avail_departments_sql(dept_scope: list | None = None) -> str:
     """Distinct department list for the Create-Task modal dropdown."""
     return f"""
-        SELECT DISTINCT COALESCE(NULLIF(TRIM(Employee_Hierarchy), ''), 'Unspecified') AS department
+        SELECT DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS department
         FROM {_bq_avail('Employee_Data')}
         WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
               {_dept_scope_clause(dept_scope)}
@@ -5672,7 +5672,7 @@ def availability_employees(
     Optional query parameters:
       status      — 'Bench' | 'Partial' | 'Allocated'
       skill       — matches competency OR position (case-insensitive)
-      department  — exact department (Employee_Hierarchy)
+      department  — exact department (EmployeeHierarchyNode)
       q           — free-text substring matched against name / position / department / location / competency
       limit       — hard cap on rows returned (default 500)
 
@@ -5823,7 +5823,7 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
     dept_scope = _get_user_dept_scope(int(user["sub"]))
     if dept_scope:
         check_sql = normalize_bq_project(f"""
-            SELECT COALESCE(NULLIF(TRIM(Employee_Hierarchy), ''), 'Unspecified') AS dept
+            SELECT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS dept
             FROM {_bq_avail('Employee_Data')}
             WHERE CAST(Employee_Code AS STRING) = '{safe_code}'
             LIMIT 1
@@ -6318,7 +6318,7 @@ A report = ONE BigQuery SELECT that produces ONE clean table of rows. The fronte
 
 WORKFORCE TABLES:
 - `ai-vertex-mahad.Satori_Project.Employee_Data`
-    Employee_Code, Resource_Name, Employee_Position, Employee_Hierarchy (= department),
+    Employee_Code, Resource_Name, Employee_Position, EmployeeHierarchyNode (= department),
     Employee_Location, Employee_Type, Joining_Date, Gender.
     Active employees filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
 
@@ -6369,8 +6369,8 @@ This dataset DOES NOT contain SAP/MRP concepts (plant, storage_location, materia
 - Fully qualify every table with backticks: `ai-vertex-mahad.Satori_Project.<table>`.
 - Use ONLY the columns listed above. If a column you want doesn't exist, pick a different angle or join — never invent column names.
 - SAFE_CAST every STRING-typed numeric (allocation_percent, TICKET_HOURS, col_2026_Target, Q1_ACH, Open_Pipeline) to FLOAT64 / INT64 before SUM / AVG.
-- Joins: Employee_Code is stored like 'E-2141'; employee_id / TICKET_USER_ID are bare numbers. Use LTRIM(REGEXP_REPLACE(CAST(<col> AS STRING), r'[^0-9]', ''), '0') on both sides. Always LEFT JOIN, never plain JOIN. Employee_Hierarchy = department.
-- For department grouping: COALESCE(NULLIF(TRIM(Employee_Hierarchy),''), 'Unspecified').
+- Joins: Employee_Code is stored like 'E-2141'; employee_id / TICKET_USER_ID are bare numbers. Use LTRIM(REGEXP_REPLACE(CAST(<col> AS STRING), r'[^0-9]', ''), '0') on both sides. Always LEFT JOIN, never plain JOIN. EmployeeHierarchyNode = department.
+- For department grouping: COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''), 'Unspecified').
 - For fuzzy name match (e.g. user types "Mahad"): WHERE LOWER(employee_name) LIKE '%mahad%' (or Resource_Name on Employee_Data).
 - LIMIT every query to 200 rows max.
 - Use ROUND() for percentages and currency.
@@ -6867,12 +6867,12 @@ _DEFAULT_SCHEMA_SETTINGS = [
         "description": (
             "Master employee records (1,199 rows).\n"
             "Columns: Employee_Code (STRING, e.g. 'E-2141'), Resource_Name (STRING — full name), "
-            "Employee_Position (STRING), Employee_Email (STRING), Employee_Hierarchy (STRING = department), "
+            "Employee_Position (STRING), Employee_Email (STRING), EmployeeHierarchyNode (STRING = department), "
             "Employee_Location (STRING — city), Employee_Status (STRING), Employee_Type (STRING — Permanent / MTO / Probation / Contractual Fixed term / Contractor / Freelancer / Internship), "
             "Joining_Date, Gender.\n"
             "JOIN with Attendance_Data on UPPER(TRIM(Resource_Name)) = UPPER(TRIM(employee_name)) — "
             "Employee_Code does NOT match employee_id.\n"
-            "Department grouping: COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'Unspecified') AS department."
+            "Department grouping: COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') AS department."
         ),
     },
     {

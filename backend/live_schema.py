@@ -18,7 +18,7 @@ _lock = threading.Lock()
 
 _PROBES = {
     "departments": (
-        "SELECT DISTINCT COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'(empty)') AS v, COUNT(*) AS n "
+        "SELECT DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'(empty)') AS v, COUNT(*) AS n "
         "FROM `ai-vertex-mahad.Satori_Project.Employee_Data` "
         "GROUP BY v ORDER BY n DESC LIMIT 50"
     ),
@@ -178,8 +178,8 @@ def render_context_block() -> str:
         f"ROW COUNTS - {rc_str}\n\n"
         f"ATTENDANCE DATE RANGE - {date_str}\n\n"
         "WORKFORCE DIMENSIONS (Employee_Data):\n"
-        f"- Departments (Employee_Hierarchy) - {_format_distinct(get_rows('departments'))}\n"
-        "  Always use COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'Unspecified') AS department. Many rows have NULL/empty Employee_Hierarchy.\n"
+        f"- Departments (EmployeeHierarchyNode) - {_format_distinct(get_rows('departments'))}\n"
+        "  Always use COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') AS department. Many rows have NULL/empty EmployeeHierarchyNode.\n"
         f"- Employee_Type values - {_format_distinct(get_rows('employee_types'))}\n"
         "  These are stored case-sensitive. ALWAYS wrap in LOWER() before comparing.\n"
         f"- Positions (Employee_Position) - {_format_distinct(get_rows('positions'))}\n"
@@ -207,7 +207,7 @@ def render_context_block() -> str:
         "      LEFT JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` e\n"
         "        ON UPPER(TRIM(e.Resource_Name)) = UPPER(TRIM(al.emp_name))\n"
         "- ALWAYS LEFT JOIN (never INNER) so the outer rows survive when the lookup has no match.\n\n"
-        "WHEN A USER ASKS ABOUT 'DEPARTMENTS' OR 'TEAMS' - they mean Employee_Hierarchy. Group by COALESCE(NULLIF(TRIM(Employee_Hierarchy),''),'Unspecified') AS department. The departments above are the REAL ones (SAP Supply Chain, SAP Finance, SAP ABAP & Fiori, etc.) - never invent department names like 'Engineering' or 'Tech' that don't exist.\n\n"
+        "WHEN A USER ASKS ABOUT 'DEPARTMENTS' OR 'TEAMS' - they mean EmployeeHierarchyNode. Group by COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') AS department. The departments above are the REAL ones (SAP Supply Chain, SAP Finance, SAP ABAP & Fiori, etc.) - never invent department names like 'Engineering' or 'Tech' that don't exist.\n\n"
         "STATUS / FLAG GOTCHAS - use ONLY the values listed in the snapshot above:\n"
         "- attendance_status_text values: Present, Weekend, Absent, Missing Punch, Holiday, On Leave, Remote Work (and 'Submitted ...' variants). NO 'Late' - do not filter on 'late'. Use is_present=1 for attendance rate.\n"
         "- Allocation_data.Flag values: 'Allocated' and 'Bench'. NO 'Actual' or 'Forecast'.\n\n"

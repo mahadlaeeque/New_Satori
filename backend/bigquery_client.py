@@ -121,7 +121,7 @@ QUERY_MAP = {
             {
                 "name": "Active Headcount by Department",
                 "sql": """SELECT
-  COALESCE(NULLIF(TRIM(Employee_Hierarchy), ''), 'Unspecified') AS department,
+  COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS department,
   COUNT(*) AS headcount
 FROM `{project}.{dataset}.Employee_Data`
 WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')

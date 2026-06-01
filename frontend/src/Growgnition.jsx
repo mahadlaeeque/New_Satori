@@ -7133,7 +7133,7 @@ const ImportPracticeHeadsModal = ({ onClose, onImported }) => {
             </h2>
             <p style={{ margin: "6px 0 0", fontSize: 13, color: COLORS.textSecondary }}>
               Bulk-create users from <code style={{ background: COLORS.surfaceAlt, padding: "1px 6px", borderRadius: 4 }}>Practice_Heads_List</code>.
-              Each new user is role <strong>user</strong>, gets every feature, and is scoped to their own practice (Employee_Hierarchy).
+              Each new user is role <strong>user</strong>, gets every feature, and is scoped to their own practice (EmployeeHierarchyNode).
             </p>
           </div>
           <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: COLORS.textMuted, padding: 4 }}><X size={20} /></button>
@@ -7957,7 +7957,7 @@ const AuditLogPage = () => {
 // join hints) that get injected into every agent's system prompt. The
 // Auto-Detect Schema button pulls the live column metadata from BigQuery and
 // drops it into the description box; the admin can then add business context
-// (e.g. "Employee_Hierarchy = department", "JOIN on Resource_Name").
+// (e.g. "EmployeeHierarchyNode = department", "JOIN on Resource_Name").
 const SchemaSettingsCard = () => {
   const apiBase = import.meta.env.VITE_API_BASE || "";
   const authH = () => ({ Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" });
