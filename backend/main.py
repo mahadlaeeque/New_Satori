@@ -11,6 +11,7 @@ from auth import (
 )
 import totp as totp_lib
 import audit as audit_log
+import emailer
 from redact import redact as _redact_pii, redact_history as _redact_history_pii
 from bigquery_client import find_relevant_data, discover_tables, get_all_key_data, get_schema_context
 import live_schema
@@ -228,6 +229,10 @@ _SUPERADMIN_EMAILS = {
     "superadmin@tmc.com",
     "superadmin@tmcltd.com",
     "superadmin@sfml.com",
+    # Additional accounts granted full Super Admin privileges (admin role +
+    # System Settings + unrestricted data), same as the bootstrap superadmin.
+    "numair.mazhar@tmcltd.com",
+    "mahad.laeeque@tmcltd.com",
 }
 
 
@@ -608,6 +613,108 @@ def logout(request: Request, response: Response):
     harmless (it just clears the cookie if present)."""
     _clear_trust_device_cookie(response, request)
     return {"message": "Logged out"}
+
+
+# ── Self-service password reset (forgot password) ────────────────────────────
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+
+PW_RESET_EXPIRE_MINUTES = 30
+
+
+@app.post("/api/forgot-password")
+def forgot_password(body: ForgotPasswordRequest, request: Request):
+    """Public endpoint. If the email maps to an active user, email them a
+    short-lived reset link. ALWAYS returns the same generic message so the
+    endpoint can't be used to enumerate which emails are registered. The reset
+    link is also written to the server log so the superadmin can retrieve it
+    for testing before SMTP is verified — it is NEVER returned in the response
+    (this is a public endpoint)."""
+    email = (body.email or "").strip().lower()
+    generic = {"message": "If that email is registered, a password-reset link has been sent."}
+    if not email or "@" not in email:
+        return generic
+    db = get_db(); cur = db.cursor()
+    cur.execute(
+        "SELECT id, email, full_name, is_active FROM users WHERE LOWER(email) = ?",
+        (email,),
+    )
+    row = cur.fetchone(); db.close()
+    if not row:
+        return generic
+    is_active = row["is_active"] if isinstance(row, dict) else row[3]
+    if not is_active:
+        return generic
+    uid = row["id"] if isinstance(row, dict) else row[0]
+    real_email = row["email"] if isinstance(row, dict) else row[1]
+    name = (row["full_name"] if isinstance(row, dict) else row[2]) or real_email
+    first = name.split()[0] if name else "there"
+
+    token = create_typed_token({"sub": str(uid), "email": real_email}, "pw_reset",
+                               minutes=PW_RESET_EXPIRE_MINUTES)
+    base = (os.environ.get("APP_BASE_URL", "").strip().rstrip("/")
+            or str(request.base_url).rstrip("/"))
+    link = f"{base}/#reset?token={token}"
+    # Server-side log so the superadmin can retrieve/forward it for testing.
+    print(f"[PW-RESET] reset link for {real_email}: {link}")
+
+    subject = "Reset your Satori password"
+    text = (f"Hi {first},\n\n"
+            f"We received a request to reset your Satori password. Open the link "
+            f"below to choose a new one (valid for {PW_RESET_EXPIRE_MINUTES} minutes):\n\n"
+            f"{link}\n\n"
+            f"If you didn't request this, you can ignore this email — your password "
+            f"won't change.\n\n— Satori · TMC")
+    html = (f"<p>Hi {first},</p>"
+            f"<p>We received a request to reset your Satori password. Click below to "
+            f"choose a new one (valid for {PW_RESET_EXPIRE_MINUTES} minutes):</p>"
+            f'<p><a href="{link}">Reset my password</a></p>'
+            f"<p>If you didn't request this, ignore this email — your password won't change.</p>"
+            f"<p>— Satori · TMC</p>")
+    ok, detail = emailer.send_email(real_email, subject, text, html)
+    if not ok:
+        print(f"[PW-RESET] email send for {real_email} not sent: {detail}")
+    try:
+        audit_log.record(user=None, request=request, action="auth.password_reset_request",
+                         resource_type="user", resource_id=uid, detail={"email_sent": ok})
+    except Exception:
+        pass
+    return generic
+
+
+@app.post("/api/reset-password")
+def reset_password(body: ResetPasswordRequest, request: Request):
+    """Consume a reset token and set a new password."""
+    payload = decode_typed_token(body.token, "pw_reset")
+    if not payload:
+        raise HTTPException(status_code=400,
+                            detail="This reset link is invalid or has expired. Please request a new one.")
+    pw = body.new_password or ""
+    if len(pw) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+    uid = int(payload["sub"])
+    import bcrypt as _bcrypt
+    pw_hash = _bcrypt.hashpw(pw.encode(), _bcrypt.gensalt()).decode()
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT id FROM users WHERE id = ?", (uid,))
+    if not cur.fetchone():
+        db.close()
+        raise HTTPException(status_code=400, detail="Account not found.")
+    cur.execute("UPDATE users SET password = ? WHERE id = ?", (pw_hash, uid))
+    db.commit(); db.close()
+    try:
+        audit_log.record(user={"sub": str(uid), "email": payload.get("email")},
+                         request=request, action="auth.password_reset",
+                         resource_type="user", resource_id=uid)
+    except Exception:
+        pass
+    return {"message": "Password updated. You can now sign in with your new password."}
 
 
 @app.get("/api/me", response_model=UserResponse)

@@ -8570,6 +8570,28 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
 
   const resetTo = (next) => { setError(""); setCode(""); setUseBackupCode(false); setStage(next); };
 
+  // ── Forgot-password (self-service reset) ──
+  const [forgotEmail, setForgotEmail] = useState("");
+  const [forgotBusy, setForgotBusy] = useState(false);
+  const [forgotSent, setForgotSent] = useState(false);
+  const submitForgot = async (e) => {
+    e.preventDefault();
+    setForgotBusy(true); setError("");
+    try {
+      await fetch(`${API_BASE}/api/forgot-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: forgotEmail }),
+      });
+      // Always show the same confirmation regardless of whether the email exists.
+      setForgotSent(true);
+    } catch {
+      setForgotSent(true);
+    } finally {
+      setForgotBusy(false);
+    }
+  };
+
   // ── Stage 1: credentials → /api/login (returns ok | setup | challenge) ──
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -8874,7 +8896,62 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                   </span>
                 ) : "Sign in"}
               </button>
+              <div style={{ textAlign: "center", marginTop: 2 }}>
+                <button
+                  type="button"
+                  onClick={() => { setForgotEmail(email); setForgotSent(false); resetTo("forgot"); }}
+                  style={{ background: "none", border: "none", color: COLORS.accentDark, fontSize: 13, fontWeight: 600, cursor: "pointer", padding: 4 }}
+                >
+                  Forgot password?
+                </button>
+              </div>
             </form>
+          </>
+        )}
+
+        {/* ── Forgot password: request a reset link by email ───────────── */}
+        {stage === "forgot" && (
+          <>
+            <div style={{ marginBottom: 28 }}>
+              <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 8 }}>Reset your password</div>
+              <div style={{ fontSize: 14, color: COLORS.textSecondary, lineHeight: 1.55 }}>
+                Enter your work email and we'll send you a link to set a new password.
+              </div>
+            </div>
+            {forgotSent ? (
+              <>
+                <div style={{ padding: "12px 14px", background: "#ECFDF5", border: "1px solid #6EE7B7", borderRadius: 10, color: "#065F46", fontSize: 13.5, lineHeight: 1.5 }}>
+                  If <strong>{forgotEmail}</strong> is registered, a password-reset link is on its way. The link expires in 30 minutes — check your inbox (and spam).
+                </div>
+                <button type="button" onClick={() => resetTo("credentials")} style={{ marginTop: 18, width: "100%", padding: "12px", border: `1px solid ${COLORS.border}`, borderRadius: 12, fontSize: 14, fontWeight: 600, background: COLORS.surface, color: COLORS.textPrimary, cursor: "pointer" }}>
+                  Back to sign in
+                </button>
+              </>
+            ) : (
+              <form onSubmit={submitForgot} style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+                <div>
+                  <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: COLORS.textPrimary, marginBottom: 6 }}>Email address</label>
+                  <div style={{ position: "relative" }}>
+                    <Mail size={18} color={COLORS.textMuted} style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)" }} />
+                    <input
+                      type="email" value={forgotEmail} onChange={e => setForgotEmail(e.target.value)}
+                      placeholder="name@tmcltd.com" autoComplete="email" autoFocus required
+                      style={{ width: "100%", padding: "12px 14px 12px 44px", border: `1px solid ${COLORS.border}`, borderRadius: 12, fontSize: 14, outline: "none", background: COLORS.surfaceAlt, boxSizing: "border-box" }}
+                    />
+                  </div>
+                </div>
+                <button type="submit" disabled={forgotBusy} style={{
+                  width: "100%", padding: "14px", border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600,
+                  background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`, color: "#fff",
+                  cursor: forgotBusy ? "default" : "pointer", opacity: forgotBusy ? 0.7 : 1,
+                }}>
+                  {forgotBusy ? "Sending…" : "Send reset link"}
+                </button>
+                <button type="button" onClick={() => resetTo("credentials")} style={{ background: "none", border: "none", color: COLORS.textSecondary, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                  Back to sign in
+                </button>
+              </form>
+            )}
           </>
         )}
 
@@ -9352,6 +9429,77 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
 };
 
 // ─── Main App ───
+// ─── Reset Password page (reached from the emailed link, works logged-out) ───
+const ResetPasswordPage = () => {
+  const token = (() => {
+    const q = (typeof window !== "undefined" ? window.location.hash : "").split("?")[1] || "";
+    return new URLSearchParams(q).get("token") || "";
+  })();
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [done, setDone] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault(); setErr("");
+    if (pw.length < 6) { setErr("Password must be at least 6 characters."); return; }
+    if (pw !== pw2) { setErr("Passwords don't match."); return; }
+    setBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/reset-password`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, new_password: pw }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "Reset failed");
+      setDone(true);
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  const goLogin = () => { window.location.hash = ""; window.location.reload(); };
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: COLORS.surfaceAlt, fontFamily: "'Red Hat Display', 'Poppins', sans-serif", padding: 20 }}>
+      <div style={{ width: "100%", maxWidth: 420, background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 18, padding: 36, boxShadow: "0 12px 40px rgba(0,0,0,0.10)" }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 8 }}>Set a new password</div>
+        {!token ? (
+          <>
+            <div style={{ fontSize: 14, color: "#DC2626", lineHeight: 1.55 }}>This reset link is missing its token. Please use the most recent link from your email, or request a new one from the sign-in page.</div>
+            <button onClick={goLogin} style={{ marginTop: 20, width: "100%", padding: 12, border: `1px solid ${COLORS.border}`, borderRadius: 12, fontWeight: 600, background: COLORS.surface, cursor: "pointer" }}>Back to sign in</button>
+          </>
+        ) : done ? (
+          <>
+            <div style={{ padding: "12px 14px", background: "#ECFDF5", border: "1px solid #6EE7B7", borderRadius: 10, color: "#065F46", fontSize: 13.5, lineHeight: 1.5 }}>
+              Your password has been updated. You can now sign in with your new password.
+            </div>
+            <button onClick={goLogin} style={{ marginTop: 20, width: "100%", padding: 14, border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600, background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`, color: "#fff", cursor: "pointer" }}>Go to sign in</button>
+          </>
+        ) : (
+          <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 8 }}>
+            <div style={{ fontSize: 14, color: COLORS.textSecondary, lineHeight: 1.5, marginBottom: 4 }}>Choose a new password for your Satori account.</div>
+            <div>
+              <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: COLORS.textPrimary, marginBottom: 6 }}>New password</label>
+              <input type="password" value={pw} onChange={e => setPw(e.target.value)} placeholder="At least 6 characters" autoComplete="new-password" autoFocus required
+                style={{ width: "100%", padding: "12px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 12, fontSize: 14, outline: "none", background: COLORS.surfaceAlt, boxSizing: "border-box" }} />
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: COLORS.textPrimary, marginBottom: 6 }}>Confirm new password</label>
+              <input type="password" value={pw2} onChange={e => setPw2(e.target.value)} placeholder="Re-enter your new password" autoComplete="new-password" required
+                style={{ width: "100%", padding: "12px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 12, fontSize: 14, outline: "none", background: COLORS.surfaceAlt, boxSizing: "border-box" }} />
+            </div>
+            {err && <div style={{ padding: "10px 14px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13 }}>{err}</div>}
+            <button type="submit" disabled={busy} style={{ width: "100%", padding: 14, border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600, background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`, color: "#fff", cursor: busy ? "default" : "pointer", opacity: busy ? 0.7 : 1 }}>
+              {busy ? "Updating…" : "Update password"}
+            </button>
+            <button type="button" onClick={goLogin} style={{ background: "none", border: "none", color: COLORS.textSecondary, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+};
+
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(() => !!localStorage.getItem("token"));
   const [currentUser, setCurrentUser] = useState(() => {
@@ -9563,6 +9711,9 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
   const onPrivacy = routeHash === "#privacy";
+
+  // Password-reset page is reachable from the emailed link even when logged out.
+  if (routeHash.startsWith("#reset")) return <ResetPasswordPage />;
 
   if (!isLoggedIn) return <LoginPage onLogin={handleLogin} expiredMsg={sessionExpiredMsg} />;
 
