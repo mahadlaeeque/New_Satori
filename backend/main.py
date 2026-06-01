@@ -706,8 +706,35 @@ def admin_list_users(_: dict = Depends(require_admin)):
         """
     )
     rows = cur.fetchall()
+
+    # Department scope per user (dimension='department'), grouped in Python so
+    # the query stays portable across SQLite + Postgres (no GROUP_CONCAT vs
+    # STRING_AGG split). Rai Sohaib Amjad has two departments; everyone else one.
+    cur.execute(
+        "SELECT user_id, value FROM user_data_scope WHERE dimension = 'department' "
+        "ORDER BY user_id, value"
+    )
+    dept_by_user: dict[int, list[str]] = {}
+    for r in cur.fetchall():
+        d = dict(r)
+        dept_by_user.setdefault(d["user_id"], []).append(d["value"])
+
+    cur.execute(
+        "SELECT user_id, enforced FROM user_data_scope_policy WHERE dimension = 'department'"
+    )
+    enforced_by_user: dict[int, bool] = {}
+    for r in cur.fetchall():
+        d = dict(r)
+        enforced_by_user[d["user_id"]] = bool(d["enforced"])
     db.close()
-    return {"users": [dict(r) for r in rows]}
+
+    out = []
+    for r in rows:
+        u = dict(r)
+        u["departments"] = dept_by_user.get(u["id"], [])
+        u["scope_enforced"] = enforced_by_user.get(u["id"], False)
+        out.append(u)
+    return {"users": out}
 
 
 @app.post("/api/admin/users")
@@ -1029,7 +1056,16 @@ def admin_practice_heads_import(body: dict, admin: dict = Depends(require_admin)
     for r in rows:
         email = r["email"]
         name = r["resource_name"] or email.split("@")[0]
-        practice = r["hierarchy_node"] or r["department"]
+        # Scope value comes from the Department column (the practice the head
+        # leads, e.g. 'SAP GRC'), comma-split into leaves so a head of two
+        # practices (e.g. 'SAP Finance, SAP Controlling') gets one scope row
+        # each. This matches the values in Employee_Data.EmployeeHierarchyNode
+        # that the row-level filter compares against. (hierarchy_node, e.g.
+        # 'Capability (Functional)', is the parent group and matches no
+        # employees — do NOT use it for scope.)
+        dept_raw = r["department"] or r["hierarchy_node"]
+        dept_leaves = [s.strip() for s in dept_raw.split(",") if s.strip()]
+        practice = ", ".join(dept_leaves)
 
         # Honour the selection if the caller sent one; otherwise default to
         # every row that's not already in the system.
@@ -1081,10 +1117,10 @@ def admin_practice_heads_import(body: dict, admin: dict = Depends(require_admin)
                         (new_id, fid),
                     )
 
-            # Seed department scope so they only see their own practice once
-            # the row-level scope wiring lands. Stores both the scope value
-            # and a "scope is enforced" policy row.
-            if practice:
+            # Seed department scope so the head only sees their own practice.
+            # One scope row per leaf department; enforcement policy row flagged
+            # on. Mirrors /api/admin/users/resync-practice-head-scopes.
+            if dept_leaves:
                 if USE_POSTGRES:
                     cur.execute(
                         "INSERT INTO user_data_scope_policy (user_id, dimension, enforced) "
@@ -1092,22 +1128,24 @@ def admin_practice_heads_import(body: dict, admin: dict = Depends(require_admin)
                         "SET enforced = EXCLUDED.enforced",
                         (new_id, "department", 1),
                     )
-                    cur.execute(
-                        "INSERT INTO user_data_scope (user_id, dimension, value) "
-                        "VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
-                        (new_id, "department", practice),
-                    )
+                    for leaf in dept_leaves:
+                        cur.execute(
+                            "INSERT INTO user_data_scope (user_id, dimension, value) "
+                            "VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+                            (new_id, "department", leaf),
+                        )
                 else:
                     cur.execute(
                         "INSERT OR REPLACE INTO user_data_scope_policy (user_id, dimension, enforced) "
                         "VALUES (?, ?, ?)",
                         (new_id, "department", 1),
                     )
-                    cur.execute(
-                        "INSERT OR IGNORE INTO user_data_scope (user_id, dimension, value) "
-                        "VALUES (?, ?, ?)",
-                        (new_id, "department", practice),
-                    )
+                    for leaf in dept_leaves:
+                        cur.execute(
+                            "INSERT OR IGNORE INTO user_data_scope (user_id, dimension, value) "
+                            "VALUES (?, ?, ?)",
+                            (new_id, "department", leaf),
+                        )
 
             db.commit()  # commit per-row so a single bad row doesn't roll back the whole batch
             existing.add(email)
@@ -1322,12 +1360,6 @@ _SCOPE_DIMENSIONS = {
         "SELECT DISTINCT TRIM(EmployeeHierarchyNode) AS value, TRIM(EmployeeHierarchyNode) AS label "
         "FROM `__BQ_FULL__`.Employee_Data "
         "WHERE EmployeeHierarchyNode IS NOT NULL AND TRIM(EmployeeHierarchyNode) != '' "
-        "ORDER BY value LIMIT 200"
-    )},
-    "practice_node": {"label": "Practice Node", "bq_sql": (
-        "SELECT DISTINCT TRIM(EmployeeHierarchyNode) AS value, TRIM(EmployeeHierarchyNode) AS label "
-        "FROM `__BQ_FULL__`.Employee_Data "
-        "WHERE EmployeeHierarchyNode IS NOT NULL AND TRIM(EmployeeHierarchyNode) != '' "
         "ORDER BY value LIMIT 500"
     )},
 }
@@ -1424,6 +1456,12 @@ def admin_set_user_scope(
 
     db.commit()
     db.close()
+    # Bust the in-process scope-policy cache so this user's next chat / voice /
+    # dashboard / report request recomputes their policy with the new scope.
+    try:
+        _scope_policy_cache.pop(int(user_id), None)
+    except Exception:
+        pass
     audit_log.record(
         user=admin, request=request,
         action="permissions.scope_update", resource_type="user", resource_id=user_id,
@@ -2214,9 +2252,10 @@ def _enforce_dept_scope_on_sql(sql: str, dept_scope: "list[str] | None") -> str:
                 "EmployeeHierarchyNode can only be applied through that join.' "
                 "AS _message LIMIT 0")
 
-    quoted = ", ".join("'" + str(v).replace("'", "''") + "'" for v in dept_scope)
+    # Case-insensitive match (see _dept_scope_clause for why).
+    quoted = ", ".join("LOWER('" + str(v).replace("'", "''") + "')" for v in dept_scope)
     scope_clause = (
-        f"COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') IN ({quoted})"
+        f"LOWER(COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified')) IN ({quoted})"
     )
 
     # Find the outermost (depth-0) WHERE keyword, same scanning approach as
@@ -2344,24 +2383,40 @@ def _admin_unrestricted_addon(user: dict) -> str:
 
 
 def _compute_scope_policy(user: dict) -> str:
-    """SCOPE FILTERING DISABLED. Every user (admin, practice head, regular
-    user) gets the same unrestricted policy. The user's name is still
-    surfaced so chat/voice can still address them by first name.
+    """Per-user data-access policy addon, prepended to the chat / voice /
+    dashboard / report system prompts.
 
-    Keeping the function + cache around so the new scope design can
-    re-enable per-user policies by editing this one function. The
-    /api/admin/users/resync-practice-head-scopes endpoint and the
-    user_data_scope tables stay in place too.
+    - Admins (incl. superadmin): unrestricted — full cross-department access.
+    - Non-admins WITH a department scope (e.g. imported Practice Heads):
+      restricted to their assigned department(s) on every workforce query,
+      via _dept_scope_addon_str. Sales tables stay shared.
+    - Non-admins WITHOUT a scope row: unrestricted workforce access (an admin
+      hasn't assigned a department yet) — only the name context is surfaced.
 
-    To restore per-user scoping later, replace this body with the
-    multi-dept gatekeeper logic from git history (commit d9f75a2)."""
+    Cached per user_id for the process lifetime. The cache is busted whenever
+    an admin changes a user's scope (admin_set_user_scope /
+    resync-practice-head-scopes) so the next request recomputes the policy."""
     try:
         uid = int(user.get("sub") or user.get("id") or 0)
     except Exception:
         uid = 0
     if uid in _scope_policy_cache:
         return _scope_policy_cache[uid]
-    addon = _admin_unrestricted_addon(user)
+
+    role = (user.get("role") or "").lower()
+    if role == "admin":
+        addon = _admin_unrestricted_addon(user)
+    else:
+        dept_scope = _get_user_dept_scope(uid)
+        name = (user.get("name") or user.get("full_name") or "there").strip()
+        first = name.split()[0] if name else "there"
+        ctx = (
+            f"\n\nUSER CONTEXT - {name} (role: user)\n"
+            f"ADDRESSING: address {first} by their first name when natural.\n"
+        )
+        # _dept_scope_addon_str returns "" for None (unrestricted), the
+        # restriction text for a non-empty list, or a no-access notice for [].
+        addon = ctx + _dept_scope_addon_str(dept_scope)
     _scope_policy_cache[uid] = addon
     return addon
 
@@ -2475,9 +2530,6 @@ def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None, dept_scope
     if any(f" {f} " in f" {upper} " for f in forbidden):
         return "Error: DDL/DML operations are not allowed."
 
-    # Dept-scope enforcement is now done in the system prompt via the
-    # gatekeeper-agent context addon. _execute_chat_sql trusts the SQL
-    # that Gemini produces; the scope is enforced upstream.
     if plant_scope is not None:
         if not plant_scope:
             return (
@@ -2487,6 +2539,16 @@ def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None, dept_scope
             )
         sql_stripped = _enforce_plant_scope_in_sql(sql_stripped, plant_scope)
         print(f"[CHAT-SQL] Plant scope enforced: allowed={plant_scope}")
+
+    # Department-scope enforcement (server-side safety net). The system-prompt
+    # addon already instructs the model to filter by EmployeeHierarchyNode, but
+    # we ALSO rewrite the SQL here so a scoped user can never see another
+    # department's workforce rows even if the model omits the filter. None =
+    # unrestricted (admin / unscoped user); [] = no access (zero-row sentinel);
+    # [...] = inject the case-insensitive EmployeeHierarchyNode IN (...) clause.
+    if dept_scope is not None:
+        sql_stripped = _enforce_dept_scope_on_sql(sql_stripped, dept_scope)
+        print(f"[CHAT-SQL] Dept scope enforced: allowed={dept_scope}")
     # ─────────────────────────────────────────────────────────────────────────
 
     # Rewrite legacy ai-vertex-mahad project refs to the live BQ_PROJECT.
@@ -2555,6 +2617,15 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
     client = get_genai_client()
     uid = int(user["sub"])
     opted_out = _ai_opt_out(uid)
+    # Department scope (None = unrestricted; [] = no access; [...] = restricted).
+    # Computed up-front because it gates the pre-injected BigQuery context
+    # below: a department-scoped user must NOT receive cross-department
+    # aggregates via find_relevant_data (those QUERY_MAP queries run unscoped).
+    # Scoped users get workforce data ONLY through run_sql, which is enforced
+    # server-side by _enforce_dept_scope_on_sql.
+    chat_dept_scope: list[str] | None = (
+        _get_user_dept_scope(uid) if (user.get("role") or "").lower() != "admin" else None
+    )
 
     # PII-redact the user's message + history before they ride along to a
     # third-party LLM. Best-effort: strips emails, phone numbers, CNICs,
@@ -2566,13 +2637,15 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
     # Fetch relevant BigQuery data unless the user opted out of AI data flow.
     # When opted out, prompts go to Gemini with no business data attached.
     bq_context = ""
-    if not body.voice_mode and not opted_out:
+    if not body.voice_mode and not opted_out and chat_dept_scope is None:
         try:
             bq_context = find_relevant_data(body.message)
             if bq_context:
                 print(f"[BQ] Found relevant data for: {body.message[:50]}...")
         except Exception as e:
             print(f"[BQ] Error fetching data: {e}")
+    elif chat_dept_scope is not None:
+        print(f"[BQ] Skipping pre-injected context for dept-scoped user (scope={chat_dept_scope}); run_sql is enforced.")
 
     audit_log.record(
         user=user, request=request,
@@ -2635,6 +2708,9 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                     "State that they do not have data access configured yet.\n"
                     "--- END SCOPE RESTRICTION ---"
                 )
+
+    # (chat_dept_scope was computed at the top of this function so it could
+    # gate the pre-injected BigQuery context.)
 
     # Build the system prompt defensively — if the schema-settings DB read or
     # the live-schema snapshot fails, we still want chat to work.
@@ -2883,7 +2959,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                     sql_is_runnable = bool(extracted_sql and re.search(r"\bSELECT\b[\s\S]+?\bFROM\b", extracted_sql, re.IGNORECASE))
                     if sql_is_runnable:
                         print(f"[CHAT] Auto-executing extracted SQL (len={len(extracted_sql)})")
-                        result_text = _execute_chat_sql(extracted_sql, plant_scope=chat_plant_scope)
+                        result_text = _execute_chat_sql(extracted_sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
                         contents.append(genai.types.Content(
                             role="model",
                             parts=[genai.types.Part(text=reply)],
@@ -2975,7 +3051,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                         print(f"[CHAT] round {round_num+1} — run_sql with EMPTY sql; full args keys={list(args.keys())} repr={repr(args)[:300]}")
                     else:
                         print(f"[CHAT] round {round_num+1} — run_sql ({len(sql)} chars)")
-                    result_text = _execute_chat_sql(sql, plant_scope=chat_plant_scope)
+                    result_text = _execute_chat_sql(sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
                 else:
                     result_text = f"Unknown function: {fc.name}"
                 fr_parts.append(genai.types.Part.from_function_response(
@@ -3103,7 +3179,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                 extracted_sql = sel_match.group(1).strip()
         if extracted_sql:
             print(f"[CHAT] Fallback: executing SQL extracted from final response")
-            result_text = _execute_chat_sql(extracted_sql, plant_scope=chat_plant_scope)
+            result_text = _execute_chat_sql(extracted_sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
             # Summarize the result using Gemini (no tools)
             summary_contents = [genai.types.Content(
                 role="user",
@@ -3139,14 +3215,23 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
 def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
     client = get_genai_client()
 
-    # Fetch relevant BigQuery data
+    # Department scope (None = unrestricted). Up-front so it can gate the
+    # pre-injected context — scoped users get workforce data only via the
+    # department-enforced run_sql path, never via unscoped find_relevant_data.
+    uid_stream = int(user["sub"])
+    chat_dept_scope: list[str] | None = (
+        _get_user_dept_scope(uid_stream) if (user.get("role") or "").lower() != "admin" else None
+    )
+
+    # Fetch relevant BigQuery data (skipped for department-scoped users).
     bq_context = ""
-    try:
-        bq_context = find_relevant_data(body.message)
-        if bq_context:
-            print(f"[BQ] Found relevant data for stream: {body.message[:50]}...")
-    except Exception as e:
-        print(f"[BQ] Error fetching data: {e}")
+    if chat_dept_scope is None:
+        try:
+            bq_context = find_relevant_data(body.message)
+            if bq_context:
+                print(f"[BQ] Found relevant data for stream: {body.message[:50]}...")
+        except Exception as e:
+            print(f"[BQ] Error fetching data: {e}")
 
     contents = []
     for msg in body.history:
@@ -3171,8 +3256,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
         parts=[genai.types.Part(text=user_message)],
     ))
 
-    # Plant scope — same enforcement as /api/chat
-    uid_stream = int(user["sub"])
+    # Plant scope — same enforcement as /api/chat (uid_stream defined above)
     chat_plant_scope: list[str] | None = None
     scope_addon_stream = ""
     if (user.get("role") or "").lower() != "admin":
@@ -3193,6 +3277,9 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                     "This user has no plants assigned — return no plant data.\n"
                     "--- END SCOPE RESTRICTION ---"
                 )
+
+    # (chat_dept_scope computed at the top of chat_stream; the generate()
+    # closure below reads it when calling _execute_chat_sql.)
 
     try:    _schema_notes_s = _load_schema_settings_block()
     except: _schema_notes_s = ""
@@ -3266,7 +3353,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                         sql_is_runnable = bool(extracted and re.search(r"\bSELECT\b[\s\S]+?\bFROM\b", extracted, re.IGNORECASE))
                         if sql_is_runnable:
                             local_contents.append(genai.types.Content(role="model", parts=[genai.types.Part(text=reply_txt)]))
-                            result_text = _execute_chat_sql(extracted, plant_scope=chat_plant_scope)
+                            result_text = _execute_chat_sql(extracted, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
                             local_contents.append(genai.types.Content(
                                 role="user",
                                 parts=[genai.types.Part(text=f"[SQL auto-executed]\nResult:\n{result_text}\n\nNow give a direct answer in plain language. No SQL, no announcements.")],
@@ -3298,7 +3385,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                             print(f"[CHAT-STREAM] round {round_num+1} — run_sql with EMPTY sql; full args keys={list(args.keys())} repr={repr(args)[:300]}")
                         else:
                             print(f"[CHAT-STREAM] round {round_num+1} — run_sql ({len(sql_arg)} chars)")
-                        result_text = _execute_chat_sql(sql_arg, plant_scope=chat_plant_scope)
+                        result_text = _execute_chat_sql(sql_arg, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
                     else:
                         result_text = f"Unknown function: {fc.name}"
                     fr_parts.append(genai.types.Part.from_function_response(
@@ -5548,8 +5635,12 @@ def _dept_scope_clause(dept_scope: list | None) -> str:
     BigQuery's safe-quote rules (' replaced with '')."""
     if not dept_scope:
         return ""
-    quoted = ", ".join("'" + str(v).replace("'", "''") + "'" for v in dept_scope)
-    return f" AND COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') IN ({quoted})"
+    # Case-insensitive match: the Practice_Heads_List Department column is
+    # cased differently from Employee_Data.EmployeeHierarchyNode for some
+    # practices (e.g. 'SAP ABAP & FIORI' vs 'SAP ABAP & Fiori'). LOWER() both
+    # sides so a head scoped to either spelling still resolves their employees.
+    quoted = ", ".join("LOWER('" + str(v).replace("'", "''") + "')" for v in dept_scope)
+    return f" AND LOWER(COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified')) IN ({quoted})"
 
 
 def _norm_emp_id(col: str) -> str:

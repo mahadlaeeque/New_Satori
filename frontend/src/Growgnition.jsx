@@ -6761,11 +6761,11 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
       <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "visible" }}>
         <div style={{
           display: "grid",
-          gridTemplateColumns: "2fr 1.5fr 1fr 1fr 1fr 1.2fr 60px",
+          gridTemplateColumns: "1.7fr 1.4fr 0.8fr 1.3fr 0.85fr 0.85fr 1.1fr 56px",
           padding: "14px 20px", background: COLORS.surfaceAlt, borderBottom: `1px solid ${COLORS.border}`,
           fontSize: 11, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase", letterSpacing: "0.5px",
         }}>
-          <div>User</div><div>Email</div><div>Role</div><div>Status</div><div>Features</div><div>Last Login</div><div></div>
+          <div>User</div><div>Email</div><div>Role</div><div>Department</div><div>Status</div><div>Features</div><div>Last Login</div><div></div>
         </div>
 
         {loading && (
@@ -6782,12 +6782,19 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
         {!loading && users.map((u) => {
           const isMe = u.id === currentUserId;
           const isAdmin = (u.role || "").toLowerCase() === "admin";
+          // Department scope: admins see everything; scoped users show their
+          // assigned practice(s); unscoped non-admins show an em-dash.
+          const depts = u.departments || [];
+          const depDisplay = isAdmin ? "All" : (depts.length ? depts.join(", ") : "—");
+          const depTitle = isAdmin
+            ? "Admin — full access to all departments"
+            : (depts.length ? depts.join(", ") : "No department scope assigned (sees all)");
           return (
             <div
               key={u.id}
               style={{
                 display: "grid",
-                gridTemplateColumns: "2fr 1.5fr 1fr 1fr 1fr 1.2fr 60px",
+                gridTemplateColumns: "1.7fr 1.4fr 0.8fr 1.3fr 0.85fr 0.85fr 1.1fr 56px",
                 padding: "14px 20px", borderBottom: `1px solid ${COLORS.border}`,
                 fontSize: 13, alignItems: "center",
               }}
@@ -6816,6 +6823,16 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
                 }}>
                   {isAdmin ? "Admin" : "User"}
                 </span>
+              </div>
+              <div
+                title={depTitle}
+                style={{
+                  color: isAdmin ? COLORS.textMuted : COLORS.textSecondary,
+                  fontStyle: (isAdmin || !depts.length) ? "italic" : "normal",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}
+              >
+                {depDisplay}
               </div>
               <div>
                 <span style={{
@@ -7480,35 +7497,47 @@ const ManageFeaturesModal = ({ user, features, onClose, onSaved }) => {
 };
 
 // ─── Data Scope Modal ───────────────────────────────────────────────────────
+// Controls which DEPARTMENT(S) (Employee_Data.EmployeeHierarchyNode) a user is
+// restricted to. When enforced, the user only sees workforce data (attendance,
+// timesheets, allocations, employees) for the selected practice(s) across the
+// AI chat/voice agent, dashboards, reports, and the Availability Engine. Sales
+// data stays shared. Admins always see everything. Multi-select supports heads
+// who lead more than one practice (e.g. Rai Sohaib Amjad → SAP Finance + SAP
+// Controlling).
 const ManageScopeModal = ({ user, onClose, onSaved }) => {
   const apiBase = import.meta.env.VITE_API_BASE || "";
   const authH = () => ({ Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" });
 
-  const [plantValues, setPlantValues] = useState([]);   // [{value, label}] from BQ
+  const [deptValues, setDeptValues] = useState([]);   // [{value, label}] from BQ
   const [enforced, setEnforced] = useState(false);
-  const [selectedPlants, setSelectedPlants] = useState([]);
+  const [selectedDepts, setSelectedDepts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  // Load current scope + available plant list in parallel
+  // Load current scope + the available department list in parallel.
   useEffect(() => {
     Promise.all([
       fetch(`${apiBase}/api/admin/users/${user.id}/scope`, { headers: authH() }).then(r => r.json()),
-      fetch(`${apiBase}/api/admin/lookups/plant`, { headers: authH() }).then(r => r.json()),
+      fetch(`${apiBase}/api/admin/lookups/department`, { headers: authH() }).then(r => r.json()),
     ])
       .then(([scope, lookup]) => {
-        const plantEnforced = scope.policies?.plant === true;
-        setEnforced(plantEnforced);
-        setSelectedPlants(scope.values?.plant || []);
-        setPlantValues(lookup.values || []);
+        const values = lookup.values || [];
+        setDeptValues(values);
+        setEnforced(scope.policies?.department === true);
+        // Normalise stored scope values to the warehouse casing so the
+        // checkboxes pre-select correctly even when the seeded value differs
+        // in case (e.g. 'SAP ABAP & FIORI' vs 'SAP ABAP & Fiori').
+        const byLower = new Map(values.map(v => [String(v.value).toLowerCase(), v.value]));
+        const stored = scope.values?.department || [];
+        setSelectedDepts(stored.map(s => byLower.get(String(s).toLowerCase()) || s));
       })
       .catch(() => setErr("Failed to load scope settings."))
       .finally(() => setLoading(false));
   }, [user.id]);
 
-  const togglePlant = (val) => {
-    setSelectedPlants(prev => prev.includes(val) ? prev.filter(p => p !== val) : [...prev, val]);
+  const toggleDept = (val) => {
+    setSelectedDepts(prev => prev.includes(val) ? prev.filter(p => p !== val) : [...prev, val]);
   };
 
   const submit = async () => {
@@ -7517,7 +7546,7 @@ const ManageScopeModal = ({ user, onClose, onSaved }) => {
       const res = await fetch(`${apiBase}/api/admin/users/${user.id}/scope`, {
         method: "PUT",
         headers: authH(),
-        body: JSON.stringify({ dimension: "plant", enforced, values: enforced ? selectedPlants : [] }),
+        body: JSON.stringify({ dimension: "department", enforced, values: enforced ? selectedDepts : [] }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Save failed");
       onSaved();
@@ -7527,7 +7556,7 @@ const ManageScopeModal = ({ user, onClose, onSaved }) => {
   return (
     <ModalShell
       title={`Data Scope — ${user.full_name}`}
-      subtitle="Control which plants this user can see across dashboards, reports, and AI queries."
+      subtitle="Restrict this user to specific department(s). Applies to AI chat/voice, dashboards, reports, and the Availability Engine."
       onClose={onClose}
       width={520}
       footer={
@@ -7543,13 +7572,13 @@ const ManageScopeModal = ({ user, onClose, onSaved }) => {
         <div style={{ padding: 20, textAlign: "center", color: COLORS.textSecondary }}>Loading…</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-          {/* Plant scope toggle */}
+          {/* Department scope toggle */}
           <div style={{ padding: 16, background: COLORS.surfaceAlt, borderRadius: 12, border: `1px solid ${COLORS.border}` }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.textPrimary }}>Plant Access</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.textPrimary }}>Department Access</div>
                 <div style={{ fontSize: 12, color: COLORS.textSecondary, marginTop: 2 }}>
-                  {enforced ? "Restricted — user sees only selected plants" : "Unrestricted — user sees all plants (default)"}
+                  {enforced ? "Restricted — user sees only the selected department(s)" : "Unrestricted — user sees all departments (default)"}
                 </div>
               </div>
               {/* Toggle switch */}
@@ -7571,14 +7600,14 @@ const ManageScopeModal = ({ user, onClose, onSaved }) => {
             {enforced && (
               <div style={{ marginTop: 16 }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 10 }}>
-                  Select Allowed Plants
+                  Select Allowed Departments
                 </div>
-                {plantValues.length === 0 ? (
-                  <div style={{ fontSize: 13, color: COLORS.textMuted }}>No plants found in the data warehouse.</div>
+                {deptValues.length === 0 ? (
+                  <div style={{ fontSize: 13, color: COLORS.textMuted }}>No departments found in the data warehouse.</div>
                 ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {plantValues.map(p => {
-                      const checked = selectedPlants.includes(p.value);
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 320, overflowY: "auto" }}>
+                    {deptValues.map(p => {
+                      const checked = selectedDepts.includes(p.value);
                       return (
                         <label
                           key={p.value}
@@ -7592,23 +7621,18 @@ const ManageScopeModal = ({ user, onClose, onSaved }) => {
                           <input
                             type="checkbox"
                             checked={checked}
-                            onChange={() => togglePlant(p.value)}
+                            onChange={() => toggleDept(p.value)}
                             style={{ accentColor: COLORS.accent, width: 15, height: 15 }}
                           />
-                          <div>
-                            <span style={{ fontSize: 13, fontWeight: 600, color: COLORS.textPrimary }}>{p.value}</span>
-                            {p.label && p.label !== p.value && (
-                              <span style={{ fontSize: 12, color: COLORS.textSecondary, marginLeft: 8 }}>{p.label}</span>
-                            )}
-                          </div>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: COLORS.textPrimary }}>{p.value}</span>
                         </label>
                       );
                     })}
                   </div>
                 )}
-                {enforced && selectedPlants.length === 0 && (
+                {enforced && selectedDepts.length === 0 && (
                   <div style={{ marginTop: 8, padding: "8px 12px", background: "#FEF9E7", border: "1px solid #FCD34D", borderRadius: 8, fontSize: 12, color: "#92400E" }}>
-                    ⚠ No plants selected — this user will see no data.
+                    ⚠ No departments selected — this user will see no workforce data.
                   </div>
                 )}
               </div>
@@ -7616,7 +7640,7 @@ const ManageScopeModal = ({ user, onClose, onSaved }) => {
           </div>
 
           <div style={{ fontSize: 12, color: COLORS.textMuted, lineHeight: 1.5 }}>
-            Changes apply to dashboards, reports, AI queries, and any shared content viewed by this user. Admins always see all data regardless of scope settings.
+            Changes apply to AI chat/voice, dashboards, reports, and the Availability Engine. Sales data stays visible to everyone. Admins always see all data regardless of scope settings.
           </div>
         </div>
       )}
@@ -8278,11 +8302,7 @@ const SystemSettingsPage = () => {
   };
 
   const DIM_DESCRIPTIONS = {
-    plant: "Restrict users to one or more production plants. Always enabled — this is the primary data boundary for TMC.",
-    material_type: "Restrict users to specific material types (Z113, Z117, Z611, etc.).",
-    storage_location: "Restrict users to specific storage locations (TA01, WH01, etc.).",
-    order_type: "Restrict users to specific internal order types (Z306, PMWO, etc.).",
-    po_type: "Restrict users to specific purchase order types (Z001, NB, etc.).",
+    department: "Restrict users to one or more departments / practices (SAP Finance, Qlik, SAP GRC, etc.). When enabled, set each user's allowed departments from User Management → Data scope. Scoped users only see workforce data (attendance, timesheets, allocations, employees) for their department; sales data stays shared.",
   };
 
   return (
