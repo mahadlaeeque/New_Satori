@@ -1737,8 +1737,8 @@ EXACT COLUMN NAMES IN Attendance_Data (all lowercase or special):
 - personal_no (STRING 'E-902' - THIS IS THE JOIN KEY to Employee_Data.employee_code)
 - employee_id (INT64 sequence number - NOT A JOIN KEY)
 - employee_name, employee_email
-- is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (INT64 0/1)
-- attendance_status_text, checkin_time, checkout_time, leave_type_name
+- attendance_status_text (STRING — the ONLY status source. Values: 'Present', 'Absent', 'On Leave', 'Holiday', 'Weekend', 'Missing Punch', 'Remote Work', plus 'Submitted ...' variants). There are NO is_present / is_absent / is_on_leave / is_remote / is_holiday / is_weekend flag columns — derive every count with COUNTIF(LOWER(attendance_status_text) = '<status>').
+- attendance_status, checkin_time, checkout_time
 
 REQUIRED JOIN PATTERN for Employee_Data <-> Attendance_Data:
   LEFT JOIN `<proj>.<ds>.Attendance_Data` a
@@ -1776,7 +1776,7 @@ DATA WAREHOUSE — `ai-vertex-mahad.Satori_Project` (10 tables):
 WORKFORCE TABLES
 1. `Employee_Data` — Employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name, EmployeePosition, EmployeeEmail, EmployeeHierarchyNode (department), EmployeeLocation (city), Employee_Status, Employee_Type ('MTO'/'Permanent'/'Probation'/'Contract'). Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
 2. `Attendance_Data` — Daily attendance per employee. Cols: attendance_date (DATE), personal_no (STRING, 'E-902' format — JOIN to Employee_Data on this), employee_id (INT64 sequence, NOT a JOIN key), employee_name, employee_email, checkin_time (STRING HH:MM:SS), checkout_time (STRING), attendance_status_text ('Present'/'Absent'/'Late'/'Leave'/etc.), is_present (0/1), is_absent (0/1), is_on_leave (0/1), is_remote (0/1), is_holiday (0/1), is_weekend (0/1), leave_type_name. For "late": LOWER(attendance_status_text) = 'late'.
-3. `Allocation_data` — Weekly project allocation. Cols: project_id, employee_id (STRING "E-1234"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Actual'/'Forecast'), Forecast_Flag, Date. Allocated = MAX(pct) >= 90; Partial = 1-89; Bench = 0/NULL.
+3. `Allocation_Data` — Weekly project allocation. Cols: project_id, employee_id (STRING "E-1234"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag (values: 'Allocated' / 'Bench' — NOT 'Actual' / 'Forecast'), Forecast_Flag, Date. Bench/availability bands: classify on MAX(allocation_percent) per employee — Allocated = MAX(pct) >= 90; Partial = 1-89; Bench = 0/NULL.
 4. `Timesheet_Data` — Ticket/project hours. Cols: TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY, TICKET_DESCRIPTION, TICKET_SUBJECT. Join to employees on CAST(Employee_Code AS STRING) = CAST(TICKET_USER_ID AS STRING).
 
 SALES TABLES
@@ -1796,7 +1796,7 @@ JOINS — CRITICAL JOIN-KEY NORMALIZATION:
     LEFT JOIN Attendance_Data a
       ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
        = LTRIM(REGEXP_REPLACE(CAST(a.personal_no   AS STRING), r'[^0-9]', ''), '0')
-- Employee_Data → Allocation_data: JOIN on a.employee_id (Allocation_data's employee_id IS the 'E-2141' code).
+- Employee_Data → Allocation_Data: JOIN on a.employee_id (Allocation_Data's employee_id IS the 'E-2141' code).
 - Employee_Data → Timesheet_Data: same pattern, on t.TICKET_USER_ID.
 - Always use LEFT JOIN (not INNER) so attendance rows aren't dropped when the lookup table doesn't have a matching row.
 - EmployeeHierarchyNode is the DEPARTMENT field. Group by COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified') AS department.
@@ -1862,20 +1862,20 @@ EFFICIENCY:
 INTELLIGENT NAME RESOLUTION:
 - When a user mentions a first name only ("Mahad", "Adeel", "Anas"), assume they mean the FULL employee record. Use `LOWER(employee_name) LIKE '%mahad%'` (or similar fuzzy match) — never reject because they omitted the surname.
 - If multiple employees match the first name, pick the one with the most recent activity (latest attendance_date) and mention which person you used in your reply: "I found data for Mahad Laeeque…" so they can correct you if it's the wrong person.
-- For Allocation_data / Timesheet_Data joins, names map via employee_id ↔ Employee_Code. Always CAST both sides to STRING.
+- For Allocation_Data / Timesheet_Data joins, names map via employee_id ↔ Employee_Code. Always CAST both sides to STRING.
 
 ATTENDANCE QUERY DEFAULTS:
-When the user asks about an employee's attendance for a time window, ALWAYS include ALL day categories so the total accounts for every calendar day. The Attendance_Data schema has flags is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (each 0/1). A complete summary contains:
-- Present days  (is_present = 1)
-- Absent days   (is_absent = 1)
-- Late count    (LOWER(attendance_status_text) = 'late' — subset of present)
-- On-leave days (is_on_leave = 1)
-- Remote days   (is_remote = 1)
-- Holiday days  (is_holiday = 1)
-- Weekend days  (is_weekend = 1)
+When the user asks about an employee's attendance for a time window, ALWAYS include ALL day categories so the total accounts for every calendar day. Attendance_Data has NO 0/1 flag columns — every category is derived from attendance_status_text with COUNTIF(LOWER(attendance_status_text) = '<status>'). A complete summary contains:
+- Present days       (LOWER(attendance_status_text) = 'present')
+- Absent days        (LOWER(attendance_status_text) = 'absent')
+- On-leave days      (LOWER(attendance_status_text) = 'on leave')
+- Remote days        (LOWER(attendance_status_text) = 'remote work')
+- Holiday days       (LOWER(attendance_status_text) = 'holiday')
+- Weekend days       (LOWER(attendance_status_text) = 'weekend')
+- Missing-punch days (LOWER(attendance_status_text) = 'missing punch')
 - Total records (= sum of the above; this is the number of days in the window)
 
-Always check that present + absent + leave + holiday + weekend ≈ total. If something is missing (e.g., the table has a "Missing Punch" status), call it out as its own line. Don't leave the user wondering where the rest of the month went."""
+There is NO 'Late' status — do not filter on 'late'. Always check that present + absent + leave + holiday + weekend + missing-punch ≈ total, and call out any 'Submitted ...' variants as their own line. Don't leave the user wondering where the rest of the month went."""
 
 
 ATTENDANCE_BEHAVIOR_ADDON = """
@@ -1887,8 +1887,9 @@ When the user asks about attendance for a period (a month, a week, a date range)
 
 1. PER-EMPLOYEE BREAKDOWN BY DEFAULT. Issue ONE run_sql call that returns
    one row per active employee in scope: employee_name, employee_email,
-   total_rows, present_days, late_days, absent_days, leave_days,
-   remote_days, missing_punch_days. Order by absent_days DESC (worst
+   total_rows, present_days, absent_days, leave_days,
+   remote_days, missing_punch_days (all via COUNTIF(LOWER(attendance_status_text)='<status>')).
+   Order by absent_days DESC (worst
    attendance first). DO NOT cap inside SQL -- return every employee.
    Use COUNTIF(...) over Attendance_Data filtered to the period, joined to
    Employee_Data via the standard digits-only employee-id rule + the
@@ -1896,8 +1897,8 @@ When the user asks about attendance for a period (a month, a week, a date range)
 
 2. CALENDAR vs WORKING DAYS. For a named month (e.g. "March 2026"):
      calendar_days = DATE_DIFF(LAST_DAY, FIRST_DAY, DAY) + 1.
-     weekend_days  = COUNTIF of dates where is_weekend = 1.
-     holiday_days  = COUNTIF of dates where is_holiday = 1 (de-duped).
+     weekend_days  = COUNTIF(LOWER(attendance_status_text) = 'weekend').
+     holiday_days  = COUNTIF(LOWER(attendance_status_text) = 'holiday').
      working_days  = calendar_days - weekend_days - holiday_days.
    Compute attendance rate against working_days, NOT calendar_days.
 
@@ -1957,7 +1958,7 @@ DATA TABLES — BigQuery dataset `ai-vertex-mahad.Satori_Project`:
 WORKFORCE
   • Employee_Data — employee master. Active filter: Employee_Type IN ('MTO','Permanent','Probation').
   • Attendance_Data — daily attendance (is_present, is_absent, is_on_leave, is_remote, attendance_status_text='Late' لیٹ کے لیے).
-  • Allocation_data — weekly allocation_percent (STRING — SAFE_CAST). Allocated ≥90, Partial 1-89, Bench 0/NULL.
+  • Allocation_Data — weekly allocation_percent (STRING — SAFE_CAST). Allocated ≥90, Partial 1-89, Bench 0/NULL.
   • Timesheet_Data — TICKET_HOURS (STRING — SAFE_CAST), TICKET_PROJECT_LABEL.
 
 SALES
@@ -2030,12 +2031,12 @@ User: "Attendance rate by department for March?"
 
 [G] BENCH SIZE
 User: "How many people are on the bench?"
-  → run_sql: WITH a AS (SELECT emp_name, MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS mp FROM `ai-vertex-mahad.Satori_Project.Allocation_data` GROUP BY emp_name) SELECT COUNT(*) AS n FROM a WHERE COALESCE(mp,0) = 0
+  → run_sql: WITH a AS (SELECT emp_name, MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS mp FROM `ai-vertex-mahad.Satori_Project.Allocation_Data` GROUP BY emp_name) SELECT COUNT(*) AS n FROM a WHERE COALESCE(mp,0) = 0
   → Speak: "About 142 people are currently on the bench."
 
 [H] LIST OF BENCHED EMPLOYEES
 User: "Who's on the bench right now?"
-  → run_sql: WITH a AS (SELECT emp_name, MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS mp, ANY_VALUE(emp_competency) AS comp FROM `ai-vertex-mahad.Satori_Project.Allocation_data` GROUP BY emp_name) SELECT emp_name, comp FROM a WHERE COALESCE(mp,0) = 0 ORDER BY emp_name LIMIT 20
+  → run_sql: WITH a AS (SELECT emp_name, MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS mp, ANY_VALUE(emp_competency) AS comp FROM `ai-vertex-mahad.Satori_Project.Allocation_Data` GROUP BY emp_name) SELECT emp_name, comp FROM a WHERE COALESCE(mp,0) = 0 ORDER BY emp_name LIMIT 20
   → Speak: "On the bench right now: Ahmed Khan with SAP Finance skills, Sara Ali with ABAP, Hassan Malik with Emerging Tech, and 12 others."
 
 [I] TOP AM
@@ -2060,7 +2061,7 @@ CRITICAL: If you are not sure which exact column to use, STILL CALL run_sql with
 WORKFORCE
   • Employee_Data — Employee_Code, Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Joining_Date, Gender. Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation','contractual fixed term').
   • Attendance_Data — attendance_date (DATE), personal_no (STRING 'E-902' — JOIN to Employee_Data on this), employee_id (INT64 sequence, not a JOIN key), employee_name, employee_email, checkin_time (STRING HH:MM:SS — for the moment they checked in), checkout_time (STRING HH:MM:SS — for the moment they checked out), attendance_status_text ('Present'/'Absent'/'Weekend'/'Holiday'/'On Leave'/'Missing Punch'/'Remote Work'), is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1). NO 'Late' status — closest concept is 'Missing Punch'.
-  • Allocation_data — project_id, employee_id, emp_name, allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Allocated'/'Bench'), Date, Week, Year, Month.
+  • Allocation_Data — project_id, employee_id, emp_name, allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Allocated'/'Bench'), Date, Week, Year, Month.
   • Timesheet_Data — TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (INT YYYYMMDD — use SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)) for date filters).
 
 SALES
@@ -2072,7 +2073,7 @@ SALES
 
 DEPARTMENTS (real EmployeeHierarchyNode values): SAP Supply Chain, SAP Finance, SAP ABAP & Fiori, SAP HCM & SLCM, Professional Services, Emerging Tech, KPO, SAP SF & Workday, SAP EAM, SAP Basis, LMS & UniTime, SAP Controlling, PMO Islamabad, Qlik, SAP Analytics, Cloud, Account Management, Finance, BOD, Marketing, HR Ops, IT, Admin, Textile.
 
-JOIN RULE: Employee_Data <-> Attendance_Data on a.personal_no = e.employee_code (normalize digits). For Allocation_data, JOIN on a.employee_id = e.employee_code. NAME-based join is unreliable (duplicate names, typos). Always use the code-based JOIN:
+JOIN RULE: Employee_Data <-> Attendance_Data on a.personal_no = e.employee_code (normalize digits). For Allocation_Data, JOIN on a.employee_id = e.employee_code. NAME-based join is unreliable (duplicate names, typos). Always use the code-based JOIN:
   ON UPPER(TRIM(e.Resource_Name)) = UPPER(TRIM(a.employee_name))
 NOT on Employee_Code = employee_id — those are different ID systems and don't overlap.
 
@@ -2243,7 +2244,7 @@ def _dept_scope_addon_str(dept_scope: "list[str] | None") -> str:
         f"This user is restricted to department(s) / practice node(s): "
         f"{', '.join(dept_scope)}.\n"
         f"Every SQL query you write against workforce tables (Employee_Data, "
-        f"Allocation_data, Timesheet_Data, Attendance_Data, Practice_Heads_List) "
+        f"Allocation_Data, Timesheet_Data, Attendance_Data, Practice_Heads_List) "
         f"MUST include an AND clause that filters by EmployeeHierarchyNode. "
         f"Use: AND EmployeeHierarchyNode IN ({quoted}) on Employee_Data, and join "
         f"to Employee_Data via the employee id (REGEXP_EXTRACT digits, LTRIM "
@@ -2365,7 +2366,7 @@ WAREHOUSE CONTEXT:
 - Workforce data tables in `capability-agent-prod.Satori_Project`:
   * Employee_Data (EmployeeHierarchyNode column = department)
   * Attendance_Data (JOIN on personal_no, NOT employee_id)
-  * Allocation_data (joined via employee_id)
+  * Allocation_Data (joined via employee_id)
   * Timesheet_Data (joined via TICKET_USER_ID)
   * Practice_Heads_List
 - Sales data tables in the same project (Sales_Accounts, Sales_AM_Scorecard, Sales_Pipeline_Health, Sales_Plan_vs_Pipeline, Sales_Hunting_Gap, Sales_KPI_Scorecard, Sales_Dormant_Accounts, Sales_Workload_Feasibility, Account_Coverage_Plan__*, Project_Master) are shared - everyone sees them.
@@ -2375,7 +2376,7 @@ OUTPUT (return ONLY the addon text, no preamble, no markdown headers):
 USER CONTEXT - {name} (departments: {department_list_quoted})
 
 DATA ACCESS POLICY (treat as a HARD rule for every query you write):
-- Workforce queries (Employee_Data, Attendance_Data, Allocation_data, Timesheet_Data, Practice_Heads_List): restrict to employees whose EmployeeHierarchyNode is in this exact list: {department_list_quoted}. {name} heads {departments_count} department(s) and ONLY those. NEVER return employee, attendance, allocation, timesheet, or practice data for any other department - not even by fuzzy / partial / similar-name match. "Cloud Engineering" is NOT "Cloud", "SAP Finance team" is NOT "Finance", etc. If the user names a dept not exactly in the list above, treat it as out of scope.
+- Workforce queries (Employee_Data, Attendance_Data, Allocation_Data, Timesheet_Data, Practice_Heads_List): restrict to employees whose EmployeeHierarchyNode is in this exact list: {department_list_quoted}. {name} heads {departments_count} department(s) and ONLY those. NEVER return employee, attendance, allocation, timesheet, or practice data for any other department - not even by fuzzy / partial / similar-name match. "Cloud Engineering" is NOT "Cloud", "SAP Finance team" is NOT "Finance", etc. If the user names a dept not exactly in the list above, treat it as out of scope.
 - Sales queries (Sales_*, Account_Coverage_Plan__*, Project_Master): full visibility, no restriction.
 - Admin-only data (other users' login history, audit logs, system settings): NO access.
 
@@ -2390,7 +2391,7 @@ REQUIRED SQL JOIN PATTERN (copy this verbatim - do not invent variants, the IN c
   WHERE e.EmployeeHierarchyNode IN ({department_list_quoted})
     AND LOWER(COALESCE(e.Employee_Type, '')) IN ('mto','permanent','probation')
 
-  -- For Allocation_data, use a.employee_id (it's the 'E-2141' code) NOT personal_no.
+  -- For Allocation_Data, use a.employee_id (it's the 'E-2141' code) NOT personal_no.
   -- For Timesheet_Data, use a.TICKET_USER_ID (bare digits like '1643').
 
 Use INNER JOIN (not LEFT) when scoped, so employees outside the dept can't sneak in via NULL-matches. The IN clause is REQUIRED even when {departments_count} = 1.
@@ -3852,7 +3853,7 @@ def availability_overview_data(user: dict = Depends(get_current_user)):
       SELECT
         CAST(employee_id AS STRING) AS emp_id,
         MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct
-      FROM {_TMC_DATASET}.Allocation_data
+      FROM {_TMC_DATASET}.Allocation_Data
       WHERE Flag IN ('Actual','Forecast')
       GROUP BY emp_id
     )
@@ -3872,7 +3873,7 @@ def availability_overview_data(user: dict = Depends(get_current_user)):
     SELECT emp_competency AS product,
            COUNT(DISTINCT employee_id) AS qty,
            COUNT(DISTINCT employee_id) AS amount
-    FROM {_TMC_DATASET}.Allocation_data
+    FROM {_TMC_DATASET}.Allocation_Data
     WHERE emp_competency IS NOT NULL AND TRIM(emp_competency) <> ''
     GROUP BY emp_competency
     ORDER BY qty DESC LIMIT 10
@@ -3883,7 +3884,7 @@ def availability_overview_data(user: dict = Depends(get_current_user)):
     SELECT
       COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified') AS name,
       ROUND(AVG(SAFE_CAST(a.allocation_percent AS FLOAT64)), 1) AS qty
-    FROM {_TMC_DATASET}.Allocation_data a
+    FROM {_TMC_DATASET}.Allocation_Data a
     LEFT JOIN {_TMC_DATASET}.Employee_Data e
       ON CAST(e.Employee_Code AS STRING) = CAST(a.employee_id AS STRING)
     WHERE a.Flag = 'Actual'
@@ -3897,7 +3898,7 @@ def availability_overview_data(user: dict = Depends(get_current_user)):
         CAST(employee_id AS STRING) AS emp_id,
         ROUND(AVG(SAFE_CAST(allocation_percent AS FLOAT64)), 1) AS avg_pct,
         MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct
-      FROM {_TMC_DATASET}.Allocation_data
+      FROM {_TMC_DATASET}.Allocation_Data
       WHERE Flag IN ('Actual','Forecast')
       GROUP BY emp_id
     )
@@ -3950,7 +3951,7 @@ def workforce_overview_data(user: dict = Depends(get_current_user)):
     WITH alloc AS (
       SELECT CAST(employee_id AS STRING) AS emp_id,
              AVG(SAFE_CAST(allocation_percent AS FLOAT64)) AS avg_pct
-      FROM {_TMC_DATASET}.Allocation_data
+      FROM {_TMC_DATASET}.Allocation_Data
       WHERE Flag = 'Actual'
       GROUP BY emp_id
     )
@@ -4073,7 +4074,7 @@ _DASHBOARD_SAP_SCHEMAS = """Detailed table schemas (BigQuery project `ai-vertex-
 WORKFORCE TABLES:
 - `Employee_Data` — employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name (STRING), EmployeePosition (STRING), EmployeeEmail (STRING), EmployeeHierarchyNode (STRING — department), EmployeeLocation (STRING — city), Employee_Status (STRING), Employee_Type (STRING — 'MTO'/'Permanent'/'Probation'/'Contract'). Active employees = Employee_Type IN ('MTO','Permanent','Probation').
 - `Attendance_Data` — daily attendance per employee. Cols: attendance_date (DATE), employee_id (INT64 — CAST AS STRING to join), employee_name (STRING), checkin_time (STRING HH:MM:SS), checkout_time (STRING), attendance_status_text (STRING — 'Present'/'Absent'/'Late'/'Leave'/etc), is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 — 0/1). For "late": LOWER(attendance_status_text)='late'.
-- `Allocation_data` — weekly project allocation. Cols: project_id (STRING), employee_id (STRING — "E-1234"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency (STRING), Flag (STRING — 'Actual'/'Forecast'), Forecast_Flag (STRING), Date (DATE). Allocated = MAX(pct)>=90; Partial = 1-89; Bench = 0/NULL.
+- `Allocation_Data` — weekly project allocation. Cols: project_id (STRING), employee_id (STRING — "E-1234"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency (STRING), Flag (STRING — 'Actual'/'Forecast'), Forecast_Flag (STRING), Date (DATE). Allocated = MAX(pct)>=90; Partial = 1-89; Bench = 0/NULL.
 - `Timesheet_Data` — ticket/project hours. Cols: TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (INT64 — YYYYMMDD), TICKET_DESCRIPTION, TICKET_SUBJECT.
 
 SALES TABLES:
@@ -4095,7 +4096,7 @@ DATA QUALITY (READ TWICE — these are the column-type rules that break queries)
     Sales_Pipeline_Health.Open_Pipeline
     Sales_Accounts: Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits
     Sales_Hunting_Gap: Hunting_Target, Hunting_Achieved, Hunting_Gap
-    Allocation_data.allocation_percent
+    Allocation_Data.allocation_percent
     Timesheet_Data.TICKET_HOURS
 - 🟢 ALREADY-NUMERIC columns (FLOAT64 or INT64 — NEVER wrap in REPLACE or SAFE_CAST AS STRING):
     Sales_Plan_vs_Pipeline.Coverage_Ratio (FLOAT64 — already a ratio, NEVER REPLACE)
@@ -4171,7 +4172,7 @@ DASHBOARD-LEVEL COMMON SENSE:
 - A "sales dashboard" without further input should include: total pipeline,
   coverage ratio, win rate %, top AMs by Q1 achievement, pipeline by city or
   tier — using AMs from Sales_AM_Scorecard.
-- A "bench / utilization dashboard" should join Allocation_data → Employee_Data,
+- A "bench / utilization dashboard" should join Allocation_Data → Employee_Data,
   classify by MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per Employee_Code:
   Allocated >= 90, Partial 1-89, Bench 0/NULL.
 
@@ -4202,8 +4203,8 @@ ANALYST_COMMON_SENSE_COMPACT = """ANALYST COMMON SENSE (apply silently):
 - STRING numerics (need SAFE_CAST): allocation_percent, TICKET_HOURS, Open_Pipeline, Q1_ACH, col_2026_Target, Q1_Visits.
 - Already FLOAT64/INT64 (NEVER REPLACE): Coverage_Ratio, Hist_Win_Rate, Open_Deals, Win_Rate_by, is_*.
 - Timesheet_Data.DATE_KEY: type varies — DATE on capability-agent-prod, INT64 YYYYMMDD elsewhere. ALWAYS filter with `COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))) >= <cutoff>`. Plain `PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))` errors when DATE_KEY is DATE (CAST gives ISO "2025-07-01" which `%Y%m%d` rejects).
-- Allocation_data.Date: type unreliable across environments — DON'T filter on it. Aggregate MAX(allocation_percent) per employee across all rows; the latest peak still wins for Bench / Partial / Allocated classification.
-- "Utilization" / "hours worked" → Timesheet_Data, not Allocation_data. SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) grouped by TICKET_USER_ID, joined to Employee_Data via CAST(Employee_Code AS STRING) = CAST(TICKET_USER_ID AS STRING). Optional 90-day window via the COALESCE pattern above.
+- Allocation_Data.Date: type unreliable across environments — DON'T filter on it. Aggregate MAX(allocation_percent) per employee across all rows; the latest peak still wins for Bench / Partial / Allocated classification.
+- "Utilization" / "hours worked" → Timesheet_Data, not Allocation_Data. SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) grouped by TICKET_USER_ID, joined to Employee_Data via CAST(Employee_Code AS STRING) = CAST(TICKET_USER_ID AS STRING). Optional 90-day window via the COALESCE pattern above.
 - TMC has roughly 1,190 active employees. If your headcount is in the tens of thousands you counted attendance rows, not people.
 - Apply defaults silently; only ask when the answer materially depends on a choice you can't infer."""
 
@@ -4280,8 +4281,8 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
       ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
        = LTRIM(REGEXP_REPLACE(CAST(a.personal_no   AS STRING), r'[^0-9]', ''), '0')
 
-    -- Allocation_data: JOIN on employee_id (here employee_id IS the 'E-2141' / 'I-2024' code).
-    LEFT JOIN `<proj>.<ds>.Allocation_data` a
+    -- Allocation_Data: JOIN on employee_id (here employee_id IS the 'E-2141' / 'I-2024' code).
+    LEFT JOIN `<proj>.<ds>.Allocation_Data` a
       ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
        = LTRIM(REGEXP_REPLACE(CAST(a.employee_id   AS STRING), r'[^0-9]', ''), '0')
 
@@ -4561,7 +4562,7 @@ def voice_query(body: dict, user: dict = Depends(get_current_user)):
 # ── /api/help — Gemini-powered in-app help bubble ──────────────────────────
 _SATORI_HELP_PROMPT = """You are Satori Help, an expert assistant for the Satori v2 platform — TMC's Capability Intelligence Agent.
 
-Satori v2 is an AI-powered analytics platform for managers, HR, and sales leadership at TMC. It connects to a BigQuery warehouse (ai-vertex-mahad.Satori_Project) containing workforce data (Employee_Data, Attendance_Data, Allocation_data, Timesheet_Data) and sales data (Sales_AM_Scorecard, Sales_Accounts, Sales_Pipeline_Health, Sales_Plan_vs_Pipeline, Sales_Hunting_Gap). Powered by Google Gemini 2.5.
+Satori v2 is an AI-powered analytics platform for managers, HR, and sales leadership at TMC. It connects to a BigQuery warehouse (ai-vertex-mahad.Satori_Project) containing workforce data (Employee_Data, Attendance_Data, Allocation_Data, Timesheet_Data) and sales data (Sales_AM_Scorecard, Sales_Accounts, Sales_Pipeline_Health, Sales_Plan_vs_Pipeline, Sales_Hunting_Gap). Powered by Google Gemini 2.5.
 
 KEY FEATURES:
 1. **Ask Me Anything** — Natural-language chat. Ask about attendance, allocation, pipeline, AM performance, etc. Replies stream live with citations from BigQuery.
@@ -4918,7 +4919,7 @@ def _autofix_dashboard_sql(sql: str) -> str:
     # Fix 6 — Swap the digit-normalized Employee_Code/employee_id join for a
     # name-based join. The diagnostic snapshot showed only 1/1199 rows match
     # on digit-stripped IDs, but Resource_Name <-> employee_name overlaps for
-    # almost every employee. Same for Allocation_data.emp_name.
+    # almost every employee. Same for Allocation_Data.emp_name.
     name_join_re = _re.compile(
         r"LTRIM\(REGEXP_REPLACE\(CAST\(([A-Za-z_][A-Za-z0-9_]*)\.Employee_Code\s+AS\s+STRING\),\s*r'\[\^0-9\]',\s*''\),\s*'0'\)"
         r"\s*=\s*"
@@ -4988,7 +4989,7 @@ def _autofix_dashboard_sql(sql: str) -> str:
         sql, flags=_re.IGNORECASE,
     )
 
-    # Fix 8 — Allocation_data.Flag values are 'Allocated' / 'Bench', NOT
+    # Fix 8 — Allocation_Data.Flag values are 'Allocated' / 'Bench', NOT
     # 'Actual' / 'Forecast'. Rewrite IN-list filters that include 'Actual'
     # or 'Forecast' to use 'Allocated' / 'Bench' instead.
     def _fix_flag_in(m):
@@ -5071,7 +5072,7 @@ _REPAIR_PROMPT = """You are a BigQuery SQL repair assistant. The query below fai
 ═══ TMC SCHEMA (use ONLY these tables/columns) ═══
 - `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Employee_Status.
 - `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), employee_id (INT64), employee_name (STRING), checkin_time, checkout_time, attendance_status_text, is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 0/1).
-- `{BQ_FULL}.Allocation_data` — project_id, employee_id (STRING "E-1234"), allocation_percent (STRING), emp_competency, Flag ('Allocated'/'Bench'), Date.
+- `{BQ_FULL}.Allocation_Data` — project_id, employee_id (STRING "E-1234"), allocation_percent (STRING), emp_competency, Flag ('Allocated'/'Bench'), Date.
 - `{BQ_FULL}.Timesheet_Data` — TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (INT64 YYYYMMDD).
 - `{BQ_FULL}.Sales_AM_Scorecard` — VP, AM, Role, City, col_2026_Target (STRING), Q1_ACH (STRING), Open_Pipeline (STRING), Hist_Win_Rate (FLOAT64 decimal 0-1 — NEVER REPLACE).
 - `{BQ_FULL}.Sales_Plan_vs_Pipeline` — AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio (FLOAT64 — NEVER REPLACE), Status, Action.
@@ -5098,7 +5099,7 @@ detail behind that single category so they understand WHO/WHAT makes up the numb
 ═══ TMC SCHEMA ═══
 - `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Employee_Status.
 - `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), employee_id (INT64), employee_name (STRING), checkin_time, checkout_time, attendance_status_text, is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 0/1).
-- `{BQ_FULL}.Allocation_data` — project_id, employee_id (STRING), allocation_percent (STRING), emp_competency, Flag, Date.
+- `{BQ_FULL}.Allocation_Data` — project_id, employee_id (STRING), allocation_percent (STRING), emp_competency, Flag, Date.
 - `{BQ_FULL}.Timesheet_Data` — TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (INT64 YYYYMMDD).
 - `{BQ_FULL}.Sales_AM_Scorecard` — VP, AM, Role, City, col_2026_Target (STRING), Q1_ACH (STRING), Open_Pipeline (STRING), Hist_Win_Rate (FLOAT64 — NEVER REPLACE).
 - `{BQ_FULL}.Sales_Plan_vs_Pipeline` — AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio (FLOAT64 — NEVER REPLACE), Status, Action.
@@ -5685,7 +5686,7 @@ def _norm_emp_id(col: str) -> str:
     Different source systems write the same employee with different shapes
     (confirmed via /api/availability/_diag on capability-agent-prod):
       - Employee_Data.Employee_Code        = 'E-1712' (letter prefix + dash)
-      - Allocation_data.employee_id        = 'E-2141', 'I-2024' (varies)
+      - Allocation_Data.employee_id        = 'E-2141', 'I-2024' (varies)
       - Timesheet_Data.TICKET_USER_ID      = '1643'   (digits only — no prefix)
 
     REGEXP_EXTRACT pulls the first run of digits out of the value, which
@@ -5714,19 +5715,19 @@ def _avail_kpis_sql(dept_scope: list | None = None) -> str:
                 {_dept_scope_clause(dept_scope)}
         ),
         emp_alloc AS (
-          -- 90-day window anchored to MAX(Date) in Allocation_data so the
+          -- 90-day window anchored to MAX(Date) in Allocation_Data so the
           -- bench/partial/allocated bands reflect CURRENT state, not lifetime.
           -- Without this filter, anyone who's ever hit 100% gets stuck in
           -- 'Allocated' forever (1,096/1,139 rows on prod). NULL-safe: if
-          -- Allocation_data.Date is entirely unparseable, fall back to
+          -- Allocation_Data.Date is entirely unparseable, fall back to
           -- lifetime aggregation so we don't blank everyone.
           SELECT {emp_id_alloc} AS emp_id,
                  MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct
-          FROM {_bq_avail('Allocation_data')}
+          FROM {_bq_avail('Allocation_Data')}
           WHERE (SELECT MAX(COALESCE(
                    SAFE_CAST(CAST(Date AS STRING) AS DATE),
                    SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
-                 )) FROM {_bq_avail('Allocation_data')}) IS NULL
+                 )) FROM {_bq_avail('Allocation_Data')}) IS NULL
              OR COALESCE(
                   SAFE_CAST(CAST(Date AS STRING) AS DATE),
                   SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
@@ -5734,7 +5735,7 @@ def _avail_kpis_sql(dept_scope: list | None = None) -> str:
                   (SELECT MAX(COALESCE(
                     SAFE_CAST(CAST(Date AS STRING) AS DATE),
                     SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
-                  )) FROM {_bq_avail('Allocation_data')}),
+                  )) FROM {_bq_avail('Allocation_Data')}),
                   INTERVAL 90 DAY
                 )
           GROUP BY emp_id
@@ -5786,7 +5787,7 @@ def _avail_kpis_sql(dept_scope: list | None = None) -> str:
 
 
 def _avail_skills_sql(limit: int = 50, min_count: int = 5, dept_scope: list | None = None) -> str:
-    """Combined skill/competency tag list. Union of Allocation_data.emp_competency
+    """Combined skill/competency tag list. Union of Allocation_Data.emp_competency
     (latest per employee) and Employee_Data.EmployeePosition, with per-tag
     DISTINCT-employee counts. Tags with fewer than min_count employees are
     hidden to keep the row digestible."""
@@ -5802,13 +5803,13 @@ def _avail_skills_sql(limit: int = 50, min_count: int = 5, dept_scope: list | No
         ),
         latest_alloc AS (
           -- One competency per employee. ANY_VALUE instead of ROW_NUMBER
-          -- because Allocation_data.Date type varies across environments
+          -- because Allocation_Data.Date type varies across environments
           -- and ORDER BY Date errors on capability-agent-prod. ANY_VALUE
           -- picks a representative competency per employee non-deterministically,
           -- which is fine for the tag-count aggregation downstream.
           SELECT {emp_id_alloc} AS emp_id,
                  ANY_VALUE(TRIM(emp_competency)) AS emp_competency
-          FROM {_bq_avail('Allocation_data')}
+          FROM {_bq_avail('Allocation_Data')}
           WHERE emp_competency IS NOT NULL AND TRIM(emp_competency) != ''
           GROUP BY emp_id
         ),
@@ -5852,16 +5853,16 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
         alloc AS (
           -- 90-day window matching emp_alloc in _avail_kpis_sql so cards
           -- and KPI counts agree. NULL-safe fallback to lifetime aggregation
-          -- if Allocation_data.Date is entirely unparseable.
+          -- if Allocation_Data.Date is entirely unparseable.
           SELECT {emp_id_alloc} AS emp_id,
                  MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct,
                  COUNT(DISTINCT project_id) AS project_count,
                  ANY_VALUE(emp_competency) AS competency
-          FROM {_bq_avail('Allocation_data')}
+          FROM {_bq_avail('Allocation_Data')}
           WHERE (SELECT MAX(COALESCE(
                    SAFE_CAST(CAST(Date AS STRING) AS DATE),
                    SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
-                 )) FROM {_bq_avail('Allocation_data')}) IS NULL
+                 )) FROM {_bq_avail('Allocation_Data')}) IS NULL
              OR COALESCE(
                   SAFE_CAST(CAST(Date AS STRING) AS DATE),
                   SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
@@ -5869,7 +5870,7 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
                   (SELECT MAX(COALESCE(
                     SAFE_CAST(CAST(Date AS STRING) AS DATE),
                     SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
-                  )) FROM {_bq_avail('Allocation_data')}),
+                  )) FROM {_bq_avail('Allocation_Data')}),
                   INTERVAL 90 DAY
                 )
           GROUP BY emp_id
@@ -6071,7 +6072,7 @@ def availability_diag(_: dict = Depends(require_admin)):
           SELECT DISTINCT
             CAST(employee_id AS STRING) AS raw,
             {norm_alloc} AS norm
-          FROM {_bq_avail('Allocation_data')}
+          FROM {_bq_avail('Allocation_Data')}
           WHERE employee_id IS NOT NULL
           LIMIT 5
         ),
@@ -6090,7 +6091,7 @@ def availability_diag(_: dict = Depends(require_admin)):
         ),
         alloc_norm AS (
           SELECT DISTINCT {norm_alloc} AS emp_id
-          FROM {_bq_avail('Allocation_data')}
+          FROM {_bq_avail('Allocation_Data')}
           WHERE employee_id IS NOT NULL
         ),
         ts_norm AS (
@@ -6100,7 +6101,7 @@ def availability_diag(_: dict = Depends(require_admin)):
         )
         SELECT
           (SELECT COUNT(*) FROM {_bq_avail('Employee_Data')})                AS emp_total_rows,
-          (SELECT COUNT(*) FROM {_bq_avail('Allocation_data')})              AS alloc_total_rows,
+          (SELECT COUNT(*) FROM {_bq_avail('Allocation_Data')})              AS alloc_total_rows,
           (SELECT COUNT(*) FROM {_bq_avail('Timesheet_Data')})               AS ts_total_rows,
           (SELECT COUNT(*) FROM emp_norm)                                    AS emp_distinct_norm,
           (SELECT COUNT(*) FROM alloc_norm)                                  AS alloc_distinct_norm,
@@ -6163,14 +6164,14 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
     norm_target = _norm_emp_id(f"'{safe_code}'")
     # Project allocations — every project this employee has touched, with
     # peak allocation % and the competency they brought to it. No Date
-    # filter (Allocation_data.Date type unreliable on prod, see _avail_kpis_sql).
+    # filter (Allocation_Data.Date type unreliable on prod, see _avail_kpis_sql).
     alloc_sql = f"""
         SELECT
           COALESCE(NULLIF(TRIM(CAST(project_id AS STRING)), ''), 'Unspecified') AS project_id,
           COALESCE(NULLIF(TRIM(emp_competency), ''), '') AS competency,
           MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS allocation_pct,
           COUNT(*) AS records
-        FROM {_bq_avail('Allocation_data')}
+        FROM {_bq_avail('Allocation_Data')}
         WHERE {_norm_emp_id('employee_id')} = {norm_target}
         GROUP BY project_id, competency
         ORDER BY allocation_pct DESC, records DESC
@@ -6648,7 +6649,7 @@ WORKFORCE TABLES:
     Attendance rate = ROUND(100.0 * SUM(is_present) / NULLIF(COUNT(*),0), 1).
     `employee_id` here = `Employee_Code` in Employee_Data.
 
-- `ai-vertex-mahad.Satori_Project.Allocation_data`
+- `ai-vertex-mahad.Satori_Project.Allocation_Data`
     project_id, employee_id (= Employee_Code), allocation_percent (STRING — SAFE_CAST AS FLOAT64),
     emp_competency, Flag, Start_Date, End_Date.
     Bench = employees with MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per Employee_Code = 0 or NULL.
@@ -7208,7 +7209,7 @@ _DEFAULT_SCHEMA_SETTINGS = [
         ),
     },
     {
-        "table_name": "Allocation_data",
+        "table_name": "Allocation_Data",
         "sort_order": 30,
         "description": (
             "Weekly project allocation (~385k rows).\n"

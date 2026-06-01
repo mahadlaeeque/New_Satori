@@ -44,12 +44,12 @@ _PROBES = {
     ),
     "allocation_flags": (
         "SELECT DISTINCT Flag AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Allocation_data` WHERE Flag IS NOT NULL "
+        "FROM `ai-vertex-mahad.Satori_Project.Allocation_Data` WHERE Flag IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 10"
     ),
     "competencies": (
         "SELECT DISTINCT emp_competency AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Allocation_data` WHERE emp_competency IS NOT NULL "
+        "FROM `ai-vertex-mahad.Satori_Project.Allocation_Data` WHERE emp_competency IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 40"
     ),
     "ams": (
@@ -79,7 +79,7 @@ _PROBES = {
     "row_counts": (
         "SELECT 'Employee_Data' AS v, COUNT(*) AS n FROM `ai-vertex-mahad.Satori_Project.Employee_Data`"
         " UNION ALL SELECT 'Attendance_Data', COUNT(*) FROM `ai-vertex-mahad.Satori_Project.Attendance_Data`"
-        " UNION ALL SELECT 'Allocation_data', COUNT(*) FROM `ai-vertex-mahad.Satori_Project.Allocation_data`"
+        " UNION ALL SELECT 'Allocation_Data', COUNT(*) FROM `ai-vertex-mahad.Satori_Project.Allocation_Data`"
         " UNION ALL SELECT 'Timesheet_Data', COUNT(*) FROM `ai-vertex-mahad.Satori_Project.Timesheet_Data`"
         " UNION ALL SELECT 'Sales_AM_Scorecard', COUNT(*) FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard`"
         " UNION ALL SELECT 'Sales_Accounts', COUNT(*) FROM `ai-vertex-mahad.Satori_Project.Sales_Accounts`"
@@ -187,7 +187,7 @@ def render_context_block() -> str:
         "ATTENDANCE DIMENSIONS (Attendance_Data):\n"
         f"- Status values (attendance_status_text) - {_format_distinct(get_rows('attendance_statuses'))}\n"
         "  Stored case-sensitive. ALWAYS wrap in LOWER() before comparing. There is NO 'Late' status - the closest real value is 'Missing Punch'.\n\n"
-        "ALLOCATION DIMENSIONS (Allocation_data):\n"
+        "ALLOCATION DIMENSIONS (Allocation_Data):\n"
         f"- Flag values - {_format_distinct(get_rows('allocation_flags'))}  (NOT 'Actual'/'Forecast' - use 'Allocated'/'Bench')\n"
         f"- Competencies (emp_competency) - {_format_distinct(get_rows('competencies'))}\n\n"
         "SALES DIMENSIONS:\n"
@@ -195,7 +195,7 @@ def render_context_block() -> str:
         f"- VPs - {_format_distinct(get_rows('vps'))}\n"
         f"- Sales cities - {_format_distinct(get_rows('sales_cities'))}\n"
         f"- Account tiers (Sales_Accounts.Tier) - {_format_distinct(get_rows('account_tiers'))}\n\n"
-        "CRITICAL JOIN RULE - join Employee_Data to Attendance_Data / Allocation_data / Timesheet_Data on the DIGIT-NORMALISED employee code. NOT on names, NOT on employee_id.\n"
+        "CRITICAL JOIN RULE - join Employee_Data to Attendance_Data / Allocation_Data / Timesheet_Data on the DIGIT-NORMALISED employee code. NOT on names, NOT on employee_id.\n"
         "  Let norm(x) = LTRIM(REGEXP_REPLACE(CAST(x AS STRING), r'[^0-9]', ''), '0').\n"
         f"- norm(Employee_Code) <-> norm(personal_no) overlap: {jc_str}  -> THIS is the working join. USE IT.\n"
         f"- UPPER(TRIM(Resource_Name)) <-> UPPER(TRIM(employee_name)) overlap: {jc_name_str}  -> BROKEN. DO NOT USE. Employee_Data.Resource_Name carries a code prefix (e.g. 'E-1571 Mahad Laeeque'), so it never equals Attendance_Data.employee_name ('Mahad Laeeque').\n\n"
@@ -204,7 +204,7 @@ def render_context_block() -> str:
         "        ON norm(e.Employee_Code) = norm(a.personal_no)\n"
         "  DO NOT join Attendance_Data on a.employee_id (an unrelated INT64 sequence) -> ~0 matches.\n"
         "  DO NOT join Attendance_Data on employee_name = Resource_Name -> ~0 matches (code prefix).\n\n"
-        "- Allocation_data -> Employee_Data: ON norm(e.Employee_Code) = norm(al.employee_id)  (Allocation_data.employee_id holds the 'E-2141' code).\n"
+        "- Allocation_Data -> Employee_Data: ON norm(e.Employee_Code) = norm(al.employee_id)  (Allocation_Data.employee_id holds the 'E-2141' code).\n"
         "- Timesheet_Data  -> Employee_Data: ON norm(e.Employee_Code) = norm(t.TICKET_USER_ID).\n"
         "- SINGLE-EMPLOYEE attendance lookup: you do NOT need Employee_Data at all - filter Attendance_Data directly with LOWER(employee_name) LIKE '%<name>%'. Only join to Employee_Data when you need department / position, or to apply a department-scope filter.\n"
         "- Use INNER JOIN when a department-scope filter on Employee_Data must apply; otherwise LEFT JOIN so attendance rows survive a missing lookup.\n\n"
@@ -212,7 +212,7 @@ def render_context_block() -> str:
         "STATUS / FLAG GOTCHAS - use ONLY the values listed in the snapshot above:\n"
         "- attendance_status_text values: Present, Weekend, Absent, Missing Punch, Holiday, On Leave, Remote Work (and 'Submitted ...' variants). NO 'Late' - do not filter on 'late'.\n"
         "- IMPORTANT: Attendance_Data has NO is_present / is_absent / is_on_leave / is_remote / is_holiday / is_weekend flag columns. Derive every count from attendance_status_text, e.g. present_days = COUNTIF(LOWER(attendance_status_text)='present'), absent_days = COUNTIF(LOWER(attendance_status_text)='absent'), etc. Attendance rate = present_days / total working-day records.\n"
-        "- Allocation_data.Flag values: 'Allocated' and 'Bench'. NO 'Actual' or 'Forecast'.\n\n"
+        "- Allocation_Data.Flag values: 'Allocated' and 'Bench'. NO 'Actual' or 'Forecast'.\n\n"
         "=== END SNAPSHOT ===\n"
     )
 

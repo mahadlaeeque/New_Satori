@@ -5,7 +5,7 @@ Queries the TMC workforce + sales data warehouse and provides results as
 context for the AI chat agent.
 
 Dataset: ai-vertex-mahad.Satori_Project (10 tables)
-  Workforce: Employee_Data, Attendance_Data, Allocation_data, Timesheet_Data
+  Workforce: Employee_Data, Attendance_Data, Allocation_Data, Timesheet_Data
   Sales:     Sales_Accounts, Sales_AM_Scorecard, Sales_Plan_vs_Pipeline,
              Sales_Pipeline_Health, Sales_Hunting_Gap, Sales_KPI_Scorecard,
              Sales_Dormant_Accounts, Sales_Workload_Feasibility
@@ -150,56 +150,56 @@ LIMIT 25""",
         ],
         "queries": [
             {
-                "name": "Attendance Rate (last 30 days)",
+                "name": "Attendance Rate (last 30 days of data)",
                 "sql": """SELECT
-  ROUND(100.0 * SUM(is_present) / NULLIF(COUNT(*), 0), 1) AS attendance_rate_pct,
+  ROUND(100.0 * COUNTIF(LOWER(attendance_status_text) = 'present') / NULLIF(COUNT(*), 0), 1) AS attendance_rate_pct,
   COUNT(DISTINCT employee_id)                              AS unique_employees,
-  SUM(is_present)                                          AS present_days,
-  SUM(is_absent)                                           AS absent_days,
-  SUM(is_on_leave)                                         AS leave_days,
-  SUM(is_remote)                                           AS remote_days,
-  COUNTIF(LOWER(attendance_status_text) = 'late')          AS late_count
+  COUNTIF(LOWER(attendance_status_text) = 'present')       AS present_days,
+  COUNTIF(LOWER(attendance_status_text) = 'absent')        AS absent_days,
+  COUNTIF(LOWER(attendance_status_text) = 'on leave')      AS leave_days,
+  COUNTIF(LOWER(attendance_status_text) = 'remote work')   AS remote_days,
+  COUNTIF(LOWER(attendance_status_text) = 'missing punch') AS missing_punch_count
 FROM `{project}.{dataset}.Attendance_Data`
-WHERE attendance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)""",
+WHERE attendance_date >= DATE_SUB((SELECT MAX(attendance_date) FROM `{project}.{dataset}.Attendance_Data`), INTERVAL 30 DAY)""",
             },
             {
-                "name": "Daily Attendance Trend (last 14 days)",
+                "name": "Daily Attendance Trend (last 14 days of data)",
                 "sql": """SELECT
   attendance_date,
   COUNT(*)                                                       AS total,
-  SUM(is_present)                                                AS present,
-  SUM(is_absent)                                                 AS absent,
-  COUNTIF(LOWER(attendance_status_text) = 'late')                AS late,
-  ROUND(100.0 * SUM(is_present) / NULLIF(COUNT(*), 0), 1)        AS rate_pct
+  COUNTIF(LOWER(attendance_status_text) = 'present')             AS present,
+  COUNTIF(LOWER(attendance_status_text) = 'absent')              AS absent,
+  COUNTIF(LOWER(attendance_status_text) = 'missing punch')       AS missing_punch,
+  ROUND(100.0 * COUNTIF(LOWER(attendance_status_text) = 'present') / NULLIF(COUNT(*), 0), 1) AS rate_pct
 FROM `{project}.{dataset}.Attendance_Data`
-WHERE attendance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
+WHERE attendance_date >= DATE_SUB((SELECT MAX(attendance_date) FROM `{project}.{dataset}.Attendance_Data`), INTERVAL 14 DAY)
 GROUP BY attendance_date
 ORDER BY attendance_date""",
             },
             {
-                "name": "Top 10 Absentees (last 30 days)",
+                "name": "Top 10 Absentees (last 30 days of data)",
                 "sql": """SELECT
   employee_name,
   COUNT(*) AS absent_days
 FROM `{project}.{dataset}.Attendance_Data`
-WHERE attendance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
-  AND is_absent = 1
+WHERE attendance_date >= DATE_SUB((SELECT MAX(attendance_date) FROM `{project}.{dataset}.Attendance_Data`), INTERVAL 30 DAY)
+  AND LOWER(attendance_status_text) = 'absent'
   AND employee_name IS NOT NULL
 GROUP BY employee_name
 ORDER BY absent_days DESC
 LIMIT 10""",
             },
             {
-                "name": "Top 10 Late Arrivals (last 30 days)",
+                "name": "Top 10 Missing-Punch (last 30 days of data)",
                 "sql": """SELECT
   employee_name,
-  COUNT(*) AS late_count
+  COUNT(*) AS missing_punch_count
 FROM `{project}.{dataset}.Attendance_Data`
-WHERE attendance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
-  AND LOWER(attendance_status_text) = 'late'
+WHERE attendance_date >= DATE_SUB((SELECT MAX(attendance_date) FROM `{project}.{dataset}.Attendance_Data`), INTERVAL 30 DAY)
+  AND LOWER(attendance_status_text) = 'missing punch'
   AND employee_name IS NOT NULL
 GROUP BY employee_name
-ORDER BY late_count DESC
+ORDER BY missing_punch_count DESC
 LIMIT 10""",
             },
         ],
@@ -255,8 +255,8 @@ LIMIT 10""",
     employee_id,
     AVG(SAFE_CAST(allocation_percent AS FLOAT64)) AS avg_pct,
     MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct
-  FROM `{project}.{dataset}.Allocation_data`
-  WHERE Flag IN ('Actual', 'Forecast')
+  FROM `{project}.{dataset}.Allocation_Data`
+  WHERE Flag IN ('Allocated', 'Bench')
   GROUP BY employee_id
 )
 SELECT
@@ -276,8 +276,8 @@ ORDER BY employees DESC""",
   project_id,
   COUNT(DISTINCT employee_id)                                AS people,
   ROUND(AVG(SAFE_CAST(allocation_percent AS FLOAT64)), 1)    AS avg_allocation_pct
-FROM `{project}.{dataset}.Allocation_data`
-WHERE Flag = 'Actual'
+FROM `{project}.{dataset}.Allocation_Data`
+WHERE Flag = 'Allocated'
 GROUP BY project_id
 ORDER BY people DESC
 LIMIT 20""",
@@ -289,8 +289,8 @@ LIMIT 20""",
     employee_id,
     MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct,
     STRING_AGG(DISTINCT emp_competency, ' | ' ORDER BY emp_competency LIMIT 3) AS competencies
-  FROM `{project}.{dataset}.Allocation_data`
-  WHERE Flag IN ('Actual', 'Forecast')
+  FROM `{project}.{dataset}.Allocation_Data`
+  WHERE Flag IN ('Allocated', 'Bench')
   GROUP BY employee_id
 )
 SELECT
@@ -320,7 +320,7 @@ LIMIT 25""",
                 "sql": """SELECT
   emp_competency AS competency,
   COUNT(DISTINCT employee_id) AS employees
-FROM `{project}.{dataset}.Allocation_data`
+FROM `{project}.{dataset}.Allocation_Data`
 WHERE emp_competency IS NOT NULL AND TRIM(emp_competency) <> ''
 GROUP BY competency
 ORDER BY employees DESC
