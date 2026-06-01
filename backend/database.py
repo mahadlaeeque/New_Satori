@@ -1092,43 +1092,48 @@ def _migrate_reset_passwords_to_welcome():
 
 
 def _migrate_finalize_tmc_superadmin():
-    """Force-finalize the TMC rebrand:
-      - companies.name + short_code -> 'TMC' if still 'SFML' (idempotent
-        re-run of the earlier migration, in case it didn't fire on the
-        crashed deploys).
-      - Superadmin email becomes 'superadmin@tmc.com' regardless of whether
-        the row is currently @sfml.com, @tmcltd.com, or already @tmc.com.
-      - Password reset to bcrypt('welcome').
-      - totp_secret_enc + totp_verified_at cleared so the next login forces
-        a fresh QR-code enrollment.
-    Idempotent: every UPDATE has a WHERE clause that only matches when
-    there's actual work to do."""
+    """One-time TMC rebrand finalizer for the superadmin account.
+
+    Renames a LEGACY superadmin (@sfml.com / @tmcltd.com) to
+    superadmin@tmc.com, resets its password to 'welcome', and clears its TOTP
+    so it re-enrolls once.
+
+    CRITICAL — idempotent and NON-DESTRUCTIVE once done: if superadmin@tmc.com
+    already exists, this returns immediately WITHOUT touching the password or
+    TOTP. The previous version reset the password and wiped
+    totp_secret_enc/totp_verified_at on EVERY cold start (i.e. every deploy),
+    which is why the QR-code 2FA enrollment had to be redone after each push.
+    With this guard, the superadmin's enrollment now survives deploys and
+    sessions."""
     try:
         conn = get_db()
         cur = conn.cursor()
-        # 1. Company short_code + name -> TMC (catches any DB where the
-        # earlier rename didn't apply, e.g. if init_db crashed mid-way).
+        # Company short_code + name -> TMC (idempotent; only matches legacy rows).
         cur.execute(
             "UPDATE companies SET name = ?, short_code = ? "
             "WHERE short_code = ? OR name = ?",
             ("TMC", "TMC", "SFML", "SFML"),
         )
 
-        # 2. Pick the superadmin row. Could be at any of three email forms
-        # depending on which migrations fired.
-        candidates = ("superadmin@tmc.com", "superadmin@tmcltd.com",
-                      "superadmin@sfml.com")
+        # If the canonical superadmin already exists, the rebrand is complete.
+        # Do NOT reset its password or wipe its TOTP — doing so on every cold
+        # start is exactly the bug that reset 2FA on each deploy.
+        cur.execute("SELECT id FROM users WHERE email = ?", ("superadmin@tmc.com",))
+        if cur.fetchone():
+            conn.commit()
+            conn.close()
+            return
+
+        # No canonical superadmin yet — migrate a legacy row to it (one time).
         super_id = None
-        for em in candidates:
+        for em in ("superadmin@tmcltd.com", "superadmin@sfml.com"):
             cur.execute("SELECT id FROM users WHERE email = ?", (em,))
             row = cur.fetchone()
             if row:
                 super_id = row["id"] if isinstance(row, dict) else row[0]
                 break
-
         if super_id is None:
-            # No superadmin found at any of the candidate emails - fall back
-            # to any admin-role row. Doesn't change emails for non-admins.
+            # Fall back to the first admin-role row.
             cur.execute("SELECT id FROM users WHERE role = 'admin' "
                         "ORDER BY id ASC LIMIT 1")
             row = cur.fetchone()
@@ -1136,12 +1141,6 @@ def _migrate_finalize_tmc_superadmin():
                 super_id = row["id"] if isinstance(row, dict) else row[0]
 
         if super_id is not None:
-            # Avoid UNIQUE-constraint failure if another row is already at
-            # superadmin@tmc.com - delete the stale duplicate first.
-            cur.execute(
-                "DELETE FROM users WHERE email = ? AND id <> ?",
-                ("superadmin@tmc.com", super_id),
-            )
             pw_hash = _bcrypt.hashpw(b"welcome", _bcrypt.gensalt()).decode()
             cur.execute(
                 "UPDATE users SET email = ?, password = ?, "
@@ -1150,7 +1149,7 @@ def _migrate_finalize_tmc_superadmin():
                 ("superadmin@tmc.com", pw_hash, super_id),
             )
             print(f"[DB] Migration: superadmin id={super_id} -> "
-                  f"superadmin@tmc.com (TOTP cleared, password=welcome)")
+                  f"superadmin@tmc.com (one-time rebrand; TOTP reset once)")
         else:
             print("[DB] Migration: no superadmin row found to finalize")
 

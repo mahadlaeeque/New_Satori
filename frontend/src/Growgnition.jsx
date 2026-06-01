@@ -6701,7 +6701,7 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
 
   const handleDelete = async (u) => {
     if (u.id === currentUserId) return;
-    if (!confirm(`Deactivate user "${u.full_name}" (${u.email})?`)) return;
+    if (!confirm(`Permanently delete user "${u.full_name}" (${u.email})?\n\nThis removes the account and all of their dashboards, reports, chats, and scope settings. This cannot be undone. To temporarily disable instead, use Deactivate.`)) return;
     try {
       const res = await fetch(`${apiBase}/api/admin/users/${u.id}`, {
         method: "DELETE", headers: authHeaders(),
@@ -6710,6 +6710,25 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
       fetchAll();
     } catch (e) {
       alert(e.message);
+    }
+  };
+
+  const [syncingDepts, setSyncingDepts] = useState(false);
+  const handleSyncDepartments = async () => {
+    if (!confirm("Re-sync every imported practice head's department(s) from the Practice Heads list?\n\nThis overwrites each matching user's department scope with the values from the source file (e.g. Mirza Amir Baig → SAP Analytics; Rai Sohaib Amjad → SAP Finance + SAP Controlling).")) return;
+    setSyncingDepts(true);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/users/resync-practice-head-scopes`, {
+        method: "POST", headers: authHeaders(),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "Sync failed");
+      alert(`Departments synced — updated ${data.summary?.updated ?? 0} user(s), ${data.summary?.no_user ?? 0} unmatched.`);
+      fetchAll();
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setSyncingDepts(false);
     }
   };
 
@@ -6724,6 +6743,20 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
           </div>
         </div>
         <div style={{ display: "flex", gap: 10 }}>
+          <button
+            onClick={handleSyncDepartments}
+            disabled={syncingDepts}
+            title="Re-read the Practice Heads list and reset each matching user's department scope to the file's Department column"
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 16px",
+              border: `1px solid ${COLORS.border}`, borderRadius: 10,
+              background: COLORS.surface, color: COLORS.textPrimary,
+              fontSize: 13, fontWeight: 600, cursor: syncingDepts ? "default" : "pointer",
+              opacity: syncingDepts ? 0.6 : 1,
+            }}
+          >
+            <Activity size={16} /> {syncingDepts ? "Syncing…" : "Sync Departments"}
+          </button>
           <button
             onClick={() => setShowImport(true)}
             title="Bulk-create users from the Practice_Heads_List BigQuery table"

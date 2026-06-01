@@ -848,20 +848,56 @@ def admin_reset_password(user_id: int, body: AdminPasswordReset, _: dict = Depen
 
 
 @app.delete("/api/admin/users/{user_id}")
-def admin_delete_user(user_id: int, admin: dict = Depends(require_admin)):
-    """Soft-delete (deactivate) a user. Admins can't delete themselves."""
+def admin_delete_user(user_id: int, request: Request, admin: dict = Depends(require_admin)):
+    """Permanently HARD-delete a user and all of their owned / dependent rows.
+    Admins can't delete themselves. For a reversible disable, use the
+    deactivate toggle (PUT is_active) instead."""
     if user_id == int(admin["sub"]):
         raise HTTPException(status_code=400, detail="You can't delete yourself")
     db = get_db()
     cur = db.cursor()
-    cur.execute("SELECT id FROM users WHERE id = ?", (user_id,))
-    if not cur.fetchone():
+    cur.execute("SELECT email FROM users WHERE id = ?", (user_id,))
+    row = cur.fetchone()
+    if not row:
         db.close()
         raise HTTPException(status_code=404, detail="User not found")
-    cur.execute("UPDATE users SET is_active = 0 WHERE id = ?", (user_id,))
+    email = row["email"] if isinstance(row, dict) else row[0]
+
+    # Delete dependents in FK-safe order, then the user. Some tables are
+    # ON DELETE CASCADE in newer schemas but not in every environment, so we
+    # delete explicitly to stay portable across SQLite + Postgres. Each
+    # statement takes the user_id once per '?' placeholder.
+    stmts = [
+        "DELETE FROM dashboard_shares WHERE user_id = ? OR shared_by = ?",
+        "DELETE FROM report_shares WHERE user_id = ? OR shared_by = ?",
+        "DELETE FROM chat_messages WHERE conversation_id IN (SELECT id FROM chat_conversations WHERE user_id = ?)",
+        "DELETE FROM chat_conversations WHERE user_id = ?",
+        "DELETE FROM chat_history WHERE user_id = ?",
+        "DELETE FROM saved_dashboards WHERE user_id = ?",
+        "DELETE FROM saved_reports WHERE user_id = ?",
+        "DELETE FROM user_backup_codes WHERE user_id = ?",
+        "DELETE FROM user_features WHERE user_id = ?",
+        "DELETE FROM user_data_scope WHERE user_id = ?",
+        "DELETE FROM user_data_scope_policy WHERE user_id = ?",
+        "DELETE FROM user_settings WHERE user_id = ?",
+        "DELETE FROM login_log WHERE user_id = ?",
+        "UPDATE data_access_log SET user_id = NULL WHERE user_id = ?",
+        "DELETE FROM users WHERE id = ?",
+    ]
+    for s in stmts:
+        cur.execute(s, (user_id,) * s.count("?"))
     db.commit()
     db.close()
-    return {"message": "User deactivated"}
+    try:
+        _scope_policy_cache.pop(int(user_id), None)
+    except Exception:
+        pass
+    audit_log.record(
+        user=admin, request=request,
+        action="user.delete", resource_type="user", resource_id=user_id,
+        detail={"email": email, "hard_delete": True},
+    )
+    return {"message": "User permanently deleted"}
 
 
 @app.get("/api/admin/users/{user_id}/features")
