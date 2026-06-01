@@ -2344,108 +2344,26 @@ def _admin_unrestricted_addon(user: dict) -> str:
 
 
 def _compute_scope_policy(user: dict) -> str:
-    """Call Gemini once (per user_id, per process) to compute the scope
-    policy text. Cached forever (process restart re-computes). For admins
-    we skip the LLM call and return a deterministic unrestricted policy.
-    Returns the system-prompt-addon text the main agent will treat as
-    a hard rule."""
+    """SCOPE FILTERING DISABLED. Every user (admin, practice head, regular
+    user) gets the same unrestricted policy. The user's name is still
+    surfaced so chat/voice can still address them by first name.
+
+    Keeping the function + cache around so the new scope design can
+    re-enable per-user policies by editing this one function. The
+    /api/admin/users/resync-practice-head-scopes endpoint and the
+    user_data_scope tables stay in place too.
+
+    To restore per-user scoping later, replace this body with the
+    multi-dept gatekeeper logic from git history (commit d9f75a2)."""
     try:
         uid = int(user.get("sub") or user.get("id") or 0)
     except Exception:
         uid = 0
     if uid in _scope_policy_cache:
         return _scope_policy_cache[uid]
-
-    role = (user.get("role") or "user").strip().lower()
-    if role == "admin":
-        addon = _admin_unrestricted_addon(user)
-        _scope_policy_cache[uid] = addon
-        return addon
-
-    name = (user.get("name") or user.get("full_name") or "User").strip() or "User"
-    first = name.split()[0] if name else "User"
-
-    # Load EVERY dept scope row for this user (no LIMIT 1) so practice
-    # heads who cover multiple leaves get all of them in the policy.
-    dept_values: list[str] = []
-    try:
-        from database import get_db
-        db = get_db(); cur = db.cursor()
-        cur.execute(
-            "SELECT value FROM user_data_scope WHERE user_id = ? "
-            "AND dimension = 'department' ORDER BY value",
-            (uid,),
-        )
-        rows = cur.fetchall() or []
-        db.close()
-        for r in rows:
-            v = (r["value"] if isinstance(r, dict) else r[0])
-            if v:
-                dept_values.append(str(v).strip())
-    except Exception as e:
-        print(f"[scope-agent] could not load dept rows for user {uid}: {e}")
-
-    # Empty -> unrestricted fallback so chat keeps working.
-    if not dept_values:
-        addon = (
-            f"\n\nUSER CONTEXT - {name}\n"
-            f"DATA ACCESS POLICY: unrestricted (no department assigned).\n"
-            f"ADDRESSING: address {first} by their first name when natural.\n"
-        )
-        _scope_policy_cache[uid] = addon
-        print(f"[scope-agent] uid={uid} has no dept scope rows -> unrestricted fallback")
-        return addon
-
-    # Build the formats the prompt template expects.
-    department_list_quoted = ", ".join(f'"{d}"' for d in dept_values)  # for SQL IN clause
-    department_list_human  = ", ".join(dept_values)                     # human-readable
-    departments_count      = len(dept_values)
-
-    try:
-        client = get_genai_client()
-        prompt = _SCOPE_AGENT_PROMPT.format(
-            name=name,
-            role=role,
-            department=department_list_human,  # legacy single-dept placeholder, kept for any leftover refs
-            department_list_quoted=department_list_quoted,
-            department_list_human=department_list_human,
-            departments_count=departments_count,
-        )
-        resp = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[genai.types.Content(
-                role="user",
-                parts=[genai.types.Part(text=prompt)],
-            )],
-            config=genai.types.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=800,
-            ),
-        )
-        addon_text = (resp.text or "").strip()
-        if not addon_text:
-            raise RuntimeError("scope agent returned empty text")
-        addon = "\n\n" + addon_text + "\n"
-        _scope_policy_cache[uid] = addon
-        print(f"[scope-agent] computed policy for uid={uid} depts={dept_values}")
-        return addon
-    except Exception as e:
-        print(f"[scope-agent] FAILED for uid={uid} depts={dept_values}: {e}")
-        # Static fallback so chat keeps working even if Gemini is down.
-        addon = (
-            f"\n\nUSER CONTEXT - {name} (departments: {department_list_human})\n"
-            f"DATA ACCESS POLICY: Workforce queries are HARD-restricted to "
-            f"EmployeeHierarchyNode IN ({department_list_quoted}). "
-            f"NEVER return rows for any other department. The IN clause is "
-            f"required on every workforce JOIN. Sales tables unrestricted.\n"
-            f"OUT-OF-SCOPE REPLY: if asked about any other department, "
-            f"reply EXACTLY: \"I don't have that data available for your "
-            f"role - it's outside your department's scope "
-            f"({department_list_human}).\" Do NOT fuzzy-match similar names.\n"
-            f"ADDRESSING: call {first} by their first name when natural.\n"
-        )
-        _scope_policy_cache[uid] = addon
-        return addon
+    addon = _admin_unrestricted_addon(user)
+    _scope_policy_cache[uid] = addon
+    return addon
 
 
 def _user_context_addon(user: dict) -> str:
