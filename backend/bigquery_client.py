@@ -131,7 +131,7 @@ ORDER BY headcount DESC""",
             {
                 "name": "Headcount by Position",
                 "sql": """SELECT
-  COALESCE(NULLIF(TRIM(Employee_Position), ''), 'Unspecified') AS position,
+  COALESCE(NULLIF(TRIM(EmployeePosition), ''), 'Unspecified') AS position,
   COUNT(*) AS headcount
 FROM `{project}.{dataset}.Employee_Data`
 WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
@@ -296,7 +296,7 @@ LIMIT 20""",
 SELECT
   l.employee_id,
   e.Resource_Name,
-  e.Employee_Position,
+  e.EmployeePosition,
   l.competencies
 FROM latest l
 LEFT JOIN `{project}.{dataset}.Employee_Data` e

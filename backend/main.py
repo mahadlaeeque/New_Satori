@@ -1661,7 +1661,7 @@ You help users analyse attendance, employee availability, project allocation, ti
 DATA WAREHOUSE — `ai-vertex-mahad.Satori_Project` (10 tables):
 
 WORKFORCE TABLES
-1. `Employee_Data` — Employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name, Employee_Position, Employee_Email, EmployeeHierarchyNode (department), Employee_Location (city), Employee_Status, Employee_Type ('MTO'/'Permanent'/'Probation'/'Contract'). Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
+1. `Employee_Data` — Employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name, EmployeePosition, EmployeeEmail, EmployeeHierarchyNode (department), EmployeeLocation (city), Employee_Status, Employee_Type ('MTO'/'Permanent'/'Probation'/'Contract'). Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
 2. `Attendance_Data` — Daily attendance per employee. Cols: attendance_date (DATE), employee_id (STRING/INT — CAST to STRING when joining), employee_name, employee_email, checkin_time (STRING HH:MM:SS), checkout_time (STRING), attendance_status_text ('Present'/'Absent'/'Late'/'Leave'/etc.), is_present (0/1), is_absent (0/1), is_on_leave (0/1), is_remote (0/1), is_holiday (0/1), is_weekend (0/1), leave_type_name. For "late": LOWER(attendance_status_text) = 'late'.
 3. `Allocation_data` — Weekly project allocation. Cols: project_id, employee_id (STRING "E-1234"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Actual'/'Forecast'), Forecast_Flag, Date. Allocated = MAX(pct) >= 90; Partial = 1-89; Bench = 0/NULL.
 4. `Timesheet_Data` — Ticket/project hours. Cols: TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY, TICKET_DESCRIPTION, TICKET_SUBJECT. Join to employees on CAST(Employee_Code AS STRING) = CAST(TICKET_USER_ID AS STRING).
@@ -1942,7 +1942,7 @@ CRITICAL: If you are not sure which exact column to use, STILL CALL run_sql with
 ═══ KEY TABLES (ai-vertex-mahad.Satori_Project) ═══
 
 WORKFORCE
-  • Employee_Data — Employee_Code, Resource_Name, Employee_Position, EmployeeHierarchyNode (department), Employee_Location, Employee_Type, Joining_Date, Gender. Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation','contractual fixed term').
+  • Employee_Data — Employee_Code, Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Joining_Date, Gender. Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation','contractual fixed term').
   • Attendance_Data — attendance_date (DATE), employee_id, employee_name, employee_email, checkin_time (STRING HH:MM:SS — for the moment they checked in), checkout_time (STRING HH:MM:SS — for the moment they checked out), attendance_status_text ('Present'/'Absent'/'Weekend'/'Holiday'/'On Leave'/'Missing Punch'/'Remote Work'), is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1). NO 'Late' status — closest concept is 'Missing Punch'.
   • Allocation_data — project_id, employee_id, emp_name, allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Allocated'/'Bench'), Date, Week, Year, Month.
   • Timesheet_Data — TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (INT YYYYMMDD — use SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)) for date filters).
@@ -2416,6 +2416,76 @@ def _user_context_addon(user: dict) -> str:
     return _compute_scope_policy(user)
 
 
+def _log_chat_error(user: dict, user_message: str, sql_attempted: str,
+                    bq_error: str, source: str) -> None:
+    """Persist a chat error to data_access_log so the superadmin can see
+    what went wrong via /api/admin/chat-errors. Silent if the write
+    fails (we don't want logging itself to break the chat reply)."""
+    try:
+        from database import get_db
+        import json as _json
+        db = get_db(); cur = db.cursor()
+        detail = _json.dumps({
+            "source":        source,
+            "user_message":  (user_message or "")[:2000],
+            "sql_attempted": (sql_attempted or "")[:4000],
+            "bq_error":      (bq_error or "")[:2000],
+        })
+        cur.execute(
+            "INSERT INTO data_access_log (user_id, user_email, action, "
+            "resource_type, resource_id, detail) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                int(user.get("sub") or 0) or None,
+                (user.get("email") or "").strip().lower() or None,
+                "chat.error",
+                "chat",
+                None,
+                detail,
+            ),
+        )
+        db.commit()
+        db.close()
+    except Exception as e:
+        print(f"[chat.error] could not persist chat error (continuing): {e}")
+
+
+@app.get("/api/admin/chat-errors")
+def admin_chat_errors(limit: int = 100, admin: dict = Depends(require_superadmin)):
+    """Superadmin-only: latest chat errors with the SQL Gemini ran and
+    the BQ error message. End users never see this -- the chat UI shows
+    them only Gemini's polite refusal, the actual error lives here."""
+    db = get_db(); cur = db.cursor()
+    cur.execute(
+        "SELECT id, user_id, user_email, created_at, detail "
+        "FROM data_access_log WHERE action = ? "
+        "ORDER BY created_at DESC LIMIT ?",
+        ("chat.error", int(max(1, min(int(limit or 100), 500)))),
+    )
+    rows = cur.fetchall() or []
+    db.close()
+    out = []
+    import json as _json
+    for r in rows:
+        try:
+            d = dict(r) if isinstance(r, dict) else {
+                "id": r[0], "user_id": r[1], "user_email": r[2],
+                "created_at": r[3], "detail": r[4],
+            }
+            try:
+                d["detail"] = _json.loads(d["detail"]) if d.get("detail") else {}
+            except Exception:
+                d["detail"] = {"raw": d.get("detail")}
+            # Stringify created_at for JSON safety
+            ts = d.get("created_at")
+            if ts and not isinstance(ts, str):
+                d["created_at"] = str(ts)
+            out.append(d)
+        except Exception:
+            pass
+    return {"errors": out, "count": len(out)}
+
+
+
 def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None, dept_scope: list[str] | None = None) -> str:
     """Execute a SQL query from the chat tool and return formatted results.
 
@@ -2465,6 +2535,26 @@ def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None, dept_scope
     result = run_query(sql_stripped, max_rows=500)
     if "error" in result:
         print(f"[CHAT-SQL] BQ ERROR: {result.get('error')}")
+        # Also persist to data_access_log for /api/admin/chat-errors. We
+        # have no `user` here -- _execute_chat_sql is called from the
+        # chat loop which has user in scope. We re-fetch from a frame
+        # local via the runtime stack; simpler: callers can also log,
+        # but this catches every BQ error in one place.
+        try:
+            import inspect as _ins
+            _fr = _ins.currentframe().f_back if _ins.currentframe() else None
+            _user_local = _fr.f_locals.get("user") if _fr else None
+            _body_local = _fr.f_locals.get("body") if _fr else None
+            if _user_local and _body_local:
+                _log_chat_error(
+                    _user_local,
+                    getattr(_body_local, "message", "") or "",
+                    sql_stripped[:4000],
+                    str(result.get("error"))[:2000],
+                    "bq_error",
+                )
+        except Exception:
+            pass
     else:
         print(f"[CHAT-SQL] BQ OK rows={len(result.get('rows') or [])} cols={result.get('columns')}")
     if "error" in result:
@@ -2861,10 +2951,12 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                         ))
                     continue
 
-                # Refusal unmask: if Gemini composed a polite "I'm sorry, I
-                # had a technical issue" reply, surface the actual last tool
-                # error so the user (and we) can see what really failed
-                # instead of getting a vague apology.
+                # Refusal logger: when Gemini composes a polite refusal
+                # ('persistent technical issue', etc.) we silently log the
+                # actual BQ error to chat_error_log so the admin can see
+                # what failed via /api/admin/chat-errors. The user-facing
+                # reply stays clean -- they only see the polite message
+                # Gemini wrote.
                 _refusal_markers = [
                     "technical issue", "persistent issue", "persistent technical",
                     "i apologize", "i'm sorry", "i am sorry",
@@ -2875,9 +2967,8 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                 ]
                 _has_refusal = any(m in reply.lower() for m in _refusal_markers)
                 if _has_refusal:
-                    # Find the most recent function_response that contains an
-                    # error or "0 rows" message.
                     _last_err = ""
+                    _last_sql_attempted = ""
                     try:
                         for _c in reversed(contents):
                             if getattr(_c, "role", "") != "user":
@@ -2890,17 +2981,26 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                                     if _last and ("Query error" in str(_last) or
                                                   "0 rows" in str(_last) or
                                                   "error" in str(_last).lower()[:30]):
-                                        _last_err = str(_last)[:500]
+                                        _last_err = str(_last)[:2000]
                                         break
                             if _last_err:
                                 break
+                        # Also walk contents for the most recent attempted SQL
+                        for _c in reversed(contents):
+                            for _p in getattr(_c, "parts", []) or []:
+                                fc = getattr(_p, "function_call", None)
+                                if fc and getattr(fc, "args", None):
+                                    _args = fc.args
+                                    _sql_attempted = _args.get("sql") if isinstance(_args, dict) else None
+                                    if _sql_attempted:
+                                        _last_sql_attempted = str(_sql_attempted)[:4000]
+                                        break
+                            if _last_sql_attempted:
+                                break
                     except Exception:
                         pass
-                    if _last_err:
-                        reply = (reply.rstrip()
-                                 + "\n\n---\nDIAGNOSTIC (the actual BigQuery "
-                                 + "result that caused the refusal above):\n\n"
-                                 + _last_err)
+                    if _last_err or _last_sql_attempted:
+                        _log_chat_error(user, body.message, _last_sql_attempted, _last_err, "refusal_unmask")
 
                 return {"reply": reply}
 
@@ -3582,7 +3682,7 @@ def attendance_overview_data(user: dict = Depends(get_current_user)):
       COUNT(DISTINCT attendance_status_text) AS unique_order_types,
       (SELECT COUNT(DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''), 'Unspecified'))
          FROM {_TMC_DATASET}.Employee_Data) AS unique_plants,
-      (SELECT COUNT(DISTINCT Employee_Position)
+      (SELECT COUNT(DISTINCT EmployeePosition)
          FROM {_TMC_DATASET}.Employee_Data) AS unique_profit_centers
     FROM {_TMC_DATASET}.Attendance_Data
     WHERE attendance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
@@ -3643,9 +3743,9 @@ def attendance_overview_data(user: dict = Depends(get_current_user)):
       a.attendance_date                          AS shipment_date,
       CAST(a.is_present AS FLOAT64)              AS qty,
       CAST(NULL AS FLOAT64)                      AS amount,
-      e.Employee_Location                        AS zone,
+      e.EmployeeLocation                        AS zone,
       e.EmployeeHierarchyNode                       AS region,
-      e.Employee_Position                        AS district
+      e.EmployeePosition                        AS district
     FROM {_TMC_DATASET}.Attendance_Data a
     LEFT JOIN {_TMC_DATASET}.Employee_Data e
       ON CAST(e.Employee_Code AS STRING) = CAST(a.employee_id AS STRING)
@@ -3720,7 +3820,7 @@ def availability_overview_data(user: dict = Depends(get_current_user)):
     )
     SELECT
       l.emp_id                                                              AS order_no,
-      e.Employee_Position                                                   AS product,
+      e.EmployeePosition                                                   AS product,
       l.emp_id                                                              AS dealer_code,
       e.Resource_Name                                                       AS dealer_name,
       COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified')        AS plant_name,
@@ -3728,9 +3828,9 @@ def availability_overview_data(user: dict = Depends(get_current_user)):
         WHEN l.max_pct >= 90              THEN 'Allocated'
         WHEN l.max_pct BETWEEN 1 AND 89   THEN 'Partial'
         ELSE 'Bench' END                                                    AS dealer_code_status,
-      e.Employee_Location                                                   AS zone,
+      e.EmployeeLocation                                                   AS zone,
       e.EmployeeHierarchyNode                                                  AS region,
-      e.Employee_Position                                                   AS district,
+      e.EmployeePosition                                                   AS district,
       l.avg_pct                                                             AS qty,
       l.max_pct                                                             AS amount,
       CURRENT_DATE()                                                        AS shipment_date
@@ -3758,7 +3858,7 @@ def workforce_overview_data(user: dict = Depends(get_current_user)):
       COUNT(*)                                                                    AS unique_materials,
       COUNT(DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''), 'Unspecified')) AS unique_plants,
       CAST(COUNTIF(LOWER(COALESCE(Employee_Type,'')) IN ('mto','permanent','probation')) AS FLOAT64) AS total_qty,
-      CAST(COUNT(DISTINCT Employee_Location) AS FLOAT64)                          AS total_value_local
+      CAST(COUNT(DISTINCT EmployeeLocation) AS FLOAT64)                          AS total_value_local
     FROM {_TMC_DATASET}.Employee_Data
     """
     summary = (_sap_query(summary_sql, max_rows=1) or [{}])[0]
@@ -3786,10 +3886,10 @@ def workforce_overview_data(user: dict = Depends(get_current_user)):
 
     by_position_sql = f"""
     SELECT
-      COALESCE(NULLIF(TRIM(Employee_Position),''), 'Unspecified') AS material_type,
+      COALESCE(NULLIF(TRIM(EmployeePosition),''), 'Unspecified') AS material_type,
       COUNT(*)                                                     AS unique_materials,
       CAST(COUNT(*) AS FLOAT64)                                    AS total_qty,
-      CAST(COUNT(DISTINCT Employee_Location) AS FLOAT64)           AS total_value_local
+      CAST(COUNT(DISTINCT EmployeeLocation) AS FLOAT64)           AS total_value_local
     FROM {_TMC_DATASET}.Employee_Data
     GROUP BY material_type
     ORDER BY unique_materials DESC LIMIT 25
@@ -3800,9 +3900,9 @@ def workforce_overview_data(user: dict = Depends(get_current_user)):
     SELECT
       COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified') AS plant_id,
       CAST(e.Employee_Code AS STRING)                                AS material_id,
-      e.Employee_Position                                            AS material_type,
+      e.EmployeePosition                                            AS material_type,
       e.Resource_Name                                                AS material_description,
-      e.Employee_Location                                            AS base_unit_of_measure,
+      e.EmployeeLocation                                            AS base_unit_of_measure,
       1.0                                                            AS stock_qty,
       0.0                                                            AS unit_rate,
       0.0                                                            AS stock_value_local
@@ -3888,7 +3988,7 @@ def sales_pipeline_data(user: dict = Depends(get_current_user)):
 _DASHBOARD_SAP_SCHEMAS = """Detailed table schemas (BigQuery project `ai-vertex-mahad`, dataset `Satori_Project`). Column TYPES are shown in parentheses — use them correctly.
 
 WORKFORCE TABLES:
-- `Employee_Data` — employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name (STRING), Employee_Position (STRING), Employee_Email (STRING), EmployeeHierarchyNode (STRING — department), Employee_Location (STRING — city), Employee_Status (STRING), Employee_Type (STRING — 'MTO'/'Permanent'/'Probation'/'Contract'). Active employees = Employee_Type IN ('MTO','Permanent','Probation').
+- `Employee_Data` — employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name (STRING), EmployeePosition (STRING), EmployeeEmail (STRING), EmployeeHierarchyNode (STRING — department), EmployeeLocation (STRING — city), Employee_Status (STRING), Employee_Type (STRING — 'MTO'/'Permanent'/'Probation'/'Contract'). Active employees = Employee_Type IN ('MTO','Permanent','Probation').
 - `Attendance_Data` — daily attendance per employee. Cols: attendance_date (DATE), employee_id (INT64 — CAST AS STRING to join), employee_name (STRING), checkin_time (STRING HH:MM:SS), checkout_time (STRING), attendance_status_text (STRING — 'Present'/'Absent'/'Late'/'Leave'/etc), is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 — 0/1). For "late": LOWER(attendance_status_text)='late'.
 - `Allocation_data` — weekly project allocation. Cols: project_id (STRING), employee_id (STRING — "E-1234"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency (STRING), Flag (STRING — 'Actual'/'Forecast'), Forecast_Flag (STRING), Date (DATE). Allocated = MAX(pct)>=90; Partial = 1-89; Bench = 0/NULL.
 - `Timesheet_Data` — ticket/project hours. Cols: TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (INT64 — YYYYMMDD), TICKET_DESCRIPTION, TICKET_SUBJECT.
@@ -4873,7 +4973,7 @@ def _autofix_dashboard_sql(sql: str) -> str:
 _REPAIR_PROMPT = """You are a BigQuery SQL repair assistant. The query below failed with the given error against the TMC Satori warehouse. Output ONLY the fixed SQL — no prose, no markdown fence, no commentary.
 
 ═══ TMC SCHEMA (use ONLY these tables/columns) ═══
-- `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, Employee_Position, EmployeeHierarchyNode (department), Employee_Location, Employee_Type, Employee_Status.
+- `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Employee_Status.
 - `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), employee_id (INT64), employee_name (STRING), checkin_time, checkout_time, attendance_status_text, is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 0/1).
 - `{BQ_FULL}.Allocation_data` — project_id, employee_id (STRING "E-1234"), allocation_percent (STRING), emp_competency, Flag ('Allocated'/'Bench'), Date.
 - `{BQ_FULL}.Timesheet_Data` — TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (INT64 YYYYMMDD).
@@ -4900,7 +5000,7 @@ GOAL: The user clicked one category on a dashboard chart. Show them the row-leve
 detail behind that single category so they understand WHO/WHAT makes up the number.
 
 ═══ TMC SCHEMA ═══
-- `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, Employee_Position, EmployeeHierarchyNode (department), Employee_Location, Employee_Type, Employee_Status.
+- `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Employee_Status.
 - `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), employee_id (INT64), employee_name (STRING), checkin_time, checkout_time, attendance_status_text, is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 0/1).
 - `{BQ_FULL}.Allocation_data` — project_id, employee_id (STRING), allocation_percent (STRING), emp_competency, Flag, Date.
 - `{BQ_FULL}.Timesheet_Data` — TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (INT64 YYYYMMDD).
@@ -4921,7 +5021,7 @@ detail behind that single category so they understand WHO/WHAT makes up the numb
 When the parent chart is grouped by DEPARTMENT (EmployeeHierarchyNode) and the user clicks department='Qlik':
   SELECT
     e.Resource_Name AS employee,
-    e.Employee_Position AS position,
+    e.EmployeePosition AS position,
     SUM(a.is_present)  AS present_days,
     SUM(a.is_absent)   AS absent_days,
     SUM(a.is_on_leave) AS leave_days,
@@ -5125,10 +5225,10 @@ _FILTER_FIELD_MAP = {
     "EmployeeHierarchyNode": "EmployeeHierarchyNode",
     "employee_type":      "LOWER(Employee_Type)",
     "Employee_Type":      "LOWER(Employee_Type)",
-    "location":           "Employee_Location",
-    "Employee_Location":  "Employee_Location",
-    "position":           "Employee_Position",
-    "Employee_Position":  "Employee_Position",
+    "location":           "EmployeeLocation",
+    "EmployeeLocation":  "EmployeeLocation",
+    "position":           "EmployeePosition",
+    "EmployeePosition":  "EmployeePosition",
     # sales
     "AM":  "AM",  "am":  "AM",
     "VP":  "VP",  "vp":  "VP",
@@ -5310,10 +5410,10 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         "EmployeeHierarchyNode": "SELECT DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeeHierarchyNode IS NOT NULL ORDER BY v",
         "employee_type":      "SELECT DISTINCT Employee_Type AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Type IS NOT NULL ORDER BY v",
         "Employee_Type":      "SELECT DISTINCT Employee_Type AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Type IS NOT NULL ORDER BY v",
-        "location":           "SELECT DISTINCT Employee_Location AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Location IS NOT NULL ORDER BY v",
-        "Employee_Location":  "SELECT DISTINCT Employee_Location AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Location IS NOT NULL ORDER BY v",
-        "position":           "SELECT DISTINCT Employee_Position AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Position IS NOT NULL ORDER BY v",
-        "Employee_Position":  "SELECT DISTINCT Employee_Position AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Position IS NOT NULL ORDER BY v",
+        "location":           "SELECT DISTINCT EmployeeLocation AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeeLocation IS NOT NULL ORDER BY v",
+        "EmployeeLocation":  "SELECT DISTINCT EmployeeLocation AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeeLocation IS NOT NULL ORDER BY v",
+        "position":           "SELECT DISTINCT EmployeePosition AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeePosition IS NOT NULL ORDER BY v",
+        "EmployeePosition":  "SELECT DISTINCT EmployeePosition AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeePosition IS NOT NULL ORDER BY v",
         "AM":                 "SELECT DISTINCT AM AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE AM IS NOT NULL ORDER BY v",
         "am":                 "SELECT DISTINCT AM AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE AM IS NOT NULL ORDER BY v",
         "VP":                 "SELECT DISTINCT VP AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE VP IS NOT NULL ORDER BY v",
@@ -5587,7 +5687,7 @@ def _avail_kpis_sql(dept_scope: list | None = None) -> str:
 
 def _avail_skills_sql(limit: int = 50, min_count: int = 5, dept_scope: list | None = None) -> str:
     """Combined skill/competency tag list. Union of Allocation_data.emp_competency
-    (latest per employee) and Employee_Data.Employee_Position, with per-tag
+    (latest per employee) and Employee_Data.EmployeePosition, with per-tag
     DISTINCT-employee counts. Tags with fewer than min_count employees are
     hidden to keep the row digestible."""
     emp_id_emp   = _norm_emp_id("Employee_Code")
@@ -5595,7 +5695,7 @@ def _avail_skills_sql(limit: int = 50, min_count: int = 5, dept_scope: list | No
     return f"""
         WITH active_emp AS (
           SELECT {emp_id_emp} AS emp_id,
-                 COALESCE(NULLIF(TRIM(Employee_Position), ''), '') AS position
+                 COALESCE(NULLIF(TRIM(EmployeePosition), ''), '') AS position
           FROM {_bq_avail('Employee_Data')}
           WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
                 {_dept_scope_clause(dept_scope)}
@@ -5642,9 +5742,9 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
           SELECT {emp_id_emp} AS emp_id,
                  Employee_Code AS code,
                  Resource_Name AS name,
-                 COALESCE(NULLIF(TRIM(Employee_Position), ''), '') AS position,
+                 COALESCE(NULLIF(TRIM(EmployeePosition), ''), '') AS position,
                  COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS department,
-                 COALESCE(NULLIF(TRIM(Employee_Location), ''), '') AS location
+                 COALESCE(NULLIF(TRIM(EmployeeLocation), ''), '') AS location
           FROM {_bq_avail('Employee_Data')}
           WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
                 {_dept_scope_clause(dept_scope)}
@@ -6437,8 +6537,8 @@ A report = ONE BigQuery SELECT that produces ONE clean table of rows. The fronte
 
 WORKFORCE TABLES:
 - `ai-vertex-mahad.Satori_Project.Employee_Data`
-    Employee_Code, Resource_Name, Employee_Position, EmployeeHierarchyNode (= department),
-    Employee_Location, Employee_Type, Joining_Date, Gender.
+    Employee_Code, Resource_Name, EmployeePosition, EmployeeHierarchyNode (= department),
+    EmployeeLocation, Employee_Type, Joining_Date, Gender.
     Active employees filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
 
 - `ai-vertex-mahad.Satori_Project.Attendance_Data`
@@ -6986,8 +7086,8 @@ _DEFAULT_SCHEMA_SETTINGS = [
         "description": (
             "Master employee records (1,199 rows).\n"
             "Columns: Employee_Code (STRING, e.g. 'E-2141'), Resource_Name (STRING — full name), "
-            "Employee_Position (STRING), Employee_Email (STRING), EmployeeHierarchyNode (STRING = department), "
-            "Employee_Location (STRING — city), Employee_Status (STRING), Employee_Type (STRING — Permanent / MTO / Probation / Contractual Fixed term / Contractor / Freelancer / Internship), "
+            "EmployeePosition (STRING), EmployeeEmail (STRING), EmployeeHierarchyNode (STRING = department), "
+            "EmployeeLocation (STRING — city), Employee_Status (STRING), Employee_Type (STRING — Permanent / MTO / Probation / Contractual Fixed term / Contractor / Freelancer / Internship), "
             "Joining_Date, Gender.\n"
             "JOIN with Attendance_Data on UPPER(TRIM(Resource_Name)) = UPPER(TRIM(employee_name)) — "
             "Employee_Code does NOT match employee_id.\n"

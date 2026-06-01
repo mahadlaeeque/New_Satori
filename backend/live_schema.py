@@ -28,13 +28,13 @@ _PROBES = {
         "GROUP BY v ORDER BY n DESC LIMIT 30"
     ),
     "positions": (
-        "SELECT DISTINCT Employee_Position AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Position IS NOT NULL "
+        "SELECT DISTINCT EmployeePosition AS v, COUNT(*) AS n "
+        "FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeePosition IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 40"
     ),
     "locations": (
-        "SELECT DISTINCT Employee_Location AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Location IS NOT NULL "
+        "SELECT DISTINCT EmployeeLocation AS v, COUNT(*) AS n "
+        "FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeeLocation IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 30"
     ),
     "attendance_statuses": (
@@ -182,8 +182,8 @@ def render_context_block() -> str:
         "  Always use COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') AS department. Many rows have NULL/empty EmployeeHierarchyNode.\n"
         f"- Employee_Type values - {_format_distinct(get_rows('employee_types'))}\n"
         "  These are stored case-sensitive. ALWAYS wrap in LOWER() before comparing.\n"
-        f"- Positions (Employee_Position) - {_format_distinct(get_rows('positions'))}\n"
-        f"- Locations (Employee_Location) - {_format_distinct(get_rows('locations'))}\n\n"
+        f"- Positions (EmployeePosition) - {_format_distinct(get_rows('positions'))}\n"
+        f"- Locations (EmployeeLocation) - {_format_distinct(get_rows('locations'))}\n\n"
         "ATTENDANCE DIMENSIONS (Attendance_Data):\n"
         f"- Status values (attendance_status_text) - {_format_distinct(get_rows('attendance_statuses'))}\n"
         "  Stored case-sensitive. ALWAYS wrap in LOWER() before comparing. There is NO 'Late' status - the closest real value is 'Missing Punch'.\n\n"
