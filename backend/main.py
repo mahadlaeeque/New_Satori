@@ -2596,20 +2596,23 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                     else:
                         reply = "I wasn't able to generate a response. Please try again."
                     # Detect stalling: AI said "let me query" but didn't call the tool
-                    stall_phrases = ["please allow me", "please wait", "let me query", "let me retrieve",
-                                     "let me check", "i'll query", "i will query", "need to query",
-                                     "retrieve this information", "a moment to", "allow me a moment",
-                                     "i need to retrieve", "i need to fetch", "here is the bigquery",
-                                     "here is the sql", "here's the sql", "here is the query",
-                                     "here's the query", "following sql", "this sql query",
-                                     "calling sql tool", "calling the sql tool", "calling run_sql",
-                                     "to get", "to retrieve", "can help you with that",
-                                     # Refusal patterns that should trigger a tool call instead
-                                     "i don't have", "i do not have", "cannot provide", "can not provide",
-                                     "not available in", "not in the current data", "not included in",
-                                     "i cannot give", "i cannot provide", "data does not include",
-                                     "data doesn't include", "data doesn't contain", "data does not contain",
-                                     "not in the provided", "isn't in the", "is not available"]
+                    # Only match phrases that explicitly indicate the model is
+                    # ABOUT to write SQL as text or REFUSED to call the tool when
+                    # data is needed. Generic phrases like "to get", "to retrieve"
+                    # or "can help you with that" matched innocent greetings
+                    # ("Hi Sohaib! I can help you with that. What would you like
+                    # to know?") and incorrectly drove the chat into SQL-recovery,
+                    # which then failed and burned MAX_ROUNDS.
+                    stall_phrases = [
+                        "let me query", "let me retrieve", "let me run",
+                        "i'll query", "i will query", "need to query",
+                        "i need to retrieve", "i need to fetch",
+                        "here is the bigquery", "here is the sql",
+                        "here's the sql", "here is the query",
+                        "here's the query", "following sql", "this sql query",
+                        "calling sql tool", "calling the sql tool",
+                        "calling run_sql", "running the sql",
+                    ]
                     # Detect SQL-in-text. The model often gets cut off mid-SQL by max_output_tokens —
                     # in that case the opening ```sql fence has no closing fence, and a raw SELECT may
                     # have no FROM yet. Treat ANY of these as "model leaked SQL, recover".
@@ -2911,11 +2914,13 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                     # Check for stall / SQL-in-text. Truncated SQL (cut off by max_output_tokens)
                     # leaves an opening ```sql fence with no close — treat as "model leaked SQL".
                     reply_txt = resp.text or ""
-                    stall_phrases = ["i don't have", "i do not have", "cannot provide", "let me query",
-                                     "here is the sql", "here's the sql", "need to query",
-                                     "calling sql tool", "calling the sql tool", "calling run_sql",
-                                     "not available in", "data does not", "data doesn't",
-                                     "let me retrieve", "allow me a moment", "i need to retrieve"]
+                    stall_phrases = [
+                        "let me query", "let me retrieve", "let me run",
+                        "need to query", "i need to retrieve", "i need to fetch",
+                        "here is the sql", "here's the sql", "following sql",
+                        "calling sql tool", "calling the sql tool", "calling run_sql",
+                        "running the sql",
+                    ]
                     has_sql_fence_open = "```sql" in reply_txt.lower()
                     has_raw_sql_full = bool(re.search(r"\b(SELECT|WITH)\s+[\s\S]+?\s+FROM\s+", reply_txt, re.IGNORECASE))
                     has_with_clause  = bool(re.search(r"\bWITH\s+\w+\s+AS\s*\(", reply_txt, re.IGNORECASE))
