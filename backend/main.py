@@ -1769,38 +1769,50 @@ ATTENDANCE_BEHAVIOR_ADDON = """
 --- ATTENDANCE QUESTION DEFAULTS ---
 When the user asks about attendance for a period (a month, a week, a date range):
 
-1. PER-EMPLOYEE BREAKDOWN BY DEFAULT. Return one row per active employee in
-   scope with: employee_name, employee_email, present_days, late_days,
-   absent_days, leave_days, remote_days, missing_punch_days. Order by
-   absent_days DESC (worst attendance first). Cap at 50 rows.
+1. PER-EMPLOYEE BREAKDOWN BY DEFAULT. Issue ONE run_sql call that returns
+   one row per active employee in scope: employee_name, employee_email,
+   total_rows, present_days, late_days, absent_days, leave_days,
+   remote_days, missing_punch_days. Order by absent_days DESC (worst
+   attendance first). DO NOT cap inside SQL -- return every employee.
    Use COUNTIF(...) over Attendance_Data filtered to the period, joined to
-   Employee_Data via the standard digits-only employee-id rule.
+   Employee_Data via the standard digits-only employee-id rule + the
+   EmployeeHierarchyNode IN (...) scope filter from the USER CONTEXT block.
 
 2. CALENDAR vs WORKING DAYS. For a named month (e.g. "March 2026"):
-     calendar_days = number of dates in the month (use DATE_DIFF(LAST_DAY,
-       FIRST_DAY, DAY) + 1).
+     calendar_days = DATE_DIFF(LAST_DAY, FIRST_DAY, DAY) + 1.
      weekend_days  = COUNTIF of dates where is_weekend = 1.
      holiday_days  = COUNTIF of dates where is_holiday = 1 (de-duped).
      working_days  = calendar_days - weekend_days - holiday_days.
-   Compute attendance rate against working_days, NOT calendar_days. State
-   the working-day count in your summary so the user can sanity-check.
+   Compute attendance rate against working_days, NOT calendar_days.
 
-3. FOLLOW-UP HANDLING. If the user's next message asks "who missed the most
-   days" or "who was available every single day", re-use the SAME per-
-   employee table from your previous query. Single SQL turn — ORDER BY
-   absent_days DESC for "missed most", or filter present_days = working_days
-   for "every single day". Never re-aggregate at department level for a
-   per-employee follow-up.
-
-4. RESPONSE LAYOUT. Open with a 1-2 line summary stating: department name,
-   period, calendar days, weekend days, holiday days, working days,
-   average attendance rate. Then a bullet line per employee:
+3. RESPONSE LAYOUT -- PAGINATED.
+   Open with a 1-2 line summary stating: department(s), period,
+   calendar days, weekend days, holiday days, working days, total
+   employees found (N), average attendance rate.
+   Then bullet ONLY THE FIRST 20-25 employees from the SQL result
+   (already sorted worst-first). Format each as:
      **<name>** - present X / W (Y%), absent Z, leave L, remote R, missing M
-   Where W = working_days. Cap detailed bullets at 15; below 15 say
-   "<N more employees - ask 'show all' for the full list'".
+   where W = working_days.
+   If N > 25, end the message with EXACTLY this line so the user knows
+   how to drill in:
+     "Showing 25 of N. Reply 'show next 25' or 'show all' for the rest."
+   If N <= 25, show all and skip the prompt.
 
-5. NEVER report calendar_days as the denominator for attendance rate. Always
-   call out weekends + holidays separately.
+4. FOLLOW-UP HANDLING -- ZERO NEW QUERIES.
+   The full SQL result from step 1 is already in your conversation history
+   as a function_response (tool result block). For these follow-ups,
+   re-read THAT existing result -- do NOT call run_sql again:
+     "who missed the most days"   -> show top N by absent_days from prev
+     "who was here every day"     -> filter prev rows present_days = working_days
+     "show next 25"               -> next 25 bullets from prev rows
+     "show all"                   -> every employee from prev rows
+     "show me [name]"             -> just that one row from prev rows
+   Re-running run_sql for a follow-up risks getting a different result
+   (different snapshot, schema drift) and burns tokens. Only call run_sql
+   again if the user changes the PERIOD or the DEPARTMENT FILTER.
+
+5. NEVER report calendar_days as the denominator for attendance rate.
+   Always call out weekends + holidays separately.
 
 6. INJECTED-DATA EXCEPTION. If the user's turn already includes a TMC LIVE
    DATA block with per-employee figures, format them per the rules above
@@ -2670,10 +2682,11 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
                     temperature=0.7,
-                    max_output_tokens=2048,
+                    max_output_tokens=4096,
                     tools=[_CHAT_SQL_TOOL],
                     # Cap thinking budget so internal reasoning can't eat
-                    # the whole output allocation on a huge system prompt.
+                    # the whole output allocation. 4096 output is enough
+                    # for a 25-employee paginated bullet list + summary.
                     thinking_config=genai.types.ThinkingConfig(thinking_budget=512),
                 ),
             )
