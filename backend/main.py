@@ -2260,6 +2260,16 @@ def _dept_scope_addon_str(dept_scope: "list[str] | None") -> str:
         f"department outside the list above — not even by fuzzy/partial match. If the user asks "
         f"about another department, reply that it's outside their scope ({human}). Sales tables "
         f"(Sales_*) are NOT department-scoped and remain fully visible.\n"
+        f"NAMED-INDIVIDUAL QUESTIONS: when the user asks about a specific person by name, resolve "
+        f"that person ONLY within your department(s) — look them up in Employee_Data WHERE "
+        f"LOWER(EmployeeHierarchyNode) IN ({quoted_lower}) AND LOWER(Resource_Name) LIKE '%<name>%'. "
+        f"If NO matching employee exists in your department(s), that person belongs to another team "
+        f"and is OUTSIDE your access: respond plainly that you can't share their details because they "
+        f"aren't in your department(s), e.g. \"Since <name> isn't in your department ({human}), I can't "
+        f"share their details.\" In that case do NOT say 'no records found', do NOT offer to check a "
+        f"different time period, and do NOT offer to look up a different employee. Only when the person "
+        f"IS in your department but has no rows for the requested period do you say 'no records for "
+        f"<name> in <period>'.\n"
         "--- END SCOPE RESTRICTION ---"
     )
 
