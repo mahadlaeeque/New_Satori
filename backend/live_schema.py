@@ -90,7 +90,7 @@ _PROBES = {
     "join_compat_attendance": (
         "WITH e AS (SELECT DISTINCT LTRIM(REGEXP_REPLACE(CAST(Employee_Code AS STRING), r'[^0-9]', ''), '0') AS k "
         "  FROM `ai-vertex-mahad.Satori_Project.Employee_Data`), "
-        "a AS (SELECT DISTINCT LTRIM(REGEXP_REPLACE(CAST(employee_id AS STRING), r'[^0-9]', ''), '0') AS k "
+        "a AS (SELECT DISTINCT LTRIM(REGEXP_REPLACE(CAST(personal_no AS STRING), r'[^0-9]', ''), '0') AS k "
         "  FROM `ai-vertex-mahad.Satori_Project.Attendance_Data`) "
         "SELECT 'overlap' AS v, COUNT(*) AS n FROM e JOIN a USING (k) "
         "UNION ALL SELECT 'in_employee_only', COUNT(*) FROM e WHERE k NOT IN (SELECT k FROM a) "
@@ -201,7 +201,7 @@ def render_context_block() -> str:
         "  CORRECT JOIN PATTERN:\n"
         "      LEFT JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` e\n"
         "        ON UPPER(TRIM(e.Resource_Name)) = UPPER(TRIM(a.employee_name))\n\n"
-        "  DO NOT USE: CAST(e.Employee_Code AS STRING) = CAST(a.employee_id AS STRING)  - returns ~0 matches.\n"
+        "  DO NOT USE: CAST(e.Employee_Code AS STRING) = CAST(a.employee_id AS STRING) on Attendance_Data - employee_id is an unrelated INT64 sequence. The correct JOIN column is a.personal_no (STRING 'E-902') matching e.Employee_Code.\n"
         "  DO NOT USE: LTRIM(REGEXP_REPLACE(...digits...)) on Employee_Code/employee_id - also returns ~0 matches.\n\n"
         "- For Allocation_data -> Employee_Data, also join on name:\n"
         "      LEFT JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` e\n"

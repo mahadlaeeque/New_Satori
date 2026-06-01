@@ -1667,7 +1667,7 @@ DATA WAREHOUSE — `ai-vertex-mahad.Satori_Project` (10 tables):
 
 WORKFORCE TABLES
 1. `Employee_Data` — Employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name, EmployeePosition, EmployeeEmail, EmployeeHierarchyNode (department), EmployeeLocation (city), Employee_Status, Employee_Type ('MTO'/'Permanent'/'Probation'/'Contract'). Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
-2. `Attendance_Data` — Daily attendance per employee. Cols: attendance_date (DATE), employee_id (STRING/INT — CAST to STRING when joining), employee_name, employee_email, checkin_time (STRING HH:MM:SS), checkout_time (STRING), attendance_status_text ('Present'/'Absent'/'Late'/'Leave'/etc.), is_present (0/1), is_absent (0/1), is_on_leave (0/1), is_remote (0/1), is_holiday (0/1), is_weekend (0/1), leave_type_name. For "late": LOWER(attendance_status_text) = 'late'.
+2. `Attendance_Data` — Daily attendance per employee. Cols: attendance_date (DATE), personal_no (STRING, 'E-902' format — JOIN to Employee_Data on this), employee_id (INT64 sequence, NOT a JOIN key), employee_name, employee_email, checkin_time (STRING HH:MM:SS), checkout_time (STRING), attendance_status_text ('Present'/'Absent'/'Late'/'Leave'/etc.), is_present (0/1), is_absent (0/1), is_on_leave (0/1), is_remote (0/1), is_holiday (0/1), is_weekend (0/1), leave_type_name. For "late": LOWER(attendance_status_text) = 'late'.
 3. `Allocation_data` — Weekly project allocation. Cols: project_id, employee_id (STRING "E-1234"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Actual'/'Forecast'), Forecast_Flag, Date. Allocated = MAX(pct) >= 90; Partial = 1-89; Bench = 0/NULL.
 4. `Timesheet_Data` — Ticket/project hours. Cols: TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY, TICKET_DESCRIPTION, TICKET_SUBJECT. Join to employees on CAST(Employee_Code AS STRING) = CAST(TICKET_USER_ID AS STRING).
 
@@ -1684,11 +1684,11 @@ JOINS — CRITICAL JOIN-KEY NORMALIZATION:
 - Employee_Code is stored like "E-2141"; employee_id / TICKET_USER_ID are stored as bare numbers ("2141") or zero-padded. A direct CAST-to-STRING comparison returns ZERO matches and the join silently drops every row.
 - ALWAYS normalize both sides: strip non-digits and leading zeros before comparing. Use this exact pattern:
     LTRIM(REGEXP_REPLACE(CAST(<col> AS STRING), r'[^0-9]', ''), '0')
-- Employee_Data → Attendance_Data:
+- Employee_Data → Attendance_Data: JOIN on a.personal_no (Attendance_Data's STRING employee-code column like 'E-902', NOT the INT64 employee_id which is an unrelated sequence number)
     LEFT JOIN Attendance_Data a
       ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
-       = LTRIM(REGEXP_REPLACE(CAST(a.employee_id   AS STRING), r'[^0-9]', ''), '0')
-- Employee_Data → Allocation_data: same pattern, on a.employee_id.
+       = LTRIM(REGEXP_REPLACE(CAST(a.personal_no   AS STRING), r'[^0-9]', ''), '0')
+- Employee_Data → Allocation_data: JOIN on a.employee_id (Allocation_data's employee_id IS the 'E-2141' code).
 - Employee_Data → Timesheet_Data: same pattern, on t.TICKET_USER_ID.
 - Always use LEFT JOIN (not INNER) so attendance rows aren't dropped when the lookup table doesn't have a matching row.
 - EmployeeHierarchyNode is the DEPARTMENT field. Group by COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''), 'Unspecified') AS department.
@@ -1951,7 +1951,7 @@ CRITICAL: If you are not sure which exact column to use, STILL CALL run_sql with
 
 WORKFORCE
   • Employee_Data — Employee_Code, Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Joining_Date, Gender. Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation','contractual fixed term').
-  • Attendance_Data — attendance_date (DATE), employee_id, employee_name, employee_email, checkin_time (STRING HH:MM:SS — for the moment they checked in), checkout_time (STRING HH:MM:SS — for the moment they checked out), attendance_status_text ('Present'/'Absent'/'Weekend'/'Holiday'/'On Leave'/'Missing Punch'/'Remote Work'), is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1). NO 'Late' status — closest concept is 'Missing Punch'.
+  • Attendance_Data — attendance_date (DATE), personal_no (STRING 'E-902' — JOIN to Employee_Data on this), employee_id (INT64 sequence, not a JOIN key), employee_name, employee_email, checkin_time (STRING HH:MM:SS — for the moment they checked in), checkout_time (STRING HH:MM:SS — for the moment they checked out), attendance_status_text ('Present'/'Absent'/'Weekend'/'Holiday'/'On Leave'/'Missing Punch'/'Remote Work'), is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1). NO 'Late' status — closest concept is 'Missing Punch'.
   • Allocation_data — project_id, employee_id, emp_name, allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Allocated'/'Bench'), Date, Week, Year, Month.
   • Timesheet_Data — TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (INT YYYYMMDD — use SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)) for date filters).
 
@@ -2255,7 +2255,7 @@ USER:
 WAREHOUSE CONTEXT:
 - Workforce data tables in `capability-agent-prod.Satori_Project`:
   * Employee_Data (EmployeeHierarchyNode column = department)
-  * Attendance_Data (joined via employee_id)
+  * Attendance_Data (JOIN on personal_no, NOT employee_id)
   * Allocation_data (joined via employee_id)
   * Timesheet_Data (joined via TICKET_USER_ID)
   * Practice_Heads_List
@@ -2276,13 +2276,13 @@ REQUIRED SQL JOIN PATTERN (copy this verbatim - do not invent variants, the IN c
   SELECT a.*, e.Resource_Name, e.EmployeeHierarchyNode
   FROM `capability-agent-prod.Satori_Project.Attendance_Data` a
   INNER JOIN `capability-agent-prod.Satori_Project.Employee_Data` e
-    ON LTRIM(REGEXP_REPLACE(CAST(a.employee_id AS STRING), r'[^0-9]', ''), '0')
+    ON LTRIM(REGEXP_REPLACE(CAST(a.personal_no AS STRING), r'[^0-9]', ''), '0')
      = LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
   WHERE e.EmployeeHierarchyNode IN ({department_list_quoted})
     AND LOWER(COALESCE(e.Employee_Type, '')) IN ('mto','permanent','probation')
 
-  -- Same shape for Allocation_data (join on a.employee_id) and
-  -- Timesheet_Data (join on a.TICKET_USER_ID).
+  -- For Allocation_data, use a.employee_id (it's the 'E-2141' code) NOT personal_no.
+  -- For Timesheet_Data, use a.TICKET_USER_ID (bare digits like '1643').
 
 Use INNER JOIN (not LEFT) when scoped, so employees outside the dept can't sneak in via NULL-matches. The IN clause is REQUIRED even when {departments_count} = 1.
 
@@ -3705,7 +3705,7 @@ def attendance_overview_data(user: dict = Depends(get_current_user)):
       COUNT(*) AS qty
     FROM {_TMC_DATASET}.Attendance_Data a
     LEFT JOIN {_TMC_DATASET}.Employee_Data e
-      ON CAST(e.Employee_Code AS STRING) = CAST(a.employee_id AS STRING)
+      ON CAST(e.Employee_Code AS STRING) = CAST(a.personal_no AS STRING)
     WHERE a.is_present = 1
       AND a.attendance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
     GROUP BY dealer_name
@@ -3719,7 +3719,7 @@ def attendance_overview_data(user: dict = Depends(get_current_user)):
       SUM(a.is_present) AS qty
     FROM {_TMC_DATASET}.Attendance_Data a
     LEFT JOIN {_TMC_DATASET}.Employee_Data e
-      ON CAST(e.Employee_Code AS STRING) = CAST(a.employee_id AS STRING)
+      ON CAST(e.Employee_Code AS STRING) = CAST(a.personal_no AS STRING)
     WHERE a.attendance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
     GROUP BY name ORDER BY qty DESC
     """
@@ -3732,7 +3732,7 @@ def attendance_overview_data(user: dict = Depends(get_current_user)):
       COUNT(*) AS qty
     FROM {_TMC_DATASET}.Attendance_Data a
     LEFT JOIN {_TMC_DATASET}.Employee_Data e
-      ON CAST(e.Employee_Code AS STRING) = CAST(a.employee_id AS STRING)
+      ON CAST(e.Employee_Code AS STRING) = CAST(a.personal_no AS STRING)
     WHERE a.attendance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
       AND a.attendance_status_text IS NOT NULL
     GROUP BY dealer_name, product
@@ -3756,7 +3756,7 @@ def attendance_overview_data(user: dict = Depends(get_current_user)):
       e.EmployeePosition                        AS district
     FROM {_TMC_DATASET}.Attendance_Data a
     LEFT JOIN {_TMC_DATASET}.Employee_Data e
-      ON CAST(e.Employee_Code AS STRING) = CAST(a.employee_id AS STRING)
+      ON CAST(e.Employee_Code AS STRING) = CAST(a.personal_no AS STRING)
     WHERE a.attendance_date IS NOT NULL
     ORDER BY a.attendance_date DESC LIMIT 2000
     """
@@ -4028,7 +4028,7 @@ DATA QUALITY (READ TWICE — these are the column-type rules that break queries)
     Sales_Pipeline_Health.Open_Deals (INT64), Sales_Pipeline_Health.Win_Rate_by (FLOAT64)
     Attendance_Data.is_present / is_absent / is_on_leave / is_remote / is_holiday / is_weekend (INT64 0/1)
     Attendance_Data.attendance_date (DATE)
-    Attendance_Data.employee_id (INT64)
+    Attendance_Data.employee_id (INT64, sequence number) | personal_no (STRING 'E-902' - JOIN key to Employee_Data.employee_code)
 - ❌ NEVER do: REPLACE(Coverage_Ratio, ',', ''), REPLACE(Hist_Win_Rate, '%', ''), SAFE_CAST(is_present AS STRING).
   These columns are ALREADY numeric. REPLACE only takes STRING args and BQ will throw "No matching signature for function REPLACE Argument types: FLOAT64, STRING, STRING".
 - ✅ DO instead: ROUND(Coverage_Ratio * 100, 1), ROUND(Hist_Win_Rate * 100, 1), SUM(is_present).
@@ -4164,7 +4164,7 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
       "type": "bar", "variant": "horizontal",
       "labelKey": "department",
       "valueKeys": ["attendance_pct"],
-      "sql": "SELECT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') AS department, ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1) AS attendance_pct FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` a JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` e ON CAST(e.Employee_Code AS STRING)=CAST(a.employee_id AS STRING) WHERE attendance_date BETWEEN DATE_SUB(CURRENT_DATE(),INTERVAL 30 DAY) AND CURRENT_DATE() {{where}} GROUP BY department ORDER BY attendance_pct DESC LIMIT 50"}}
+      "sql": "SELECT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') AS department, ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1) AS attendance_pct FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` a JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` e ON CAST(e.Employee_Code AS STRING)=CAST(a.personal_no AS STRING) WHERE attendance_date BETWEEN DATE_SUB(CURRENT_DATE(),INTERVAL 30 DAY) AND CURRENT_DATE() {{where}} GROUP BY department ORDER BY attendance_pct DESC LIMIT 50"}}
   ]
 }}}}
 
@@ -4198,9 +4198,22 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
 - Bench classify on MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per Employee_Code.
 - Win rate display: multiply Hist_Win_Rate by 100.
 - Department grouping: COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''), 'Unspecified') AS department.
-- Join keys (CRITICAL — direct CAST-to-STRING returns 0 matches because Employee_Code is stored like 'E-2141' while employee_id is '2141'). Use LTRIM(REGEXP_REPLACE(CAST(<col> AS STRING), r'[^0-9]', ''), '0') on BOTH sides:
-    LEFT JOIN ... e ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
-                     = LTRIM(REGEXP_REPLACE(CAST(a.employee_id   AS STRING), r'[^0-9]', ''), '0')
+- Join keys (CRITICAL): Different tables use different JOIN columns. Always normalize both sides with LTRIM(REGEXP_REPLACE(CAST(<col> AS STRING), r'[^0-9]', ''), '0') so 'E-902' and '902' both reduce to '902'.
+
+    -- Attendance_Data: JOIN on personal_no (NOT employee_id - employee_id is an INT64 sequence like 3765, personal_no is the 'E-902' code).
+    LEFT JOIN `<proj>.<ds>.Attendance_Data` a
+      ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
+       = LTRIM(REGEXP_REPLACE(CAST(a.personal_no   AS STRING), r'[^0-9]', ''), '0')
+
+    -- Allocation_data: JOIN on employee_id (here employee_id IS the 'E-2141' / 'I-2024' code).
+    LEFT JOIN `<proj>.<ds>.Allocation_data` a
+      ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
+       = LTRIM(REGEXP_REPLACE(CAST(a.employee_id   AS STRING), r'[^0-9]', ''), '0')
+
+    -- Timesheet_Data: JOIN on TICKET_USER_ID (numeric like '1643').
+    LEFT JOIN `<proj>.<ds>.Timesheet_Data` t
+      ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
+       = LTRIM(REGEXP_REPLACE(CAST(t.TICKET_USER_ID AS STRING), r'[^0-9]', ''), '0')
   And ALWAYS use LEFT JOIN (not plain JOIN) so attendance rows survive even if Employee_Data has no matching row.
 - EmployeeHierarchyNode is the DEPARTMENT — never call it anything else.
 - 📅 Date scope: today's date is May 2026. When the user says "last month" you mean April 2026; "this month" means May 2026. If they name a month (e.g. "March 2026"), use that exact month's first/last day.
