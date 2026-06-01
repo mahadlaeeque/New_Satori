@@ -1151,6 +1151,73 @@ def admin_practice_heads_import(body: dict, admin: dict = Depends(require_admin)
     }
 
 
+@app.post("/api/admin/users/resync-practice-head-scopes")
+def admin_resync_practice_head_scopes(admin: dict = Depends(require_admin)):
+    """One-shot fixer for already-imported practice heads whose
+    user_data_scope rows were stored with the WRONG value -- e.g. the
+    parent label 'Capability (Functional)' instead of the comma-split leaf
+    list ('SAP Finance', 'SAP Controlling'). Re-reads Practice_Heads_List
+    from BigQuery, matches each row to an existing user by email, replaces
+    that user's department scope rows in place. Idempotent."""
+    rows, err = _read_practice_heads_from_bq()
+    if err:
+        raise HTTPException(status_code=502, detail=err)
+    db = get_db()
+    cur = db.cursor()
+    updated, missing = 0, 0
+    for r in rows:
+        email = (r.get("email") or "").strip().lower()
+        if not email:
+            continue
+        cur.execute("SELECT id FROM users WHERE email = ?", (email,))
+        row = cur.fetchone()
+        if not row:
+            missing += 1
+            continue
+        uid = row["id"] if isinstance(row, dict) else row[0]
+        dept_raw = r.get("department") or r.get("hierarchy_node") or ""
+        leaves = [s.strip() for s in dept_raw.split(",") if s.strip()]
+        if not leaves:
+            continue
+        cur.execute(
+            "DELETE FROM user_data_scope WHERE user_id = ? AND dimension = ?",
+            (uid, "department"),
+        )
+        if USE_POSTGRES_FLAG():
+            cur.execute(
+                "INSERT INTO user_data_scope_policy (user_id, dimension, enforced) "
+                "VALUES (?, ?, ?) ON CONFLICT (user_id, dimension) DO UPDATE "
+                "SET enforced = EXCLUDED.enforced",
+                (uid, "department", 1),
+            )
+            for leaf in leaves:
+                cur.execute(
+                    "INSERT INTO user_data_scope (user_id, dimension, value) "
+                    "VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+                    (uid, "department", leaf),
+                )
+        else:
+            cur.execute(
+                "INSERT OR REPLACE INTO user_data_scope_policy (user_id, dimension, enforced) "
+                "VALUES (?, ?, ?)",
+                (uid, "department", 1),
+            )
+            for leaf in leaves:
+                cur.execute(
+                    "INSERT OR IGNORE INTO user_data_scope (user_id, dimension, value) "
+                    "VALUES (?, ?, ?)",
+                    (uid, "department", leaf),
+                )
+        updated += 1
+        try:
+            _scope_policy_cache.pop(int(uid), None)
+        except Exception:
+            pass
+    db.commit()
+    db.close()
+    return {"updated": updated, "no_user": missing, "total_rows": len(rows)}
+
+
 # ── System Settings helpers + endpoints ──────────────────────────────────────
 
 def _get_system_setting(key: str, default: str = "") -> str:
