@@ -2159,9 +2159,25 @@ OUTPUT (return ONLY the addon text, no preamble, no markdown headers):
 USER CONTEXT - {name} (department: {department})
 
 DATA ACCESS POLICY (treat as a HARD rule for every query you write):
-- Workforce queries (Employee_Data, Attendance_Data, Allocation_data, Timesheet_Data, Practice_Heads_List): restrict to employees whose Employee_Hierarchy equals "{department}". When joining these tables, ALWAYS include a JOIN to Employee_Data and filter Employee_Data.Employee_Hierarchy = "{department}". NEVER return employee, attendance, allocation, timesheet, or practice data for any other department.
+- Workforce queries (Employee_Data, Attendance_Data, Allocation_data, Timesheet_Data, Practice_Heads_List): restrict to employees whose Employee_Hierarchy equals "{department}". NEVER return employee, attendance, allocation, timesheet, or practice data for any other department.
 - Sales queries (Sales_*, Account_Coverage_Plan__*, Project_Master): full visibility, no restriction.
 - Admin-only data (other users' login history, audit logs, system settings): NO access.
+
+REQUIRED SQL JOIN PATTERN (copy this verbatim - do not invent variants):
+
+  -- Attendance scoped to {department}:
+  SELECT a.*, e.Resource_Name, e.Employee_Hierarchy
+  FROM `capability-agent-prod.Satori_Project.Attendance_Data` a
+  INNER JOIN `capability-agent-prod.Satori_Project.Employee_Data` e
+    ON LTRIM(REGEXP_REPLACE(CAST(a.employee_id AS STRING), r'[^0-9]', ''), '0')
+     = LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
+  WHERE e.Employee_Hierarchy = "{department}"
+    AND LOWER(COALESCE(e.Employee_Type, '')) IN ('mto','permanent','probation')
+
+  -- Same shape for Allocation_data (join on a.employee_id) and
+  -- Timesheet_Data (join on a.TICKET_USER_ID).
+
+Use INNER JOIN (not LEFT) when scoped, so employees outside the dept can't sneak in via NULL-matches.
 
 OUT-OF-SCOPE BEHAVIOUR: if {name} asks about employees / attendance / allocation / timesheets / practice heads outside the {department} department, reply with EXACTLY:
   "I don't have that data available for your role - it's outside the {department} department's scope."
@@ -2725,6 +2741,48 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                             ))],
                         ))
                     continue
+
+                # Refusal unmask: if Gemini composed a polite "I'm sorry, I
+                # had a technical issue" reply, surface the actual last tool
+                # error so the user (and we) can see what really failed
+                # instead of getting a vague apology.
+                _refusal_markers = [
+                    "technical issue", "persistent issue", "persistent technical",
+                    "i apologize", "i'm sorry", "i am sorry",
+                    "encountering a", "encountering an", "encountered a",
+                    "encountered an", "cannot retrieve", "could not retrieve",
+                    "unable to retrieve", "unable to filter",
+                    "data access problem", "data access issue",
+                ]
+                _has_refusal = any(m in reply.lower() for m in _refusal_markers)
+                if _has_refusal:
+                    # Find the most recent function_response that contains an
+                    # error or "0 rows" message.
+                    _last_err = ""
+                    try:
+                        for _c in reversed(contents):
+                            if getattr(_c, "role", "") != "user":
+                                continue
+                            for _p in getattr(_c, "parts", []) or []:
+                                fr = getattr(_p, "function_response", None)
+                                if fr and getattr(fr, "response", None):
+                                    resp_obj = fr.response
+                                    _last = resp_obj.get("result") if isinstance(resp_obj, dict) else None
+                                    if _last and ("Query error" in str(_last) or
+                                                  "0 rows" in str(_last) or
+                                                  "error" in str(_last).lower()[:30]):
+                                        _last_err = str(_last)[:500]
+                                        break
+                            if _last_err:
+                                break
+                    except Exception:
+                        pass
+                    if _last_err:
+                        reply = (reply.rstrip()
+                                 + "\n\n---\nDIAGNOSTIC (the actual BigQuery "
+                                 + "result that caused the refusal above):\n\n"
+                                 + _last_err)
+
                 return {"reply": reply}
 
             # Execute each function call and append results
