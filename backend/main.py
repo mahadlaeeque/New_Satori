@@ -2122,6 +2122,166 @@ def _enforce_dept_scope_on_sql(sql: str, dept_scope: "list[str] | None") -> str:
     return sql.rstrip().rstrip(";") + f"\nWHERE {scope_clause}"
 
 
+# ============================================================================
+# Gatekeeper scope agent (new design)
+# ----------------------------------------------------------------------------
+# When a user opens chat / voice for the first time in this process, we
+# call Gemini with their name + department + role and ask it to write a
+# scope policy in natural language. The policy is cached per user_id for
+# the process lifetime so subsequent requests don't pay the LLM latency.
+# The policy is then prepended to every system prompt - chat, voice,
+# dashboard refine, report refine - so the main agent treats it as a
+# hard rule. Out-of-scope questions get a fixed refusal phrase.
+# ============================================================================
+
+_scope_policy_cache: "dict[int, str]" = {}
+
+_SCOPE_AGENT_PROMPT = """You are the Satori Data-Access Policy Agent at TallyMarks Consulting (TMC).
+
+A user is signing in to Satori. Based on their role and the department they head, decide what workforce data they should be allowed to query through the main Satori agent, and write that policy as direct instructions to the main agent.
+
+USER:
+- Name: {name}
+- Department they head (or work in): {department}
+- Role: {role}
+
+WAREHOUSE CONTEXT:
+- Workforce data tables in `capability-agent-prod.Satori_Project`:
+  * Employee_Data (Employee_Hierarchy column = department)
+  * Attendance_Data (joined via employee_id)
+  * Allocation_data (joined via employee_id)
+  * Timesheet_Data (joined via TICKET_USER_ID)
+  * Practice_Heads_List
+- Sales data tables in the same project (Sales_Accounts, Sales_AM_Scorecard, Sales_Pipeline_Health, Sales_Plan_vs_Pipeline, Sales_Hunting_Gap, Sales_KPI_Scorecard, Sales_Dormant_Accounts, Sales_Workload_Feasibility, Account_Coverage_Plan__*, Project_Master) are shared - everyone sees them.
+
+OUTPUT (return ONLY the addon text, no preamble, no markdown headers):
+
+USER CONTEXT - {name} (department: {department})
+
+DATA ACCESS POLICY (treat as a HARD rule for every query you write):
+- Workforce queries (Employee_Data, Attendance_Data, Allocation_data, Timesheet_Data, Practice_Heads_List): restrict to employees whose Employee_Hierarchy equals "{department}". When joining these tables, ALWAYS include a JOIN to Employee_Data and filter Employee_Data.Employee_Hierarchy = "{department}". NEVER return employee, attendance, allocation, timesheet, or practice data for any other department.
+- Sales queries (Sales_*, Account_Coverage_Plan__*, Project_Master): full visibility, no restriction.
+- Admin-only data (other users' login history, audit logs, system settings): NO access.
+
+OUT-OF-SCOPE BEHAVIOUR: if {name} asks about employees / attendance / allocation / timesheets / practice heads outside the {department} department, reply with EXACTLY:
+  "I don't have that data available for your role - it's outside the {department} department's scope."
+
+ADDRESSING: Greet and address {name} by their first name (first word of their name) whenever it sounds natural. Sign off with their first name when appropriate.
+"""
+
+
+def _admin_unrestricted_addon(user: dict) -> str:
+    """Admins (including superadmin) get unrestricted access. We still
+    prepend the user-context block so the main agent addresses them by
+    name and knows their role."""
+    name = (user.get("name") or user.get("full_name") or "Admin").strip()
+    first = name.split()[0] if name else "Admin"
+    return (
+        f"\n\nUSER CONTEXT - {name} (role: admin)\n"
+        f"DATA ACCESS POLICY: unrestricted. {first} can query any table "
+        f"in capability-agent-prod.Satori_Project including cross-"
+        f"department workforce data and all sales data.\n"
+        f"ADDRESSING: address {first} by their first name when natural.\n"
+    )
+
+
+def _compute_scope_policy(user: dict) -> str:
+    """Call Gemini once (per user_id, per process) to compute the scope
+    policy text. Cached forever (process restart re-computes). For admins
+    we skip the LLM call and return a deterministic unrestricted policy.
+    Returns the system-prompt-addon text the main agent will treat as
+    a hard rule."""
+    try:
+        uid = int(user.get("sub") or user.get("id") or 0)
+    except Exception:
+        uid = 0
+    if uid in _scope_policy_cache:
+        return _scope_policy_cache[uid]
+
+    role = (user.get("role") or "user").strip().lower()
+    if role == "admin":
+        addon = _admin_unrestricted_addon(user)
+        _scope_policy_cache[uid] = addon
+        return addon
+
+    name = (user.get("name") or user.get("full_name") or "User").strip() or "User"
+    # Find the dept from the user_data_scope table (Practice Heads import
+    # writes a row there). Fall back to "your" if unknown.
+    try:
+        from database import get_db
+        db = get_db(); cur = db.cursor()
+        cur.execute(
+            "SELECT value FROM user_data_scope WHERE user_id = ? "
+            "AND dimension = 'department' LIMIT 1",
+            (uid,),
+        )
+        row = cur.fetchone()
+        db.close()
+        dept = (row["value"] if isinstance(row, dict) and row else
+                (row[0] if row else None)) or "your"
+    except Exception as e:
+        print(f"[scope-agent] could not load dept for user {uid}: {e}")
+        dept = "your"
+
+    # Skip the Gemini call if dept is unknown - just produce a generic
+    # unrestricted policy so the chat keeps working.
+    if not dept or dept == "your":
+        addon = (
+            f"\n\nUSER CONTEXT - {name}\n"
+            f"DATA ACCESS POLICY: unrestricted (no department assigned).\n"
+            f"ADDRESSING: address {name.split()[0]} by their first name "
+            f"when natural.\n"
+        )
+        _scope_policy_cache[uid] = addon
+        return addon
+
+    try:
+        client = get_genai_client()
+        prompt = _SCOPE_AGENT_PROMPT.format(name=name, department=dept, role=role)
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[genai.types.Content(
+                role="user",
+                parts=[genai.types.Part(text=prompt)],
+            )],
+            config=genai.types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=600,
+            ),
+        )
+        addon_text = (resp.text or "").strip()
+        if not addon_text:
+            raise RuntimeError("scope agent returned empty text")
+        addon = "\n\n" + addon_text + "\n"
+        _scope_policy_cache[uid] = addon
+        print(f"[scope-agent] computed policy for uid={uid} dept={dept!r}")
+        return addon
+    except Exception as e:
+        print(f"[scope-agent] FAILED for uid={uid} dept={dept!r}: {e}")
+        # Static fallback so chat keeps working even if Gemini is down.
+        first = name.split()[0]
+        addon = (
+            f"\n\nUSER CONTEXT - {name} (department: {dept})\n"
+            f"DATA ACCESS POLICY: Workforce queries restricted to "
+            f"Employee_Hierarchy = \"{dept}\". Sales tables unrestricted.\n"
+            f"OUT-OF-SCOPE REPLY: \"I don\'t have that data available for "
+            f"your role - it\'s outside the {dept} department\'s scope.\"\n"
+            f"ADDRESSING: call {first} by their first name when natural.\n"
+        )
+        _scope_policy_cache[uid] = addon
+        return addon
+
+
+def _user_context_addon(user: dict) -> str:
+    """Thin wrapper: returns the cached / freshly-computed scope-policy
+    addon for this user. Safe to call on every chat/voice/dashboard/
+    report request - the underlying agent call only fires on the FIRST
+    call per user_id per process."""
+    if not user:
+        return ""
+    return _compute_scope_policy(user)
+
+
 def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None, dept_scope: list[str] | None = None) -> str:
     """Execute a SQL query from the chat tool and return formatted results.
 
@@ -2151,13 +2311,9 @@ def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None, dept_scope
     if any(f" {f} " in f" {upper} " for f in forbidden):
         return "Error: DDL/DML operations are not allowed."
 
-    # ── Hard-enforce plant scope ──────────────────────────────────────────────
-    if dept_scope is not None:
-        if not dept_scope:
-            print('[CHAT-SQL] dept_scope is empty - returning NO_ACCESS sentinel')
-            return 'You do not have any department access configured yet. Ask an admin to set this up in System Settings.'
-        sql_stripped = _enforce_dept_scope_on_sql(sql_stripped, dept_scope)
-        print(f'[CHAT-SQL] Dept scope enforced: allowed={dept_scope}')
+    # Dept-scope enforcement is now done in the system prompt via the
+    # gatekeeper-agent context addon. _execute_chat_sql trusts the SQL
+    # that Gemini produces; the scope is enforced upstream.
     if plant_scope is not None:
         if not plant_scope:
             return (
@@ -2170,30 +2326,7 @@ def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None, dept_scope
     # ─────────────────────────────────────────────────────────────────────────
 
     # Rewrite legacy ai-vertex-mahad project refs to the live BQ_PROJECT.
-    # Gemini's prompt examples still hard-code the legacy name; without this
-    # rewrite every chat turn would target the old project and fail.
     sql_stripped = normalize_bq_project(sql_stripped)
-
-    # If the dept-scope enforcer refused the SQL (workforce table without
-    # Employee_Data join), short-circuit with a clear message that Gemini
-    # will see in the tool result -- otherwise BQ returns 0 rows and Gemini
-    # interprets that as "no matching data" and keeps retrying.
-    if "SCOPE_REFUSED" in sql_stripped[:80].upper():
-        print("[CHAT-SQL] SCOPE_REFUSED short-circuit -- telling Gemini to add JOIN")
-        return ("SCOPE_REFUSED: This query touches a workforce table "
-                "(Attendance_Data / Allocation_data / Timesheet_Data / "
-                "Practice_Heads_List) but does NOT join to Employee_Data. "
-                "I cannot run this safely for a department-scoped user. "
-                "Re-run with a LEFT JOIN to Employee_Data on the "
-                "digits-only employee id, e.g.:\n"
-                "  LEFT JOIN `Employee_Data` e ON "
-                "LTRIM(REGEXP_REPLACE(CAST(<their_emp_col> AS STRING), "
-                "r'[^0-9]', ''), '0') = "
-                "LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), "
-                "r'[^0-9]', ''), '0')\n"
-                "Then issue exactly ONE more run_sql call with the joined "
-                "query. Do not give up.")
-
     print(f"[CHAT-SQL] Running: {sql_stripped[:300]}")
     result = run_query(sql_stripped, max_rows=500)
     if "error" in result:
@@ -2298,11 +2431,8 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
     # explicitly filters to an unauthorized plant.
     scope_addon = ""
     chat_plant_scope: list[str] | None = None  # None = unrestricted
-    chat_dept_scope: list[str] | None = None  # workforce-data restriction
     if (user.get("role") or "").lower() != "admin":
         chat_plant_scope = _get_user_plant_scope(uid)
-        chat_dept_scope = _get_user_dept_scope(uid)
-        scope_addon += _dept_scope_addon_str(chat_dept_scope)
         if chat_plant_scope is not None:
             if chat_plant_scope:
                 plant_list = ", ".join(f"'{p}'" for p in chat_plant_scope)
@@ -2338,7 +2468,8 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
         ANALYST_COMMON_SENSE + "\n\n" +
         (VOICE_SYSTEM_PROMPT_URDU if body.voice_mode else SYSTEM_PROMPT) +
         _build_date_context() + scope_addon + "\n\n" + _schema_notes + "\n\n" + _live_snap +
-        ATTENDANCE_BEHAVIOR_ADDON
+        ATTENDANCE_BEHAVIOR_ADDON +
+        _user_context_addon(user)
     )
 
     try:
@@ -2508,7 +2639,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                         sql_is_runnable = bool(extracted_sql and re.search(r"\bSELECT\b[\s\S]+?\bFROM\b", extracted_sql, re.IGNORECASE))
                         if sql_is_runnable:
                             print(f"[CHAT] Auto-executing extracted SQL (len={len(extracted_sql)})")
-                            result_text = _execute_chat_sql(extracted_sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
+                            result_text = _execute_chat_sql(extracted_sql, plant_scope=chat_plant_scope)
                             contents.append(genai.types.Content(
                                 role="model",
                                 parts=[genai.types.Part(text=reply)],
@@ -2548,7 +2679,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                         print(f"[CHAT] round {round_num+1} — run_sql with EMPTY sql; full args keys={list(args.keys())} repr={repr(args)[:300]}")
                     else:
                         print(f"[CHAT] round {round_num+1} — run_sql ({len(sql)} chars)")
-                    result_text = _execute_chat_sql(sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
+                    result_text = _execute_chat_sql(sql, plant_scope=chat_plant_scope)
                 else:
                     result_text = f"Unknown function: {fc.name}"
                 fr_parts.append(genai.types.Part.from_function_response(
@@ -2646,7 +2777,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                 extracted_sql = sel_match.group(1).strip()
         if extracted_sql:
             print(f"[CHAT] Fallback: executing SQL extracted from final response")
-            result_text = _execute_chat_sql(extracted_sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
+            result_text = _execute_chat_sql(extracted_sql, plant_scope=chat_plant_scope)
             # Summarize the result using Gemini (no tools)
             summary_contents = [genai.types.Content(
                 role="user",
@@ -2717,12 +2848,9 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
     # Plant scope — same enforcement as /api/chat
     uid_stream = int(user["sub"])
     chat_plant_scope: list[str] | None = None
-    chat_dept_scope: list[str] | None = None
     scope_addon_stream = ""
     if (user.get("role") or "").lower() != "admin":
         chat_plant_scope = _get_user_plant_scope(uid_stream)
-        chat_dept_scope = _get_user_dept_scope(uid_stream)
-        scope_addon_stream += _dept_scope_addon_str(chat_dept_scope)
         if chat_plant_scope is not None:
             if chat_plant_scope:
                 plant_list = ", ".join(f"'{p}'" for p in chat_plant_scope)
@@ -2748,7 +2876,8 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
         ANALYST_COMMON_SENSE + "\n\n" +
         SYSTEM_PROMPT + _build_date_context() + scope_addon_stream + "\n\n" +
         _schema_notes_s + "\n\n" + _live_snap_s +
-        ATTENDANCE_BEHAVIOR_ADDON
+        ATTENDANCE_BEHAVIOR_ADDON +
+        _user_context_addon(user)
     )
 
     def generate():
@@ -2809,7 +2938,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                         sql_is_runnable = bool(extracted and re.search(r"\bSELECT\b[\s\S]+?\bFROM\b", extracted, re.IGNORECASE))
                         if sql_is_runnable:
                             local_contents.append(genai.types.Content(role="model", parts=[genai.types.Part(text=reply_txt)]))
-                            result_text = _execute_chat_sql(extracted, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
+                            result_text = _execute_chat_sql(extracted, plant_scope=chat_plant_scope)
                             local_contents.append(genai.types.Content(
                                 role="user",
                                 parts=[genai.types.Part(text=f"[SQL auto-executed]\nResult:\n{result_text}\n\nNow give a direct answer in plain language. No SQL, no announcements.")],
@@ -2841,7 +2970,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                             print(f"[CHAT-STREAM] round {round_num+1} — run_sql with EMPTY sql; full args keys={list(args.keys())} repr={repr(args)[:300]}")
                         else:
                             print(f"[CHAT-STREAM] round {round_num+1} — run_sql ({len(sql_arg)} chars)")
-                        result_text = _execute_chat_sql(sql_arg, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
+                        result_text = _execute_chat_sql(sql_arg, plant_scope=chat_plant_scope)
                     else:
                         result_text = f"Unknown function: {fc.name}"
                     fr_parts.append(genai.types.Part.from_function_response(
@@ -3745,7 +3874,7 @@ CRITICAL RULES:
 """
 
 
-def refine_dashboard(user_message: str, history: list, existing_config=None, dept_scope_addon: str = '') -> str:
+def refine_dashboard(user_message: str, history: list, existing_config=None, scope_addon: str = '') -> str:
     """Chat-based dashboard refinement. Returns AI text or JSON when ready."""
     client = get_genai_client()
     tables = discover_tables()
@@ -3763,7 +3892,7 @@ def refine_dashboard(user_message: str, history: list, existing_config=None, dep
         system + "\n\n" +
         _load_schema_settings_block() + "\n\n" +
         live_schema.render_context_block() +
-        (dept_scope_addon or "")
+        (scope_addon or "")
     )
 
     contents = []
@@ -3882,14 +4011,9 @@ def voice_session(user: dict = Depends(get_current_user)):
     # inside VOICE_SYSTEM_PROMPT_EN is enough for voice. We still inject the
     # compact common-sense block (active-only, working days, distinct
     # employees, etc.) — it's small enough to fit alongside the tool defs.
-    # Inject the user's dept-scope restriction into the voice agent's
-    # system_instruction so it knows to filter every SQL call.
-    _voice_dept_scope = None
-    if (user.get("role") or "").lower() != "admin":
-        _voice_dept_scope = _get_user_dept_scope(int(user["sub"]))
     system_instruction = (
         ANALYST_COMMON_SENSE_COMPACT + "\n\n" + VOICE_SYSTEM_PROMPT_EN +
-        _dept_scope_addon_str(_voice_dept_scope)
+        _user_context_addon(user)
     )
     # Pick a live model that exists for THIS API key. We probe the list and
     # fall back through a preferred order. Cached on the function for life of
@@ -3955,11 +4079,6 @@ def voice_query(body: dict, user: dict = Depends(get_current_user)):
     # project still works.
     sql = normalize_bq_project(sql)
     sql = _autofix_dashboard_sql(sql)
-    # Enforce the caller's dept scope on workforce tables.
-    if (user.get("role") or "").lower() != "admin":
-        _vq_dept = _get_user_dept_scope(int(user["sub"]))
-        if _vq_dept is not None:
-            sql = _enforce_dept_scope_on_sql(sql, _vq_dept)
     print(f"[voice] {sql[:240]}{'...' if len(sql) > 240 else ''}")
     r = bq_run_query(sql, max_rows=30)
     if "error" in r:
@@ -4167,10 +4286,7 @@ def dashboard_refine(body: dict, user: dict = Depends(get_current_user)):
     history = body.get("history") or []
     existing = body.get("existing_config")
     safe_msg = _redact_pii(msg)
-    _dr_dept = None
-    if (user.get("role") or "").lower() != "admin":
-        _dr_dept = _get_user_dept_scope(int(user["sub"]))
-    text = refine_dashboard(safe_msg, history, existing, dept_scope_addon=_dept_scope_addon_str(_dr_dept))
+    text = refine_dashboard(safe_msg, history, existing, scope_addon=_user_context_addon(user))
     cfg, truncated = _extract_ready_config(text)
     if cfg is not None:
         # Strip the JSON blob from the reply the user sees so they don't get
@@ -4830,11 +4946,6 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         sql = _substitute_where(sql_template, user_filters)
         sql = normalize_bq_project(sql)
         sql = _autofix_dashboard_sql(sql)
-        # Enforce dept scope on workforce widget SQL
-        if (user.get("role") or "").lower() != "admin":
-            _dwd = _get_user_dept_scope(int(user["sub"]))
-            if _dwd is not None:
-                sql = _enforce_dept_scope_on_sql(sql, _dwd)
         print(f"[dashboard] {tag}: {sql[:300]}{'...' if len(sql) > 300 else ''}")
         r = bq_run_query(sql, max_rows=200)
         r["sql"] = sql  # always include the substituted SQL so the frontend can show it on error
@@ -6297,10 +6408,7 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
                     _REPORT_SYSTEM_PROMPT + "\n\n" +
                     _load_schema_settings_block() + "\n\n" +
                     live_schema.render_context_block() +
-                    _dept_scope_addon_str(
-                        _get_user_dept_scope(int(user["sub"]))
-                        if (user.get("role") or "").lower() != "admin" else None
-                    )
+                    _user_context_addon(user)
                 ),
                 temperature=0.4,
                 # Reports often span 3-6 sections each with a SQL block;
