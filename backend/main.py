@@ -2548,24 +2548,80 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
                     temperature=0.7,
-                    max_output_tokens=1024,
+                    max_output_tokens=2048,
                     tools=[_CHAT_SQL_TOOL],
+                    # Cap thinking budget so internal reasoning can't eat
+                    # the whole output allocation on a huge system prompt.
+                    thinking_config=genai.types.ThinkingConfig(thinking_budget=512),
                 ),
             )
 
             # Check for function calls
             fcs = []
+            finish_reason = None
             try:
                 cand = response.candidates[0] if response.candidates else None
+                if cand:
+                    finish_reason = getattr(cand, "finish_reason", None)
                 if cand and cand.content and cand.content.parts:
                     for p in cand.content.parts:
                         if hasattr(p, "function_call") and p.function_call and p.function_call.name:
                             fcs.append(p.function_call)
+            except Exception as _fce:
+                print(f"[CHAT] round {round_num+1} fcs-extract error: {_fce}")
+
+            # Verbose diagnostics so the next time chat fails we can grep
+            # Cloud Run logs and see exactly what Gemini sent back.
+            _resp_text_preview = ""
+            try:
+                _rt = response.text
+                _resp_text_preview = repr(_rt)[:160] if _rt else "EMPTY"
             except Exception:
-                pass
+                _resp_text_preview = "<no .text attr>"
+            print(f"[CHAT] round {round_num+1} fcs={len(fcs)} "
+                  f"finish_reason={finish_reason} "
+                  f"text={_resp_text_preview}")
 
             if not fcs:
                 reply = response.text
+
+                # EMERGENCY FALLBACK: if response.text is empty AND no
+                # function call was made, fire one more Gemini call without
+                # tools and without the giant system prompt. Guarantees the
+                # user gets SOMETHING for simple messages like 'hi buddy'.
+                if not reply:
+                    print(f"[CHAT] round {round_num+1} EMPTY text + no fcs -- "
+                          f"firing emergency text-only fallback")
+                    try:
+                        _user_first = (user.get("name") or user.get("full_name") or "there").split()[0]
+                        emergency_resp = client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=[genai.types.Content(
+                                role="user",
+                                parts=[genai.types.Part(text=(
+                                    f"The user '{_user_first}' said: {body.message!r}\n\n"
+                                    f"Respond in 1-3 friendly conversational sentences. "
+                                    f"Address them by first name if natural. "
+                                    f"Do not call any tools or write SQL. "
+                                    f"Do not announce that you're going to query data. "
+                                    f"If this looks like a greeting, just greet them back "
+                                    f"and ask what they want to know."
+                                ))],
+                            )],
+                            config=genai.types.GenerateContentConfig(
+                                temperature=0.7,
+                                max_output_tokens=300,
+                            ),
+                        )
+                        _em_text = (emergency_resp.text or "").strip()
+                        if _em_text:
+                            print(f"[CHAT] emergency fallback succeeded "
+                                  f"({len(_em_text)} chars)")
+                            return {"reply": _em_text}
+                        print("[CHAT] emergency fallback also returned empty text")
+                    except Exception as _eme:
+                        print(f"[CHAT] emergency fallback raised: {_eme}")
+
                 if not reply:
                     # Empty response usually means MAX_TOKENS / safety / a model
                     # glitch. Look at the last tool result we shoved into
@@ -2595,81 +2651,81 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                                  "summarise the rows above.")
                     else:
                         reply = "I wasn't able to generate a response. Please try again."
-                    # Detect stalling: AI said "let me query" but didn't call the tool
-                    # Only match phrases that explicitly indicate the model is
-                    # ABOUT to write SQL as text or REFUSED to call the tool when
-                    # data is needed. Generic phrases like "to get", "to retrieve"
-                    # or "can help you with that" matched innocent greetings
-                    # ("Hi Sohaib! I can help you with that. What would you like
-                    # to know?") and incorrectly drove the chat into SQL-recovery,
-                    # which then failed and burned MAX_ROUNDS.
-                    stall_phrases = [
-                        "let me query", "let me retrieve", "let me run",
-                        "i'll query", "i will query", "need to query",
-                        "i need to retrieve", "i need to fetch",
-                        "here is the bigquery", "here is the sql",
-                        "here's the sql", "here is the query",
-                        "here's the query", "following sql", "this sql query",
-                        "calling sql tool", "calling the sql tool",
-                        "calling run_sql", "running the sql",
-                    ]
-                    # Detect SQL-in-text. The model often gets cut off mid-SQL by max_output_tokens —
-                    # in that case the opening ```sql fence has no closing fence, and a raw SELECT may
-                    # have no FROM yet. Treat ANY of these as "model leaked SQL, recover".
-                    has_sql_fence_open = "```sql" in reply.lower()
-                    has_raw_sql_full = bool(re.search(r"\b(SELECT|WITH)\s+[\s\S]+?\s+FROM\s+", reply, re.IGNORECASE))
-                    has_with_clause  = bool(re.search(r"\bWITH\s+\w+\s+AS\s*\(", reply, re.IGNORECASE))
-                    wrote_sql_in_text = has_sql_fence_open or has_raw_sql_full or has_with_clause
-                    has_stall = any(p in reply.lower() for p in stall_phrases)
-                    # ALWAYS try to recover if SQL leaked OR the model stalled. Never return raw SQL/preamble to the user.
-                    if wrote_sql_in_text or has_stall:
-                        print(f"[CHAT] Detected stall/SQL-as-text — recovering. round={round_num+1}")
-                        # Try to extract a complete fenced block first. If the model got cut off, the
-                        # closing fence will be missing — fall through to a "from opening fence to EOF" grab.
-                        extracted_sql = None
-                        full_fence = re.search(r"```(?:sql)?\s*([\s\S]+?)\s*```", reply, re.IGNORECASE)
-                        if full_fence:
-                            extracted_sql = full_fence.group(1).strip()
-                        elif has_sql_fence_open:
-                            open_fence = re.search(r"```(?:sql)?\s*([\s\S]+)$", reply, re.IGNORECASE)
-                            if open_fence:
-                                extracted_sql = open_fence.group(1).strip().rstrip("`")
-                        if not extracted_sql:
-                            sel_match = re.search(r"((?:WITH|SELECT)\s[\s\S]+?);?\s*$", reply, re.IGNORECASE | re.MULTILINE)
-                            if sel_match:
-                                extracted_sql = sel_match.group(1).strip()
-                        # Only execute if the SQL looks complete enough (has both SELECT and FROM).
-                        sql_is_runnable = bool(extracted_sql and re.search(r"\bSELECT\b[\s\S]+?\bFROM\b", extracted_sql, re.IGNORECASE))
-                        if sql_is_runnable:
-                            print(f"[CHAT] Auto-executing extracted SQL (len={len(extracted_sql)})")
-                            result_text = _execute_chat_sql(extracted_sql, plant_scope=chat_plant_scope)
-                            contents.append(genai.types.Content(
-                                role="model",
-                                parts=[genai.types.Part(text=reply)],
-                            ))
-                            contents.append(genai.types.Content(
-                                role="user",
-                                parts=[genai.types.Part(text=f"[SQL was auto-executed on your behalf]\nResult:\n{result_text}\n\nNow answer the user's original question directly using this result. Do NOT write SQL or announce further queries — just state the answer in plain language.")],
-                            ))
-                        else:
-                            # Truncated / incomplete SQL — re-prompt without showing the bad reply to the user.
-                            # Don't echo the truncated reply; just tell the model to retry via the tool.
-                            print(f"[CHAT] SQL incomplete or absent — re-prompting (extracted_len={len(extracted_sql or '')})")
-                            contents.append(genai.types.Content(
-                                role="model",
-                                parts=[genai.types.Part(text="(internal: previous draft truncated)")],
-                            ))
-                            contents.append(genai.types.Content(
-                                role="user",
-                                parts=[genai.types.Part(text=(
-                                    "Your previous response started writing SQL as text and got cut off. "
-                                    "Do NOT write SQL in the chat. INVOKE the `run_sql` function/tool with a single, complete "
-                                    "SQL SELECT/WITH query. Keep the SQL compact and directly answer the user's question. "
-                                    "After the tool returns, respond in plain prose with the numbers — never include the SQL itself."
-                                ))],
-                            ))
-                        continue
-                    return {"reply": reply}
+                # Detect stalling: AI said "let me query" but didn't call the tool
+                # Only match phrases that explicitly indicate the model is
+                # ABOUT to write SQL as text or REFUSED to call the tool when
+                # data is needed. Generic phrases like "to get", "to retrieve"
+                # or "can help you with that" matched innocent greetings
+                # ("Hi Sohaib! I can help you with that. What would you like
+                # to know?") and incorrectly drove the chat into SQL-recovery,
+                # which then failed and burned MAX_ROUNDS.
+                stall_phrases = [
+                    "let me query", "let me retrieve", "let me run",
+                    "i'll query", "i will query", "need to query",
+                    "i need to retrieve", "i need to fetch",
+                    "here is the bigquery", "here is the sql",
+                    "here's the sql", "here is the query",
+                    "here's the query", "following sql", "this sql query",
+                    "calling sql tool", "calling the sql tool",
+                    "calling run_sql", "running the sql",
+                ]
+                # Detect SQL-in-text. The model often gets cut off mid-SQL by max_output_tokens —
+                # in that case the opening ```sql fence has no closing fence, and a raw SELECT may
+                # have no FROM yet. Treat ANY of these as "model leaked SQL, recover".
+                has_sql_fence_open = "```sql" in reply.lower()
+                has_raw_sql_full = bool(re.search(r"\b(SELECT|WITH)\s+[\s\S]+?\s+FROM\s+", reply, re.IGNORECASE))
+                has_with_clause  = bool(re.search(r"\bWITH\s+\w+\s+AS\s*\(", reply, re.IGNORECASE))
+                wrote_sql_in_text = has_sql_fence_open or has_raw_sql_full or has_with_clause
+                has_stall = any(p in reply.lower() for p in stall_phrases)
+                # ALWAYS try to recover if SQL leaked OR the model stalled. Never return raw SQL/preamble to the user.
+                if wrote_sql_in_text or has_stall:
+                    print(f"[CHAT] Detected stall/SQL-as-text — recovering. round={round_num+1}")
+                    # Try to extract a complete fenced block first. If the model got cut off, the
+                    # closing fence will be missing — fall through to a "from opening fence to EOF" grab.
+                    extracted_sql = None
+                    full_fence = re.search(r"```(?:sql)?\s*([\s\S]+?)\s*```", reply, re.IGNORECASE)
+                    if full_fence:
+                        extracted_sql = full_fence.group(1).strip()
+                    elif has_sql_fence_open:
+                        open_fence = re.search(r"```(?:sql)?\s*([\s\S]+)$", reply, re.IGNORECASE)
+                        if open_fence:
+                            extracted_sql = open_fence.group(1).strip().rstrip("`")
+                    if not extracted_sql:
+                        sel_match = re.search(r"((?:WITH|SELECT)\s[\s\S]+?);?\s*$", reply, re.IGNORECASE | re.MULTILINE)
+                        if sel_match:
+                            extracted_sql = sel_match.group(1).strip()
+                    # Only execute if the SQL looks complete enough (has both SELECT and FROM).
+                    sql_is_runnable = bool(extracted_sql and re.search(r"\bSELECT\b[\s\S]+?\bFROM\b", extracted_sql, re.IGNORECASE))
+                    if sql_is_runnable:
+                        print(f"[CHAT] Auto-executing extracted SQL (len={len(extracted_sql)})")
+                        result_text = _execute_chat_sql(extracted_sql, plant_scope=chat_plant_scope)
+                        contents.append(genai.types.Content(
+                            role="model",
+                            parts=[genai.types.Part(text=reply)],
+                        ))
+                        contents.append(genai.types.Content(
+                            role="user",
+                            parts=[genai.types.Part(text=f"[SQL was auto-executed on your behalf]\nResult:\n{result_text}\n\nNow answer the user's original question directly using this result. Do NOT write SQL or announce further queries — just state the answer in plain language.")],
+                        ))
+                    else:
+                        # Truncated / incomplete SQL — re-prompt without showing the bad reply to the user.
+                        # Don't echo the truncated reply; just tell the model to retry via the tool.
+                        print(f"[CHAT] SQL incomplete or absent — re-prompting (extracted_len={len(extracted_sql or '')})")
+                        contents.append(genai.types.Content(
+                            role="model",
+                            parts=[genai.types.Part(text="(internal: previous draft truncated)")],
+                        ))
+                        contents.append(genai.types.Content(
+                            role="user",
+                            parts=[genai.types.Part(text=(
+                                "Your previous response started writing SQL as text and got cut off. "
+                                "Do NOT write SQL in the chat. INVOKE the `run_sql` function/tool with a single, complete "
+                                "SQL SELECT/WITH query. Keep the SQL compact and directly answer the user's question. "
+                                "After the tool returns, respond in plain prose with the numbers — never include the SQL itself."
+                            ))],
+                        ))
+                    continue
+                return {"reply": reply}
 
             # Execute each function call and append results
             contents.append(response.candidates[0].content)
@@ -2719,7 +2775,37 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
             ),
         )
         reply = response.text
+        _post_text_preview = repr(reply)[:160] if reply else "EMPTY"
+        print(f"[CHAT] post-MAX_ROUNDS final reply preview: {_post_text_preview}")
         if not reply:
+            # Try the emergency text-only fallback FIRST: maybe the loop
+            # exhausted not because we needed data but because Gemini kept
+            # returning empty text under the huge system prompt. A short
+            # no-tool call should still land a friendly reply.
+            try:
+                _user_first = (user.get("name") or user.get("full_name") or "there").split()[0]
+                emergency_resp = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[genai.types.Content(
+                        role="user",
+                        parts=[genai.types.Part(text=(
+                            f"The user '{_user_first}' said: {body.message!r}\n\n"
+                            f"Respond in 1-3 friendly conversational sentences. "
+                            f"Address them by first name if natural. "
+                            f"Do not call any tools."
+                        ))],
+                    )],
+                    config=genai.types.GenerateContentConfig(
+                        temperature=0.7,
+                        max_output_tokens=300,
+                    ),
+                )
+                _em_text = (emergency_resp.text or "").strip()
+                if _em_text:
+                    print(f"[CHAT] post-MAX_ROUNDS emergency succeeded ({len(_em_text)} chars)")
+                    return {"reply": _em_text}
+            except Exception as _eme2:
+                print(f"[CHAT] post-MAX_ROUNDS emergency raised: {_eme2}")
             # Post-MAX_ROUNDS empty - surface the last successful tool result
             # so the user at least sees the rows instead of a generic apology.
             last_tool = ""
