@@ -2238,32 +2238,53 @@ def _dept_scope_addon_str(dept_scope: "list[str] | None") -> str:
             "yet and that an admin needs to assign departments via System Settings.\n"
             "--- END SCOPE RESTRICTION ---"
         )
-    quoted = ", ".join(f"'{d}'" for d in dept_scope)
+    quoted_lower = ", ".join("'" + d.lower().replace("'", "''") + "'" for d in dept_scope)
+    human = ", ".join(dept_scope)
     return (
         "\n\n--- USER DEPARTMENT SCOPE RESTRICTION ---\n"
-        f"This user is restricted to department(s) / practice node(s): "
-        f"{', '.join(dept_scope)}.\n"
-        f"Every SQL query you write against workforce tables (Employee_Data, "
-        f"Allocation_Data, Timesheet_Data, Attendance_Data, Practice_Heads_List) "
-        f"MUST include an AND clause that filters by EmployeeHierarchyNode. "
-        f"Use: AND EmployeeHierarchyNode IN ({quoted}) on Employee_Data, and join "
-        f"to Employee_Data via the employee id (REGEXP_EXTRACT digits, LTRIM "
-        f"leading zeros) for tables that don't carry EmployeeHierarchyNode directly. "
-        f"NEVER return employee, attendance, allocation, timesheet, or practice "
-        f"data for departments outside this list. Sales tables (Sales_*) are NOT "
-        f"department-scoped - those remain visible to scoped users.\n"
+        f"This user is restricted to department(s): {human}.\n"
+        f"EVERY SQL query against a workforce table (Employee_Data, Attendance_Data, "
+        f"Allocation_Data, Timesheet_Data, Practice_Heads_List) MUST restrict to those "
+        f"department(s) using a CASE-INSENSITIVE filter on Employee_Data's department "
+        f"column:\n"
+        f"    WHERE LOWER(EmployeeHierarchyNode) IN ({quoted_lower})\n"
+        f"Use LOWER(...) because the stored capitalisation can differ (e.g. "
+        f"'SAP ABAP & FIORI' vs 'SAP ABAP & Fiori'); a case-sensitive match returns 0 rows.\n"
+        f"Tables that do NOT carry EmployeeHierarchyNode (Attendance_Data, "
+        f"Allocation_Data, Timesheet_Data) must JOIN to Employee_Data first, then apply "
+        f"that filter. Use norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0'):\n"
+        f"  - Attendance_Data: JOIN Employee_Data e ON norm(a.personal_no)=norm(e.Employee_Code)\n"
+        f"  - Allocation_Data: JOIN Employee_Data e ON norm(al.employee_id)=norm(e.Employee_Code)\n"
+        f"  - Timesheet_Data:  JOIN Employee_Data e ON norm(t.TICKET_USER_ID)=norm(e.Employee_Code)\n"
+        f"NEVER return employee, attendance, allocation, timesheet, or practice data for any "
+        f"department outside the list above — not even by fuzzy/partial match. If the user asks "
+        f"about another department, reply that it's outside their scope ({human}). Sales tables "
+        f"(Sales_*) are NOT department-scoped and remain fully visible.\n"
         "--- END SCOPE RESTRICTION ---"
     )
 
 
 def _enforce_dept_scope_on_sql(sql: str, dept_scope: "list[str] | None") -> str:
-    """Server-side safety net: rewrite SQL to inject the EmployeeHierarchyNode
-    filter when the user has a dept scope AND the SQL references a workforce
-    table. Best-effort - if the SQL doesn't contain a recognisable workforce
-    table reference, it's returned untouched.
+    """Server-side safety net for department scope — VALIDATE, don't inject.
 
-    For an empty scope ([]) returns a zero-row sentinel so the AI gets
-    nothing back and can't fall through to non-scoped data.
+    We deliberately do NOT inject a predicate into the SQL. The model writes
+    CTE / subquery queries, and an injected `EmployeeHierarchyNode` reference in
+    the OUTERMOST WHERE sits outside the CTE that selects from Employee_Data,
+    so BigQuery rejects it with "Unrecognized name: EmployeeHierarchyNode" —
+    which is exactly what broke scoped attendance / timesheet / allocation
+    queries (every one of those uses a CTE).
+
+    Instead we verify the model already restricted the query to the user's
+    allowed department(s) (the system-prompt addon instructs it to, with a
+    case-insensitive LOWER(EmployeeHierarchyNode) IN (...) filter and the right
+    join keys). If it didn't, we return a refusal sentinel as the tool result
+    so the model re-issues a correctly-scoped query.
+
+      dept_scope is None  -> unrestricted (admin); pass through.
+      dept_scope is []    -> no access; zero-row sentinel.
+      dept_scope is [...] -> any workforce-table query must filter
+                             EmployeeHierarchyNode to one of those values.
+    Non-workforce queries (Sales_*, etc.) are never department-scoped.
     """
     if dept_scope is None:
         return sql
@@ -2274,69 +2295,33 @@ def _enforce_dept_scope_on_sql(sql: str, dept_scope: "list[str] | None") -> str:
     workforce_tables = ("EMPLOYEE_DATA", "ALLOCATION_DATA", "TIMESHEET_DATA",
                          "ATTENDANCE_DATA", "PRACTICE_HEADS_LIST")
     if not any(t in sql_upper for t in workforce_tables):
-        return sql
+        return sql  # sales / other shared tables — no department restriction
 
-    # Only safe to inject EmployeeHierarchyNode when Employee_Data is in the SQL
-    # (directly queried or LEFT-JOINed). If the SQL touches workforce data
-    # but doesn't join to Employee_Data, we CANNOT enforce the dept scope -
-    # silently passing the query through would leak cross-department rows
-    # to a scoped user. Instead return a refusal sentinel that Gemini sees
-    # as the tool result and retries with the required join.
-    if "EMPLOYEE_DATA" not in sql_upper:
+    allowed_quoted = ", ".join("'" + str(v).replace("'", "''") + "'" for v in dept_scope)
+
+    # Must reference the department column. If the model queried a workforce
+    # table without joining Employee_Data + filtering, refuse and explain how.
+    if "EMPLOYEEHIERARCHYNODE" not in sql_upper:
         return ("SELECT 'SCOPE_REFUSED' AS _error, "
-                "'Re-run this query with a LEFT JOIN to Employee_Data via "
-                "the digits-only employee id - the dept-scope filter on "
-                "EmployeeHierarchyNode can only be applied through that join.' "
+                "'This user is department-scoped. JOIN Employee_Data (Attendance_Data on "
+                "norm(personal_no)=norm(Employee_Code); Allocation_Data on "
+                "norm(employee_id)=norm(Employee_Code); Timesheet_Data on "
+                "norm(TICKET_USER_ID)=norm(Employee_Code), norm(x)=LTRIM(REGEXP_REPLACE("
+                "CAST(x AS STRING),r\\'[^0-9]\\',\\'\\'),\\'0\\')) and add "
+                f"WHERE LOWER(EmployeeHierarchyNode) IN ({allowed_quoted.lower()}). Re-run with that filter.' "
                 "AS _message LIMIT 0")
 
-    # Case-insensitive match (see _dept_scope_clause for why).
-    quoted = ", ".join("LOWER('" + str(v).replace("'", "''") + "')" for v in dept_scope)
-    scope_clause = (
-        f"LOWER(COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified')) IN ({quoted})"
-    )
+    # References the dept column — confirm it's filtered to an ALLOWED value
+    # (catches the model scoping to the WRONG department). Case-insensitive
+    # literal match against the user's allowed value(s).
+    low = sql.lower()
+    if not any(str(v).lower() in low for v in dept_scope):
+        return ("SELECT 'SCOPE_REFUSED' AS _error, "
+                f"'You may only query department(s): {allowed_quoted}. Re-run with "
+                f"LOWER(EmployeeHierarchyNode) IN ({allowed_quoted.lower()}).' AS _message LIMIT 0")
 
-    # Find the outermost (depth-0) WHERE keyword, same scanning approach as
-    # _enforce_plant_scope_in_sql, then inject `scope_clause AND (` after it.
-    depth = 0
-    last_where_at_depth0 = -1
-    i = 0
-    while i < len(sql):
-        c = sql[i]
-        if c in ("'", '"'):
-            q = c; i += 1
-            while i < len(sql) and sql[i] != q:
-                if sql[i] == '\\': i += 1
-                i += 1
-        elif c == '(':
-            depth += 1
-        elif c == ')':
-            depth -= 1
-        elif depth == 0 and sql_upper[i:i+5] == "WHERE":
-            before_ok = (i == 0 or (not sql[i-1].isalnum() and sql[i-1] != '_'))
-            after_ok  = (i+5 >= len(sql) or (not sql[i+5].isalnum() and sql[i+5] != '_'))
-            if before_ok and after_ok:
-                last_where_at_depth0 = i
-        i += 1
-
-    if last_where_at_depth0 >= 0:
-        insert_at = last_where_at_depth0 + len("WHERE")
-        return (sql[:insert_at] + f" {scope_clause} AND (" + sql[insert_at:].lstrip() + ")")
-
-    # No outermost WHERE - inject before GROUP BY / ORDER BY / LIMIT / HAVING
-    for kw in ("GROUP BY", "ORDER BY", "HAVING", "LIMIT"):
-        depth = 0
-        klen = len(kw)
-        for j in range(len(sql) - klen + 1):
-            c = sql[j]
-            if c == '(': depth += 1
-            elif c == ')': depth -= 1
-            if depth == 0 and sql_upper[j:j+klen] == kw:
-                before_ok = (j == 0 or (not sql[j-1].isalnum() and sql[j-1] != '_'))
-                after_ok  = (j+klen >= len(sql) or (not sql[j+klen].isalnum() and sql[j+klen] != '_'))
-                if before_ok and after_ok:
-                    return sql[:j] + f"WHERE {scope_clause}\n" + sql[j:]
-
-    return sql.rstrip().rstrip(";") + f"\nWHERE {scope_clause}"
+    # Correctly scoped — trust the model's own filter (do not mangle the SQL).
+    return sql
 
 
 # ============================================================================
