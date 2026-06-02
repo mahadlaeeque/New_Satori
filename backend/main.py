@@ -5271,86 +5271,98 @@ _DRILLDOWN_PROMPT = """You generate BigQuery DRILL-DOWN SQL for the TMC Satori w
 GOAL: The user clicked one category on a dashboard chart. Show them the row-level
 detail behind that single category so they understand WHO/WHAT makes up the number.
 
-═══ TMC SCHEMA ═══
-- `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Employee_Status.
-- `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), employee_id (INT64), employee_name (STRING), checkin_time, checkout_time, attendance_status_text, is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 0/1).
-- `{BQ_FULL}.Allocation_Data` — project_id, employee_id (STRING), allocation_percent (STRING), emp_competency, Flag, Date.
-- `{BQ_FULL}.Timesheet_Data` — TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (INT64 YYYYMMDD).
+═══ TMC SCHEMA (use these EXACT column names) ═══
+- `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, EmployeePosition, EmployeeEmail, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Employee_Status.
+- `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), personal_no (STRING "E-902" — the JOIN KEY to Employee_Code), employee_id (INT64 — NOT a join key), employee_name, checkin_time, checkout_time, attendance_status_text. There are NO is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend columns — derive every count from attendance_status_text (values: 'Present','Absent','On Leave','Holiday','Weekend','Missing Punch','Remote Work').
+- `{BQ_FULL}.Allocation_Data` — project_id, employee_id (STRING "E-2141"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag (values 'Allocated'/'Bench'), Date.
+- `{BQ_FULL}.Timesheet_Data` — TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY.
 - `{BQ_FULL}.Sales_AM_Scorecard` — VP, AM, Role, City, col_2026_Target (STRING), Q1_ACH (STRING), Open_Pipeline (STRING), Hist_Win_Rate (FLOAT64 — NEVER REPLACE).
 - `{BQ_FULL}.Sales_Plan_vs_Pipeline` — AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio (FLOAT64 — NEVER REPLACE), Status, Action.
 - `{BQ_FULL}.Sales_Pipeline_Health` — Salesperson, Open_Pipeline, Open_Deals, Win_Rate_by.
 - `{BQ_FULL}.Sales_Accounts` — VP, AM, Location, Account, Tier, Dormant, Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits.
 
+═══ JOIN KEYS (digit-normalised — NAMES DO NOT MATCH) ═══
+Let norm(x) = LTRIM(REGEXP_REPLACE(CAST(x AS STRING), r'[^0-9]', ''), '0').
+- Attendance_Data → Employee_Data: ON norm(a.personal_no) = norm(e.Employee_Code)
+- Allocation_Data  → Employee_Data: ON norm(al.employee_id) = norm(e.Employee_Code)
+- Timesheet_Data   → Employee_Data: ON norm(t.TICKET_USER_ID) = norm(e.Employee_Code)
+NEVER join Attendance on employee_id, and NEVER join on Resource_Name = employee_name — Employee_Data.Resource_Name carries a code prefix (e.g. "E-1571 Mahad Laeeque") so a name join matches almost nothing.
+
 ═══ HARD RULES ═══
 - Active employees only: LOWER(Employee_Type) IN ('mto','permanent','probation').
-- Working days only for attendance: AND is_weekend=0 AND is_holiday=0.
-- Employee → Attendance join: UPPER(TRIM(Resource_Name)) = UPPER(TRIM(employee_name)).
-- NEVER wrap Coverage_Ratio/Hist_Win_Rate/Open_Deals/Win_Rate_by/is_* in REPLACE() — they're already numeric.
-- LIMIT 200 rows.
-- Output ONLY raw SQL — one SELECT statement, no markdown, no commentary.
+- Attendance counts come from attendance_status_text, e.g. present_days = COUNTIF(LOWER(attendance_status_text)='present'); the working-day denominator = COUNTIF(LOWER(attendance_status_text) NOT IN ('weekend','holiday')). There is NO 'late' status.
+- Reuse the parent SQL's date range when it has one.
+- Match the clicked category CASE-INSENSITIVELY: LOWER(col) = LOWER('value').
+- NEVER wrap numeric columns (Coverage_Ratio/Hist_Win_Rate/Open_Deals/Win_Rate_by) in REPLACE().
+- Output ONLY ONE complete SELECT statement — raw SQL, no markdown, no commentary, no trailing text. Make sure every parenthesis is balanced and the statement is finished. End with LIMIT 200.
 
 ═══ DRILL-DOWN RECIPES ═══
-When the parent chart is grouped by DEPARTMENT (EmployeeHierarchyNode) and the user clicks department='Qlik':
+Parent grouped by DEPARTMENT (EmployeeHierarchyNode), user clicks department='Emerging Tech':
   SELECT
     e.Resource_Name AS employee,
     e.EmployeePosition AS position,
-    SUM(a.is_present)  AS present_days,
-    SUM(a.is_absent)   AS absent_days,
-    SUM(a.is_on_leave) AS leave_days,
-    ROUND(100.0*SUM(a.is_present)/NULLIF(SUM(CASE WHEN a.is_weekend=0 AND a.is_holiday=0 THEN 1 ELSE 0 END),0),1) AS attendance_pct
+    COUNTIF(LOWER(a.attendance_status_text)='present')  AS present_days,
+    COUNTIF(LOWER(a.attendance_status_text)='absent')   AS absent_days,
+    COUNTIF(LOWER(a.attendance_status_text)='on leave') AS leave_days,
+    ROUND(100.0*COUNTIF(LOWER(a.attendance_status_text)='present')/NULLIF(COUNTIF(LOWER(a.attendance_status_text) NOT IN ('weekend','holiday')),0),1) AS attendance_pct
   FROM `{BQ_FULL}.Employee_Data` e
   LEFT JOIN `{BQ_FULL}.Attendance_Data` a
-    ON UPPER(TRIM(e.Resource_Name)) = UPPER(TRIM(a.employee_name))
-   AND a.is_weekend=0 AND a.is_holiday=0
+    ON LTRIM(REGEXP_REPLACE(CAST(a.personal_no AS STRING), r'[^0-9]', ''), '0') = LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
    AND a.attendance_date BETWEEN <parent_start> AND <parent_end>
-  WHERE COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''),'Unspecified') = 'Qlik'
+  WHERE LOWER(COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode),''),'Unspecified')) = LOWER('Emerging Tech')
     AND LOWER(e.Employee_Type) IN ('mto','permanent','probation')
   GROUP BY employee, position
   ORDER BY attendance_pct DESC
   LIMIT 200
 
-When the parent is grouped by AM (Sales_AM_Scorecard) and the user clicks AM='Ali Tareen':
-  SELECT
-    a.Account, a.Tier, a.Location,
-    SAFE_CAST(a.Q1_Visits AS INT64) AS q1_visits,
-    a.Dormant
+Parent grouped by AM (Sales_AM_Scorecard), user clicks AM='Ali Tareen':
+  SELECT a.Account, a.Tier, a.Location, SAFE_CAST(a.Q1_Visits AS INT64) AS q1_visits, a.Dormant
   FROM `{BQ_FULL}.Sales_Accounts` a
-  WHERE LOWER(a.AM) = 'ali tareen'
+  WHERE LOWER(a.AM) = LOWER('Ali Tareen')
   ORDER BY q1_visits DESC NULLS LAST
   LIMIT 200
 
-When the parent is a daily-trend LINE chart and the user clicks a specific date, e.g. 2026-03-12:
+Parent daily-trend LINE chart, user clicks a date e.g. 2026-03-12:
   SELECT employee_name, attendance_status_text, checkin_time, checkout_time
   FROM `{BQ_FULL}.Attendance_Data`
-  WHERE attendance_date = DATE '2026-03-12' AND is_weekend=0 AND is_holiday=0
+  WHERE attendance_date = DATE '2026-03-12'
   ORDER BY attendance_status_text, employee_name
   LIMIT 200
 
 GENERAL APPROACH:
-1. Identify the dimension the parent chart was grouped on (department, AM, date, city, etc.).
-2. Identify the matching column in the parent's source table.
-3. Write a row-level SELECT that returns the underlying entities (employees, accounts, deals, days)
-   that contributed to the clicked category, plus 2-4 useful metrics.
-4. Apply the same active-employees / working-days defaults the parent dashboard uses.
-5. Order by the most informative metric DESC, LIMIT 200."""
+1. Identify the dimension the parent chart grouped on (department, AM, date, city, competency, project, etc.) and the matching column in the source table.
+2. Write a row-level SELECT returning the underlying entities (employees, accounts, days) for the clicked category, plus 2-4 useful metrics, using the join keys + attendance-status rules above.
+3. Apply the active-employees default; match the clicked value case-insensitively.
+4. ORDER BY the most informative metric DESC, LIMIT 200. Return ONE finished, paren-balanced statement."""
 
 
 def _generate_drilldown_sql(parent_sql: str, parent_title: str, parent_type: str,
-                            label_key: str, label_value, value_keys: list) -> str:
+                            label_key: str, label_value, value_keys: list,
+                            dept_scope: "list[str] | None" = None) -> str:
     """Ask Gemini Flash to produce a row-level breakdown for one clicked
     category of a chart. Returns the SQL string, or "" on failure."""
     if not parent_sql or label_value in (None, ""):
         return ""
     try:
         client = get_genai_client()
+        scope_line = ""
+        if dept_scope:
+            quoted = ", ".join(f"'{d.lower()}'" for d in dept_scope)
+            scope_line = (
+                f"\nDEPARTMENT SCOPE: this user may ONLY see department(s) {', '.join(dept_scope)}. "
+                f"The row-level SQL MUST join Employee_Data and include "
+                f"WHERE LOWER(EmployeeHierarchyNode) IN ({quoted}) so no other "
+                f"department's people are returned.\n"
+            )
         user_msg = (
             f"Parent chart title: {parent_title or '(untitled)'}\n"
             f"Parent chart type: {parent_type or 'bar'}\n"
             f"Parent group-by column (labelKey): {label_key}\n"
             f"Parent metric columns (valueKeys): {', '.join(value_keys or [])}\n"
-            f"User clicked the value: {label_value!r}\n\n"
+            f"User clicked the value: {label_value!r}\n"
+            f"{scope_line}\n"
             f"Parent SQL:\n{parent_sql}\n\n"
-            f"Generate the row-level drill-down SQL. Output ONLY the SQL."
+            f"Generate the row-level drill-down SQL. Output ONLY the complete SQL."
         )
         resp = client.models.generate_content(
             model="gemini-2.5-flash",
@@ -5358,7 +5370,11 @@ def _generate_drilldown_sql(parent_sql: str, parent_title: str, parent_type: str
             config=genai.types.GenerateContentConfig(
                 system_instruction=_DRILLDOWN_PROMPT.format(BQ_FULL=BQ_FULL),
                 temperature=0.1,
-                max_output_tokens=1024,
+                # Disable "thinking" so the full token budget goes to the SQL —
+                # default thinking was eating the budget and truncating the
+                # query mid-statement ("Expected ) but got end of script").
+                thinking_config=genai.types.ThinkingConfig(thinking_budget=0),
+                max_output_tokens=2048,
             ),
         )
         out = (resp.text or "").strip()
@@ -5406,7 +5422,13 @@ def dashboard_drill(body: dict, user: dict = Depends(get_current_user)):
     if not parent_sql or label_value in (None, ""):
         return {"error": "Missing parent SQL or clicked value.", "rows": [], "columns": []}
 
-    sql = _generate_drilldown_sql(parent_sql, parent_title, parent_type, label_key, label_value, value_keys)
+    # Department-scoped users only get their own department's rows in the drill.
+    drill_dept_scope = None
+    if (user.get("role") or "").lower() != "admin":
+        drill_dept_scope = _get_user_dept_scope(int(user["sub"]))
+
+    sql = _generate_drilldown_sql(parent_sql, parent_title, parent_type, label_key,
+                                  label_value, value_keys, dept_scope=drill_dept_scope)
     if not sql:
         return {"error": "Could not generate a drill-down query for this chart.", "rows": [], "columns": []}
 
