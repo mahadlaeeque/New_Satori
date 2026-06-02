@@ -119,8 +119,17 @@ function fetchDataFreshness() {
   })
     .then((r) => (r.ok ? r.json() : null))
     .then((d) => { _freshnessCache = d; return d; })
-    .catch(() => null);
+    .catch(() => null)
+    // Clear the in-flight handle once settled so a failed/empty fetch retries
+    // next time instead of caching a permanently-rejected promise.
+    .finally(() => { _freshnessPromise = null; });
   return _freshnessPromise;
+}
+
+// Clear cached freshness (called on logout so the next user re-fetches).
+function clearDataFreshnessCache() {
+  _freshnessCache = null;
+  _freshnessPromise = null;
 }
 
 function useDataFreshness() {
@@ -1377,7 +1386,7 @@ const BoardDashboard = () => (
       <ChartCard title="Revenue, Profit & Margin Trend" subtitle="Monthly performance (in $M)">
         <ResponsiveContainer width="100%" height={280}>
           <ComposedChart data={boardData.overview}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis dataKey="month" tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <YAxis yAxisId="left" tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 12, fill: COLORS.textMuted }} unit="%" />
@@ -1451,7 +1460,7 @@ const FinanceDashboard = () => (
                 <stop offset="95%" stopColor={COLORS.primary} stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis dataKey="month" tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <YAxis tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none", boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }} />
@@ -1476,7 +1485,7 @@ const FinanceDashboard = () => (
     <ChartCard title="Cash Flow Analysis" subtitle="Inflows vs outflows ($M)">
       <ResponsiveContainer width="100%" height={240}>
         <BarChart data={financeData.cashflow}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+          <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
           <XAxis dataKey="month" tick={{ fontSize: 12, fill: COLORS.textMuted }} />
           <YAxis tick={{ fontSize: 12, fill: COLORS.textMuted }} />
           <Tooltip contentStyle={{ borderRadius: 12, border: "none", boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }} />
@@ -1512,7 +1521,7 @@ const ProcurementDashboard = () => (
                 <stop offset="95%" stopColor={COLORS.accent} stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis dataKey="month" tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <YAxis tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none" }} />
@@ -1583,7 +1592,7 @@ const SupplyChainDashboard = () => (
       <ChartCard title="Fulfillment Rate Trend" subtitle="Actual vs target (%)">
         <ResponsiveContainer width="100%" height={260}>
           <LineChart data={supplyChainData.fulfillment}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis dataKey="month" tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <YAxis domain={[90, 100]} tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none" }} />
@@ -1596,7 +1605,7 @@ const SupplyChainDashboard = () => (
       <ChartCard title="Inventory Days by Category" subtitle="Actual vs optimal (days)">
         <ResponsiveContainer width="100%" height={260}>
           <BarChart data={supplyChainData.inventory} layout="vertical">
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis type="number" tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <YAxis dataKey="category" type="category" tick={{ fontSize: 12, fill: COLORS.textMuted }} width={100} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none" }} />
@@ -1623,7 +1632,7 @@ const WarehouseDashboard = () => (
       <ChartCard title="Zone Utilization" subtitle="Capacity usage by zone (%)">
         <ResponsiveContainer width="100%" height={260}>
           <BarChart data={warehouseData.utilization}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis dataKey="zone" tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <YAxis domain={[0, 100]} tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none" }} />
@@ -1648,7 +1657,7 @@ const WarehouseDashboard = () => (
                 <stop offset="95%" stopColor={COLORS.accent} stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis dataKey="day" tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <YAxis tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none" }} />
@@ -1675,7 +1684,7 @@ const ManufacturingDashboard = () => (
       <ChartCard title="OEE by Production Line" subtitle="Availability x Performance x Quality">
         <ResponsiveContainer width="100%" height={260}>
           <BarChart data={manufacturingData.oee}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis dataKey="line" tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <YAxis domain={[70, 100]} tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none" }} />
@@ -1689,7 +1698,7 @@ const ManufacturingDashboard = () => (
       <ChartCard title="Production Plan vs Actual" subtitle="Monthly output (units)">
         <ResponsiveContainer width="100%" height={260}>
           <LineChart data={manufacturingData.production}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis dataKey="month" tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <YAxis tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none" }} />
@@ -1716,7 +1725,7 @@ const SalesDashboard = () => (
       <ChartCard title="Sales Pipeline Funnel" subtitle="Stage value ($M) and opportunity count">
         <ResponsiveContainer width="100%" height={260}>
           <BarChart data={salesData.pipeline} layout="vertical">
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis type="number" tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <YAxis dataKey="stage" type="category" tick={{ fontSize: 12, fill: COLORS.textMuted }} width={85} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none" }} />
@@ -1754,7 +1763,7 @@ const HRDashboard = () => (
       <ChartCard title="Headcount by Department" subtitle="Staff and open positions">
         <ResponsiveContainer width="100%" height={260}>
           <BarChart data={hrData.headcount}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis dataKey="dept" tick={{ fontSize: 11, fill: COLORS.textMuted }} />
             <YAxis tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none" }} />
@@ -1767,7 +1776,7 @@ const HRDashboard = () => (
       <ChartCard title="Employee Retention Trend" subtitle="Monthly rate (%)">
         <ResponsiveContainer width="100%" height={260}>
           <LineChart data={hrData.retention}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis dataKey="month" tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <YAxis domain={[93, 97]} tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none" }} />
@@ -1792,7 +1801,7 @@ const QualityDashboard = () => (
       <ChartCard title="Defect Rate Trend" subtitle="Actual vs target (%)">
         <ResponsiveContainer width="100%" height={260}>
           <LineChart data={qualityData.defects}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis dataKey="month" tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <YAxis domain={[0, 3]} tick={{ fontSize: 12, fill: COLORS.textMuted }} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none" }} />
@@ -4832,7 +4841,7 @@ const DealerOrdersDashboard = () => {
       <ChartCard title="Product-wise Demand Across Dealers">
         <ResponsiveContainer width="100%" height={Math.max(400, stackedData.length * 36)}>
           <BarChart data={stackedData} layout="vertical" margin={{ top: 5, right: 30, left: 10, bottom: 5 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} horizontal={false} />
             <XAxis type="number" tick={{ fontSize: 10, fill: COLORS.textMuted }} tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(0)}K` : v} />
             <YAxis dataKey="dealer" type="category" tick={{ fontSize: 11, fill: COLORS.textSecondary }} width={130} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none", boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }} formatter={val => [fmtQty(val), "Qty"]} />
@@ -4849,7 +4858,7 @@ const DealerOrdersDashboard = () => {
         <ChartCard title="Top 10 Dealers by Quantity">
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={topDealers} layout="vertical" margin={{ top: 5, right: 30, left: 10, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} horizontal={false} />
               <XAxis type="number" tick={{ fontSize: 10, fill: COLORS.textMuted }} tickFormatter={v => fmtQty(v)} />
               <YAxis dataKey="dealer_name" type="category" tick={{ fontSize: 11, fill: COLORS.textSecondary }} width={120} />
               <Tooltip contentStyle={{ borderRadius: 12, border: "none", boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }} formatter={val => [fmtQty(val), "Quantity"]} />
@@ -4865,7 +4874,7 @@ const DealerOrdersDashboard = () => {
         <ChartCard title="Quantity by Plant">
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={qtyByPlant} layout="vertical" margin={{ top: 5, right: 30, left: 10, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} horizontal={false} />
               <XAxis type="number" tick={{ fontSize: 10, fill: COLORS.textMuted }} tickFormatter={v => fmtQty(v)} />
               <YAxis dataKey="name" type="category" tick={{ fontSize: 11, fill: COLORS.textSecondary }} width={120} />
               <Tooltip contentStyle={{ borderRadius: 12, border: "none", boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }} formatter={val => [fmtQty(val), "Quantity"]} />
@@ -5039,7 +5048,7 @@ const ProductOrdersDashboard = () => {
         <ChartCard title="Top 10 Products by Quantity">
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={topProducts} layout="vertical" margin={{ top: 5, right: 30, left: 10, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} horizontal={false} />
               <XAxis type="number" tick={{ fontSize: 10, fill: COLORS.textMuted }} tickFormatter={v => fmtQty(v)} />
               <YAxis dataKey="product" type="category" tick={{ fontSize: 11, fill: COLORS.textSecondary }} width={120} />
               <Tooltip contentStyle={{ borderRadius: 12, border: "none", boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }} formatter={val => [fmtQty(val), "Quantity"]} />
@@ -5055,7 +5064,7 @@ const ProductOrdersDashboard = () => {
         <ChartCard title="Quantity by Plant">
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={qtyByPlant} layout="vertical" margin={{ top: 5, right: 30, left: 10, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} horizontal={false} />
               <XAxis type="number" tick={{ fontSize: 10, fill: COLORS.textMuted }} tickFormatter={v => fmtQty(v)} />
               <YAxis dataKey="name" type="category" tick={{ fontSize: 11, fill: COLORS.textSecondary }} width={120} />
               <Tooltip contentStyle={{ borderRadius: 12, border: "none", boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }} formatter={val => [fmtQty(val), "Quantity"]} />
@@ -5208,7 +5217,7 @@ const InventoryStockDashboard = () => {
       <ChartCard title="Materials by Stock Volume">
         <ResponsiveContainer width="100%" height={400}>
           <BarChart data={materialsByVolume} margin={{ top: 5, right: 30, left: 10, bottom: 60 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis dataKey="material_name" tick={{ fontSize: 10, fill: COLORS.textSecondary }} angle={-30} textAnchor="end" interval={0} />
             <YAxis tick={{ fontSize: 10, fill: COLORS.textMuted }} tickFormatter={v => v >= 1000 ? `${(v / 1000).toFixed(0)}K` : v} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none", boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }} formatter={val => [fmtQty(val), "Stock Qty"]} />
@@ -5393,7 +5402,7 @@ const SalesInvoiceDashboard = () => {
       <ChartCard title="Sales Trend Over Time">
         <ResponsiveContainer width="100%" height={400}>
           <LineChart data={salesTrend} margin={{ top: 5, right: 30, left: 10, bottom: 5 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis dataKey="date" tick={{ fontSize: 10, fill: COLORS.textMuted }} />
             <YAxis tick={{ fontSize: 10, fill: COLORS.textMuted }} tickFormatter={v => v >= 1000 ? `${(v / 1000).toFixed(0)}K` : v} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none", boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }} formatter={val => [fmtQty(val), "Qty"]} />
@@ -5409,7 +5418,7 @@ const SalesInvoiceDashboard = () => {
       <ChartCard title="Top 10 Products by Sales Volume">
         <ResponsiveContainer width="100%" height={400}>
           <BarChart data={topProducts} margin={{ top: 5, right: 30, left: 10, bottom: 60 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             <XAxis dataKey="product_name" tick={{ fontSize: 10, fill: COLORS.textSecondary }} angle={-30} textAnchor="end" interval={0} />
             <YAxis tick={{ fontSize: 10, fill: COLORS.textMuted }} tickFormatter={v => v >= 1000 ? `${(v / 1000).toFixed(0)}K` : v} />
             <Tooltip contentStyle={{ borderRadius: 12, border: "none", boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }} formatter={val => [fmtQty(val), "Invoice Qty"]} />
@@ -10505,6 +10514,7 @@ export default function App() {
     localStorage.removeItem("user");
     localStorage.removeItem("permissions");
     localStorage.removeItem("satori_trust_token"); // clear trust token on explicit logout
+    clearDataFreshnessCache(); // don't carry one user's freshness into the next session
     setCurrentUser(null);
     setPermissions(null);
     setIsLoggedIn(false);

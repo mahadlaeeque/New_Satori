@@ -90,13 +90,17 @@ const initials = (name) => {
 // Strip it for display so cards show just the person's name; the bare employee
 // code is surfaced only in the detail view.
 const cleanName = (emp) => {
-  let n = (emp?.name || "").trim();
+  const raw = (emp?.name || "").trim();
+  // Prefer stripping the exact known code prefix.
   if (emp?.code) {
     const esc = String(emp.code).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    n = n.replace(new RegExp("^" + esc + "\\s*[-–—]?\\s*", "i"), "");
+    const stripped = raw.replace(new RegExp("^" + esc + "\\s*[-–—]?\\s*", "i"), "");
+    if (stripped !== raw) return stripped.trim() || raw;
   }
-  n = n.replace(/^[A-Za-z]{1,4}-?\d+\s*[-–—]?\s*/, "");
-  return n.trim() || (emp?.name || "—");
+  // Fallback: strip only a clear code-LIKE prefix that uses the dash form
+  // (e.g. "C-064") so we never clip a genuine name like "Ali" or "Jo".
+  const stripped = raw.replace(/^[A-Za-z]{1,4}-\d+\s*[-–—]?\s*/, "");
+  return stripped.trim() || raw || "—";
 };
 
 const fmtNumber = (n) => Number(n || 0).toLocaleString();
