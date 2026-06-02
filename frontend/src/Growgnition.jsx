@@ -2116,7 +2116,7 @@ const AgentPage = () => {
             {PROMPT_CATEGORIES.map(cat => (
               <button key={cat.id} onClick={() => setSelectedCategory(cat.id)} style={{
                 padding: "4px 10px", borderRadius: 8, border: `1px solid ${selectedCategory === cat.id ? COLORS.accent : COLORS.border}`,
-                background: selectedCategory === cat.id ? `${COLORS.accent}15` : "#fff", fontSize: 10, fontWeight: 500,
+                background: selectedCategory === cat.id ? `${COLORS.accent}15` : COLORS.surface, fontSize: 10, fontWeight: 500,
                 color: selectedCategory === cat.id ? COLORS.accent : COLORS.textMuted, cursor: "pointer", transition: "all 0.15s"
               }}>
                 {cat.label}
@@ -2131,7 +2131,7 @@ const AgentPage = () => {
                 cursor: "pointer", textAlign: "left", transition: "all 0.15s", width: "100%"
               }}
               onMouseEnter={e => { e.currentTarget.style.borderColor = COLORS.accent; e.currentTarget.style.background = `${COLORS.accent}08`; }}
-              onMouseLeave={e => { e.currentTarget.style.borderColor = COLORS.border; e.currentTarget.style.background = "#fff"; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = COLORS.border; e.currentTarget.style.background = COLORS.surface; }}
               >
                 <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.textPrimary, marginBottom: 3 }}>{p.title}</div>
                 <div style={{ fontSize: 10, color: COLORS.textSecondary, lineHeight: 1.4, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{p.prompt}</div>
@@ -2577,6 +2577,54 @@ const ReportChatPanel = ({
 // `columns` (visible subset) and re-runs preview. Adding a column is offered
 // via the "Add column" menu (re-inserts a previously-removed column) or via
 // the AI chat (regenerates the report).
+// ─── AI Insights panel — shown under a built report / dashboard ──────────────
+// Takes a compact text `summary` of the rendered data; calls /api/ai/insights
+// and renders the returned markdown bullets. Renders nothing until there's data.
+const AiInsights = ({ kind, title, summary }) => {
+  const [text, setText] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    const s = (summary || "").trim();
+    if (!s) { setText(""); setErr(""); return; }
+    let cancelled = false;
+    setLoading(true); setErr("");
+    const base = import.meta.env.VITE_API_BASE || "";
+    fetch(`${base}/api/ai/insights`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, title: title || "", data_summary: s }),
+    })
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled) { setText(d.insights || ""); if (!d.insights) setErr("Couldn't generate insights right now."); } })
+      .catch(() => { if (!cancelled) setErr("Couldn't generate insights right now."); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [kind, title, summary]);
+
+  if (!(summary || "").trim()) return null;
+  return (
+    <div style={{ margin: "16px", background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "hidden", flexShrink: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "11px 18px", borderBottom: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt }}>
+        <Sparkles size={16} color={COLORS.accent} />
+        <span style={{ fontSize: 13.5, fontWeight: 700, color: COLORS.textPrimary }}>AI Insights</span>
+        {loading && <span style={{ marginLeft: "auto", fontSize: 12, color: COLORS.textMuted }}>Analyzing…</span>}
+      </div>
+      <div style={{ padding: "14px 18px", fontSize: 13, color: COLORS.textSecondary, lineHeight: 1.6 }}>
+        {loading ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, color: COLORS.textMuted }}>
+            <Activity size={15} style={{ animation: "spin 1s linear infinite" }} /> Generating insights from your data…
+          </div>
+        ) : err ? (
+          <span style={{ color: COLORS.textMuted }}>{err}</span>
+        ) : text ? (
+          renderMarkdown(text)
+        ) : null}
+      </div>
+    </div>
+  );
+};
+
 const ReportPreview = ({ config, configRev, onConfigChange, onSaveMeta, isReadOnly = false }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -2706,6 +2754,16 @@ const ReportPreview = ({ config, configRev, onConfigChange, onSaveMeta, isReadOn
 
   const hiddenColumns = (data.all_columns || []).filter((c) => !data.columns?.includes(c));
 
+  // Compact text summary of the rendered table for the AI insights panel.
+  const insightSummary = useMemo(() => {
+    const cols = data.columns || [];
+    const rows = data.rows || [];
+    if (!cols.length || !rows.length) return "";
+    const head = cols.join(" | ");
+    const lines = rows.slice(0, 50).map((r) => cols.map((c) => { const v = r?.[c]; return v == null ? "" : String(v); }).join(" | "));
+    return `Columns: ${head}\nTotal rows: ${data.total_rows ?? rows.length} (showing ${Math.min(50, rows.length)}):\n${lines.join("\n")}`;
+  }, [data]);
+
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
       <div style={{
@@ -2831,6 +2889,11 @@ const ReportPreview = ({ config, configRev, onConfigChange, onSaveMeta, isReadOn
           </div>
         )}
       </div>
+      {!loading && !error && (
+        <div style={{ overflowY: "auto", flexShrink: 0, maxHeight: "40%" }}>
+          <AiInsights kind="report" title={config?.title} summary={insightSummary} />
+        </div>
+      )}
     </div>
   );
 };
@@ -4844,6 +4907,22 @@ const DashboardRenderer = ({ spec, onBack }) => {
   // chart metadata + clicked value + (eventually) fetched rows/columns.
   const [drill, setDrill] = useState(null);
 
+  // Compact text summary of KPIs + charts for the AI insights panel.
+  const dashInsightSummary = useMemo(() => {
+    const parts = [];
+    if (data.kpis?.length) {
+      parts.push("KPIs: " + data.kpis.map((k) => `${k.label || k.title || "metric"} = ${k.value}`).join("; "));
+    }
+    for (const ch of (data.charts || [])) {
+      if (ch.error || !ch.data?.length) continue;
+      const lk = ch.labelKey || "label";
+      const vks = ch.valueKeys || ["value"];
+      const pts = ch.data.slice(0, 20).map((d) => `${d[lk]}: ${vks.map((vk) => `${vk}=${d[vk]}`).join(", ")}`).join("; ");
+      parts.push(`Chart "${ch.title}": ${pts}`);
+    }
+    return parts.join("\n");
+  }, [data]);
+
   // Open drill-down modal for a clicked chart segment. We fetch the per-row
   // breakdown from the backend, which uses Gemini Flash to write the SQL.
   const openDrill = useCallback(async (chart, clickedLabel) => {
@@ -5280,6 +5359,9 @@ const DashboardRenderer = ({ spec, onBack }) => {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
               {data.charts.map((chart, i) => renderChart(chart, i))}
             </div>
+          )}
+          {!loading && dashInsightSummary && (
+            <AiInsights kind="dashboard" title={spec?.title || spec?.name} summary={dashInsightSummary} />
           )}
         </>
       )}
@@ -9274,6 +9356,42 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
         html[data-satori-theme="dark"] [style*="background:#fff"],
         html[data-satori-theme="dark"] [style*="background: rgb(255, 255, 255)"] {
           background: var(--c-surface) !important;
+        }
+
+        /* Pale status/info tints (green/amber/red/blue/purple) glow white on a
+           dark page. Re-tint them to subtle dark-appropriate fills so colored
+           cards (success/warning/error/info banners, KPI chips) look right. */
+        html[data-satori-theme="dark"] [style*="#ECFDF5"],
+        html[data-satori-theme="dark"] [style*="#F0FDF4"],
+        html[data-satori-theme="dark"] [style*="#D1FAE5"],
+        html[data-satori-theme="dark"] [style*="rgb(236, 253, 245)"],
+        html[data-satori-theme="dark"] [style*="rgb(240, 253, 244)"],
+        html[data-satori-theme="dark"] [style*="rgb(220, 252, 231)"] {
+          background-color: rgba(34, 197, 94, 0.13) !important;
+        }
+        html[data-satori-theme="dark"] [style*="#FEF2F2"],
+        html[data-satori-theme="dark"] [style*="#FEE2E2"],
+        html[data-satori-theme="dark"] [style*="rgb(254, 242, 242)"],
+        html[data-satori-theme="dark"] [style*="rgb(254, 226, 226)"] {
+          background-color: rgba(239, 68, 68, 0.13) !important;
+        }
+        html[data-satori-theme="dark"] [style*="#FEF9E7"],
+        html[data-satori-theme="dark"] [style*="#FEF3C7"],
+        html[data-satori-theme="dark"] [style*="#FFFBEB"],
+        html[data-satori-theme="dark"] [style*="rgb(254, 243, 199)"],
+        html[data-satori-theme="dark"] [style*="rgb(255, 251, 235)"] {
+          background-color: rgba(245, 158, 11, 0.14) !important;
+        }
+        html[data-satori-theme="dark"] [style*="#EFF6FF"],
+        html[data-satori-theme="dark"] [style*="#DBEAFE"],
+        html[data-satori-theme="dark"] [style*="rgb(239, 246, 255)"],
+        html[data-satori-theme="dark"] [style*="rgb(219, 234, 254)"] {
+          background-color: rgba(10, 95, 137, 0.18) !important;
+        }
+        html[data-satori-theme="dark"] [style*="#F5F3FF"],
+        html[data-satori-theme="dark"] [style*="#EDE9FE"],
+        html[data-satori-theme="dark"] [style*="rgb(245, 243, 255)"] {
+          background-color: rgba(53, 48, 133, 0.22) !important;
         }
 
         /* The chat / dashboard / report page wrapper often sets background

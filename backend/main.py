@@ -717,6 +717,62 @@ def reset_password(body: ResetPasswordRequest, request: Request):
     return {"message": "Password updated. You can now sign in with your new password."}
 
 
+# ── AI insights for a built report / dashboard ───────────────────────────────
+class InsightsRequest(BaseModel):
+    kind: str = "report"          # "report" | "dashboard"
+    title: str = ""
+    data_summary: str = ""        # frontend builds a compact text summary
+
+
+@app.post("/api/ai/insights")
+def ai_insights(body: InsightsRequest, request: Request, user: dict = Depends(get_current_user)):
+    """Generate a few specific, useful insights about a just-built report or
+    dashboard. The frontend passes a compact text summary of the rendered data
+    (already department-scoped to what the user sees); we wrap it in an
+    analyst prompt. Returns markdown bullets. Never raises — returns empty
+    insights on any failure so the UI degrades quietly."""
+    summary = (body.data_summary or "").strip()
+    if not summary:
+        return {"insights": ""}
+    safe = _redact_pii(summary)[:8000]
+    kind = (body.kind or "report").lower()
+    noun = "dashboard" if kind == "dashboard" else "report"
+    system = (
+        "You are Satori, a sharp business analyst at TMC. Given the data behind a "
+        f"{noun}, surface 3-5 SPECIFIC, genuinely useful insights for a manager. "
+        "Rules: cite the ACTUAL numbers / names / categories from the data; call out "
+        "the biggest drivers, outliers, concentrations, imbalances or risks; end with "
+        "ONE concrete suggested action. Be concrete and non-obvious — do NOT restate "
+        "column names, do NOT say 'this report shows', no generic filler. Never invent "
+        "figures that aren't in the data. Output ONLY short bullets, each starting with "
+        "'- ', using **bold** for the key figure. No preamble, no heading."
+    )
+    prompt = (f"{noun.upper()} TITLE: {body.title or '(untitled)'}\n\n"
+              f"DATA:\n{safe}\n\nWrite the insights now.")
+    try:
+        client = get_genai_client()
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=system,
+                temperature=0.4,
+                max_output_tokens=1024,
+                thinking_config=genai.types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        text = (resp.text or "").strip()
+    except Exception as e:
+        print(f"[insights] generation error: {e}")
+        return {"insights": "", "error": str(e)[:200]}
+    try:
+        audit_log.record(user=user, request=request, action="ai.insights",
+                         resource_type=noun, resource_id=None, detail={"title": body.title})
+    except Exception:
+        pass
+    return {"insights": text}
+
+
 @app.get("/api/me", response_model=UserResponse)
 def get_me(user: dict = Depends(get_current_user)):
     db = get_db()
