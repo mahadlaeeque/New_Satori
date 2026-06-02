@@ -252,6 +252,27 @@ def require_superadmin(user: dict = Depends(get_current_user)) -> dict:
     return user
 
 
+# ── Sales-data access (admins + superadmins only) ──────────────────────────
+# Sales tables are restricted to role='admin' (which includes superadmins).
+# Regular users may only see workforce data.
+_SALES_TABLE_RE = re.compile(r"\bSales_[A-Za-z]", re.IGNORECASE)
+_SALES_DENIED_MSG = (
+    "ACCESS DENIED: Sales data (pipeline, accounts, AM scorecards, hunting gap, "
+    "dormant accounts, workload feasibility) is restricted to administrators. Do "
+    "NOT query any Sales_* table for this user. Tell them sales data is only "
+    "available to admins, and answer only from workforce data (employees, "
+    "attendance, allocation, timesheets)."
+)
+
+
+def _user_can_see_sales(user: dict) -> bool:
+    return (user.get("role") or "").lower() == "admin"
+
+
+def _sql_touches_sales(sql: str) -> bool:
+    return bool(_SALES_TABLE_RE.search(sql or ""))
+
+
 # ── Feature Catalog ──
 # Source of truth for the three navigable features in the app. Frontend uses these
 # IDs to render the sidebar; admin uses these IDs to grant per-user access.
@@ -586,7 +607,7 @@ def regenerate_backup_codes(body: TotpRegenerate, user: dict = Depends(get_curre
 
 
 @app.delete("/api/admin/users/{target_id}/2fa")
-def admin_reset_2fa(target_id: int, request: Request, admin: dict = Depends(require_admin)):
+def admin_reset_2fa(target_id: int, request: Request, admin: dict = Depends(require_superadmin)):
     """Admin-only: wipe a user's TOTP secret + backup codes so they re-enroll
     on next login. Used when a user loses their device."""
     db = get_db(); cur = db.cursor()
@@ -847,13 +868,13 @@ class AdminFeaturesUpdate(BaseModel):
 
 
 @app.get("/api/admin/features")
-def admin_list_features(_: dict = Depends(require_admin)):
+def admin_list_features(_: dict = Depends(require_superadmin)):
     """Return the canonical feature catalog so the admin UI doesn't hardcode it."""
     return {"features": FEATURE_CATALOG}
 
 
 @app.get("/api/admin/users")
-def admin_list_users(_: dict = Depends(require_admin)):
+def admin_list_users(_: dict = Depends(require_superadmin)):
     """List all users with their feature counts and last login."""
     db = get_db()
     cur = db.cursor()
@@ -901,7 +922,7 @@ def admin_list_users(_: dict = Depends(require_admin)):
 
 
 @app.post("/api/admin/users")
-def admin_create_user(body: AdminUserCreate, admin: dict = Depends(require_admin)):
+def admin_create_user(body: AdminUserCreate, admin: dict = Depends(require_superadmin)):
     """Create a new user. Admin's company is reused for now (single-tenant)."""
     role = (body.role or "user").lower()
     if role not in ("admin", "user"):
@@ -951,7 +972,7 @@ def admin_create_user(body: AdminUserCreate, admin: dict = Depends(require_admin
 
 
 @app.put("/api/admin/users/{user_id}")
-def admin_update_user(user_id: int, body: AdminUserUpdate, admin: dict = Depends(require_admin)):
+def admin_update_user(user_id: int, body: AdminUserUpdate, admin: dict = Depends(require_superadmin)):
     """Update a user's name, role, or active status. Admins can't lock themselves out."""
     if user_id == int(admin["sub"]):
         # Self-edit guards
@@ -992,7 +1013,7 @@ def admin_update_user(user_id: int, body: AdminUserUpdate, admin: dict = Depends
 
 
 @app.post("/api/admin/users/{user_id}/password")
-def admin_reset_password(user_id: int, body: AdminPasswordReset, _: dict = Depends(require_admin)):
+def admin_reset_password(user_id: int, body: AdminPasswordReset, _: dict = Depends(require_superadmin)):
     """Reset a user's password."""
     if not body.password or len(body.password) < 4:
         raise HTTPException(status_code=400, detail="Password too short")
@@ -1011,7 +1032,7 @@ def admin_reset_password(user_id: int, body: AdminPasswordReset, _: dict = Depen
 
 
 @app.delete("/api/admin/users/{user_id}")
-def admin_delete_user(user_id: int, request: Request, admin: dict = Depends(require_admin)):
+def admin_delete_user(user_id: int, request: Request, admin: dict = Depends(require_superadmin)):
     """Permanently HARD-delete a user and all of their owned / dependent rows.
     Admins can't delete themselves. For a reversible disable, use the
     deactivate toggle (PUT is_active) instead."""
@@ -1064,7 +1085,7 @@ def admin_delete_user(user_id: int, request: Request, admin: dict = Depends(requ
 
 
 @app.get("/api/admin/users/{user_id}/features")
-def admin_get_user_features(user_id: int, _: dict = Depends(require_admin)):
+def admin_get_user_features(user_id: int, _: dict = Depends(require_superadmin)):
     """Return a user's allowed feature IDs (regardless of admin bypass)."""
     db = get_db()
     cur = db.cursor()
@@ -1080,7 +1101,7 @@ def admin_get_user_features(user_id: int, _: dict = Depends(require_admin)):
 
 
 @app.put("/api/admin/users/{user_id}/features")
-def admin_set_user_features(user_id: int, body: AdminFeaturesUpdate, _: dict = Depends(require_admin)):
+def admin_set_user_features(user_id: int, body: AdminFeaturesUpdate, _: dict = Depends(require_superadmin)):
     """Replace a user's full feature allow-list."""
     db = get_db()
     cur = db.cursor()
@@ -1177,7 +1198,7 @@ def _random_temp_password(n: int = 12) -> str:
 
 
 @app.get("/api/admin/users/practice-heads-preview")
-def admin_practice_heads_preview(_: dict = Depends(require_admin)):
+def admin_practice_heads_preview(_: dict = Depends(require_superadmin)):
     """Return the Practice_Heads_List rows annotated with which would be
     created vs already exist (matched by lowercased email). The frontend
     renders this as a confirm-table before the actual import."""
@@ -1213,7 +1234,7 @@ def admin_practice_heads_preview(_: dict = Depends(require_admin)):
 
 
 @app.post("/api/admin/users/practice-heads-import")
-def admin_practice_heads_import(body: dict, admin: dict = Depends(require_admin)):
+def admin_practice_heads_import(body: dict, admin: dict = Depends(require_superadmin)):
     """Create users for the selected Practice_Heads_List rows.
 
     Body: { emails: ["a@b.com", ...] }     # the lowercased emails to import.
@@ -1389,7 +1410,7 @@ def admin_practice_heads_import(body: dict, admin: dict = Depends(require_admin)
 
 
 @app.post("/api/admin/users/resync-practice-head-scopes")
-def admin_resync_practice_head_scopes(admin: dict = Depends(require_admin)):
+def admin_resync_practice_head_scopes(admin: dict = Depends(require_superadmin)):
     """One-shot fixer for already-imported practice heads whose
     user_data_scope rows were stored with the WRONG value -- e.g. the
     parent label 'Capability (Functional)' instead of the comma-split leaf
@@ -1513,7 +1534,7 @@ class SystemSettingUpdate(BaseModel):
 
 
 @app.get("/api/admin/settings")
-def admin_get_settings(_user: dict = Depends(require_admin)):
+def admin_get_settings(_user: dict = Depends(require_superadmin)):
     """Return all system settings as a key→value dict."""
     try:
         db = get_db(); cur = db.cursor()
@@ -1525,7 +1546,7 @@ def admin_get_settings(_user: dict = Depends(require_admin)):
 
 
 @app.put("/api/admin/settings")
-def admin_update_setting(body: SystemSettingUpdate, _user: dict = Depends(require_admin)):
+def admin_update_setting(body: SystemSettingUpdate, _user: dict = Depends(require_superadmin)):
     """Upsert a single system setting."""
     ALLOWED_KEYS = {"bypass_otp"}
     if body.key not in ALLOWED_KEYS:
@@ -1743,7 +1764,7 @@ def support_report(body: SupportTicketCreate, request: Request, user: dict = Dep
 
 
 @app.get("/api/admin/support/tickets")
-def admin_list_support_tickets(status: Optional[str] = None, admin: dict = Depends(require_admin)):
+def admin_list_support_tickets(status: Optional[str] = None, admin: dict = Depends(require_superadmin)):
     """List support tickets, newest first. Optional ?status=open|resolved."""
     db = get_db(); cur = db.cursor()
     if status in ("open", "resolved"):
@@ -1756,7 +1777,7 @@ def admin_list_support_tickets(status: Optional[str] = None, admin: dict = Depen
 
 
 @app.patch("/api/admin/support/tickets/{ticket_id}")
-def admin_update_support_ticket(ticket_id: int, body: SupportTicketUpdate, admin: dict = Depends(require_admin)):
+def admin_update_support_ticket(ticket_id: int, body: SupportTicketUpdate, admin: dict = Depends(require_superadmin)):
     """Mark a ticket open / resolved."""
     new_status = (body.status or "").strip().lower()
     if new_status not in ("open", "resolved"):
@@ -1804,13 +1825,61 @@ def chat_feedback(body: FeedbackCreate, request: Request, user: dict = Depends(g
         db.commit(); db.close()
     except Exception as e:
         print(f"[feedback] store failed: {e}")
+    # A thumbs-down flags the whole conversation to Mahad: a distinct, prominent
+    # audit action (visible in the superadmin Audit Log) + an email with the
+    # full conversation. Thumbs-up is a normal feedback event.
+    flagged = rating == "down"
     try:
-        audit_log.record(user=user, request=request, action="ai.feedback",
-                         resource_type="chat_message", resource_id=body.message_id,
-                         detail={"rating": rating})
+        audit_log.record(
+            user=user, request=request,
+            action="ai.feedback.flagged" if flagged else "ai.feedback",
+            resource_type="conversation", resource_id=body.conversation_id,
+            detail={"rating": rating, "message_id": body.message_id,
+                    "conversation_id": body.conversation_id,
+                    **({"comment": comment} if comment else {})},
+        )
     except Exception:
         pass
+    if flagged:
+        _flag_conversation_to_mahad(user, body.conversation_id, body.message_id, comment)
     return {"ok": True}
+
+
+# Negative feedback + usage notifications go ONLY here.
+_FEEDBACK_FLAG_EMAIL_TO = os.environ.get("FEEDBACK_FLAG_EMAIL_TO", "mahad.laeeque@tmcltd.com")
+
+
+def _flag_conversation_to_mahad(user, conversation_id, message_id, comment):
+    """Email the full flagged conversation to Mahad. Best-effort; never raises."""
+    try:
+        convo_text = "(conversation not found)"
+        if conversation_id:
+            db = get_db(); cur = db.cursor()
+            cur.execute(
+                "SELECT role, content FROM chat_messages WHERE conversation_id = ? ORDER BY id ASC",
+                (conversation_id,),
+            )
+            msgs = cur.fetchall(); db.close()
+            lines = []
+            for m in msgs:
+                md = m if isinstance(m, dict) else dict(m)
+                lines.append(f"[{(md.get('role') or '').upper()}] {(md.get('content') or '')[:1500]}")
+            if lines:
+                convo_text = "\n\n".join(lines)
+        who = user.get("email") or "a user"
+        subject = f"[Satori] 👎 Negative feedback flagged — conversation {conversation_id}"
+        text = (
+            "A user gave a thumbs-down on a Satori response. The full conversation is flagged below "
+            "and is also visible in the Audit Log (filter: Flagged feedback).\n\n"
+            f"User: {who}\nConversation ID: {conversation_id}\nResponse (message) ID: {message_id}\n"
+            + (f"Comment: {comment}\n" if comment else "")
+            + f"\n----- CONVERSATION -----\n{convo_text}\n----- END CONVERSATION -----\n\n— Satori"
+        )
+        ok, det = emailer.send_email(_FEEDBACK_FLAG_EMAIL_TO, subject, text)
+        if not ok:
+            print(f"[feedback-flag] email to {_FEEDBACK_FLAG_EMAIL_TO} not sent: {det}")
+    except Exception as e:
+        print(f"[feedback-flag] error: {e}")
 
 
 @app.post("/api/pulse")
@@ -2972,16 +3041,22 @@ def admin_chat_errors(limit: int = 100, admin: dict = Depends(require_superadmin
 
 
 
-def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None, dept_scope: list[str] | None = None) -> str:
+def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None, dept_scope: list[str] | None = None,
+                      sales_allowed: bool = True) -> str:
     """Execute a SQL query from the chat tool and return formatted results.
 
     plant_scope:
       None  — no restriction (admin or unrestricted user)
       []    — user has no plants assigned → deny all plant data
       [...] — restrict to these plant IDs (injected into SQL before execution)
+    sales_allowed:
+      False — user is not an admin; any Sales_* table reference is refused.
     """
     from bigquery_client import run_query
     sql_stripped = (sql or "").strip()
+    if not sales_allowed and _sql_touches_sales(sql_stripped):
+        print("[CHAT-SQL] blocked sales query for non-admin user")
+        return _SALES_DENIED_MSG
     if not sql_stripped:
         print("[CHAT-SQL] ERROR: empty sql argument received from model")
         return (
@@ -3100,6 +3175,19 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
     chat_dept_scope: list[str] | None = (
         _get_user_dept_scope(uid) if (user.get("role") or "").lower() != "admin" else None
     )
+    # Sales data is admin-only. Non-admins get a hard block in run_sql + a
+    # prompt note so the model doesn't even try.
+    chat_sales_allowed = _user_can_see_sales(user)
+    sales_scope_addon = "" if chat_sales_allowed else (
+        "\n\n--- SALES DATA RESTRICTION ---\n"
+        "This user is NOT an administrator. They have NO access to sales data. "
+        "NEVER query any Sales_* table (Sales_Accounts, Sales_AM_Scorecard, "
+        "Sales_Pipeline_Health, Sales_Plan_vs_Pipeline, Sales_Hunting_Gap, "
+        "Sales_KPI_Scorecard, Sales_Dormant_Accounts, Sales_Workload_Feasibility) "
+        "for this user. If they ask about sales, pipeline, accounts, AM "
+        "performance, or hunting gap, reply that sales data is only available to "
+        "admins. Answer only from workforce data.\n"
+    )
 
     # PII-redact the user's message + history before they ride along to a
     # third-party LLM. Best-effort: strips emails, phone numbers, CNICs,
@@ -3201,7 +3289,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
     system_prompt_final = (
         ANALYST_COMMON_SENSE + "\n\n" +
         (VOICE_SYSTEM_PROMPT_URDU if body.voice_mode else SYSTEM_PROMPT) +
-        _build_date_context() + scope_addon + "\n\n" + _schema_notes + "\n\n" + _live_snap +
+        _build_date_context() + scope_addon + sales_scope_addon + "\n\n" + _schema_notes + "\n\n" + _live_snap +
         ATTENDANCE_BEHAVIOR_ADDON +
         _user_context_addon(user) +
         TOPIC_SCOPE_GUARD
@@ -3434,7 +3522,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                     sql_is_runnable = bool(extracted_sql and re.search(r"\bSELECT\b[\s\S]+?\bFROM\b", extracted_sql, re.IGNORECASE))
                     if sql_is_runnable:
                         print(f"[CHAT] Auto-executing extracted SQL (len={len(extracted_sql)})")
-                        result_text = _execute_chat_sql(extracted_sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
+                        result_text = _execute_chat_sql(extracted_sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope, sales_allowed=chat_sales_allowed)
                         contents.append(genai.types.Content(
                             role="model",
                             parts=[genai.types.Part(text=reply)],
@@ -3526,7 +3614,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                         print(f"[CHAT] round {round_num+1} — run_sql with EMPTY sql; full args keys={list(args.keys())} repr={repr(args)[:300]}")
                     else:
                         print(f"[CHAT] round {round_num+1} — run_sql ({len(sql)} chars)")
-                    result_text = _execute_chat_sql(sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
+                    result_text = _execute_chat_sql(sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope, sales_allowed=chat_sales_allowed)
                 else:
                     result_text = f"Unknown function: {fc.name}"
                 fr_parts.append(genai.types.Part.from_function_response(
@@ -3654,7 +3742,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                 extracted_sql = sel_match.group(1).strip()
         if extracted_sql:
             print(f"[CHAT] Fallback: executing SQL extracted from final response")
-            result_text = _execute_chat_sql(extracted_sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
+            result_text = _execute_chat_sql(extracted_sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope, sales_allowed=chat_sales_allowed)
             # Summarize the result using Gemini (no tools)
             summary_contents = [genai.types.Content(
                 role="user",
@@ -3697,6 +3785,14 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
     uid_stream = int(user["sub"])
     chat_dept_scope: list[str] | None = (
         _get_user_dept_scope(uid_stream) if (user.get("role") or "").lower() != "admin" else None
+    )
+    chat_sales_allowed = _user_can_see_sales(user)
+    sales_scope_addon = "" if chat_sales_allowed else (
+        "\n\n--- SALES DATA RESTRICTION ---\n"
+        "This user is NOT an administrator and has NO access to sales data. NEVER "
+        "query any Sales_* table for them. If they ask about sales / pipeline / "
+        "accounts / AM performance / hunting gap, reply that sales data is only "
+        "available to admins. Answer only from workforce data.\n"
     )
 
     # Fetch relevant BigQuery data (skipped for department-scoped users).
@@ -3763,7 +3859,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
     except: _live_snap_s = ""
     system_prompt_final = (
         ANALYST_COMMON_SENSE + "\n\n" +
-        SYSTEM_PROMPT + _build_date_context() + scope_addon_stream + "\n\n" +
+        SYSTEM_PROMPT + _build_date_context() + scope_addon_stream + sales_scope_addon + "\n\n" +
         _schema_notes_s + "\n\n" + _live_snap_s +
         ATTENDANCE_BEHAVIOR_ADDON +
         _user_context_addon(user) +
@@ -3830,7 +3926,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                         sql_is_runnable = bool(extracted and re.search(r"\bSELECT\b[\s\S]+?\bFROM\b", extracted, re.IGNORECASE))
                         if sql_is_runnable:
                             local_contents.append(genai.types.Content(role="model", parts=[genai.types.Part(text=reply_txt)]))
-                            result_text = _execute_chat_sql(extracted, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
+                            result_text = _execute_chat_sql(extracted, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope, sales_allowed=chat_sales_allowed)
                             local_contents.append(genai.types.Content(
                                 role="user",
                                 parts=[genai.types.Part(text=f"[SQL auto-executed]\nResult:\n{result_text}\n\nNow give a direct answer in plain language. No SQL, no announcements.")],
@@ -3862,7 +3958,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                             print(f"[CHAT-STREAM] round {round_num+1} — run_sql with EMPTY sql; full args keys={list(args.keys())} repr={repr(args)[:300]}")
                         else:
                             print(f"[CHAT-STREAM] round {round_num+1} — run_sql ({len(sql_arg)} chars)")
-                        result_text = _execute_chat_sql(sql_arg, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope)
+                        result_text = _execute_chat_sql(sql_arg, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope, sales_allowed=chat_sales_allowed)
                     else:
                         result_text = f"Unknown function: {fc.name}"
                     fr_parts.append(genai.types.Part.from_function_response(
@@ -5104,8 +5200,30 @@ def update_my_settings(body: dict, user: dict = Depends(get_current_user)):
 
 @app.get("/api/admin/audit")
 def admin_audit(limit: int = 200, offset: int = 0, action: str = "", user_id: int | None = None,
-                user: dict = Depends(get_current_user)):
-    return {"events": [], "limit": limit, "offset": offset}
+                user: dict = Depends(require_superadmin)):
+    """Read the audit trail (data_access_log) — superadmin only. Supports an
+    `action` prefix filter (e.g. 'ai.', 'share.', 'ai.feedback.flagged')."""
+    limit = max(1, min(int(limit or 200), 1000))
+    offset = max(0, int(offset or 0))
+    where, params = [], []
+    if action:
+        where.append("action LIKE ?"); params.append(action + "%")
+    if user_id:
+        where.append("user_id = ?"); params.append(user_id)
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    db = get_db(); cur = db.cursor()
+    rows = []
+    try:
+        cur.execute(
+            f"SELECT id, user_id, user_email, action, resource_type, resource_id, detail, ip_address, created_at "
+            f"FROM data_access_log{clause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            tuple(params) + (limit, offset),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[/api/admin/audit] error: {e}")
+    db.close()
+    return {"events": rows, "limit": limit, "offset": offset}
 
 
 @app.post("/api/admin/retention-sweep")
@@ -5774,6 +5892,8 @@ def dashboard_drill(body: dict, user: dict = Depends(get_current_user)):
     }
     """
     parent_sql = (body.get("parent_sql") or "").strip()
+    if not _user_can_see_sales(user) and _sql_touches_sales(parent_sql):
+        raise HTTPException(status_code=403, detail="Sales data is only available to admins.")
     parent_title = (body.get("parent_title") or "").strip()
     parent_type = (body.get("parent_type") or "bar").strip()
     label_key = (body.get("label_key") or "").strip()
@@ -5955,6 +6075,10 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
     """
     config = body.get("config") or {}
     user_filters = body.get("filters") or {}
+    # Sales data is admin-only — block a non-admin from running any dashboard
+    # whose SQL touches a Sales_* table.
+    if not _user_can_see_sales(user) and _sql_touches_sales(json.dumps(config)):
+        raise HTTPException(status_code=403, detail="Sales data is only available to admins.")
 
     def _exec(sql_template, tag, widget_meta=None):
         if not sql_template or not sql_template.strip():
@@ -7763,6 +7887,8 @@ def _run_report_config(config: dict) -> dict:
 @app.post("/api/report/preview")
 def report_preview(body: dict, user: dict = Depends(get_current_user)):
     config = body.get("config") or {}
+    if not _user_can_see_sales(user) and _sql_touches_sales(json.dumps(config)):
+        raise HTTPException(status_code=403, detail="Sales data is only available to admins.")
     return _run_report_config(config)
 
 
@@ -7779,6 +7905,8 @@ def _coerce_num(v):
 def report_generate(body: dict, user: dict = Depends(get_current_user)):
     """Render the report to PDF or Excel and return as a download."""
     config = body.get("config") or {}
+    if not _user_can_see_sales(user) and _sql_touches_sales(json.dumps(config)):
+        raise HTTPException(status_code=403, detail="Sales data is only available to admins.")
     fmt = (body.get("format") or "pdf").lower()
     if fmt in ("excel", "xls"):
         fmt = "xlsx"

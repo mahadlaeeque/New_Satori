@@ -1883,6 +1883,14 @@ const PROMPT_CATEGORIES = [
   { id: "hunting",      label: "Hunting Gap" },
 ];
 
+// Sales-only prompt categories — hidden from non-admin users (sales data is
+// admin-only). Mirrors the backend Sales_* restriction.
+const SALES_PROMPT_CATS = new Set(["pipeline", "accounts", "hunting"]);
+const isAdminRole = () => {
+  try { return (JSON.parse(localStorage.getItem("permissions") || "{}").role || "").toLowerCase() === "admin"; }
+  catch { return false; }
+};
+
 
 // ─── Markdown Renderer ───
 const renderMarkdown = (text) => {
@@ -2416,7 +2424,14 @@ const AgentPage = () => {
   };
 
   const getFilteredPrompts = () => {
-    if (selectedCategory === "all") return Object.entries(SAMPLE_PROMPTS).flatMap(([cat, prompts]) => prompts.map(p => ({ ...p, category: cat })));
+    const canSales = isAdminRole();
+    const allow = (cat) => canSales || !SALES_PROMPT_CATS.has(cat);
+    if (selectedCategory === "all") {
+      return Object.entries(SAMPLE_PROMPTS)
+        .filter(([cat]) => allow(cat))
+        .flatMap(([cat, prompts]) => prompts.map(p => ({ ...p, category: cat })));
+    }
+    if (!allow(selectedCategory)) return [];
     return (SAMPLE_PROMPTS[selectedCategory] || []).map(p => ({ ...p, category: selectedCategory }));
   };
 
@@ -2652,9 +2667,9 @@ const AgentPage = () => {
           <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 }}>
             <Sparkles size={14} color={COLORS.accent} /> Sample Prompts
           </div>
-          {/* Category tabs */}
+          {/* Category tabs (sales categories hidden from non-admins) */}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 12 }}>
-            {PROMPT_CATEGORIES.map(cat => (
+            {PROMPT_CATEGORIES.filter(cat => isAdminRole() || !SALES_PROMPT_CATS.has(cat.id)).map(cat => (
               <button key={cat.id} onClick={() => setSelectedCategory(cat.id)} style={{
                 padding: "4px 10px", borderRadius: 8, border: `1px solid ${selectedCategory === cat.id ? COLORS.accent : COLORS.border}`,
                 background: selectedCategory === cat.id ? `${COLORS.accent}15` : COLORS.surface, fontSize: 10, fontWeight: 500,
@@ -8636,6 +8651,7 @@ const AuditLogPage = () => {
     if (a.startsWith("share.")) return COLORS.purple;
     if (a.startsWith("report.download")) return COLORS.danger;
     if (a.startsWith("totp.")) return COLORS.warning;
+    if (a.startsWith("ai.feedback.flagged")) return COLORS.danger;
     if (a.startsWith("ai.")) return COLORS.teal;
     if (a.startsWith("user.")) return COLORS.danger;
     return COLORS.accentDark;
@@ -8653,6 +8669,7 @@ const AuditLogPage = () => {
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {[
             { label: "All", val: "" },
+            { label: "🚩 Flagged", val: "ai.feedback.flagged" },
             { label: "Downloads", val: "report.download" },
             { label: "Shares", val: "share." },
             { label: "AI", val: "ai." },
@@ -9345,10 +9362,10 @@ const NAV_ITEMS = [
   { id: "dashboards", label: "Dashboard Builder", icon: LayoutDashboard, component: DashboardsPage, requiresFeature: "dashboards" },
   { id: "_divider_intelligence", label: "INTELLIGENCE", isDivider: true },
   { id: "availability", label: "Availability Engine", icon: Activity, component: AvailabilityEnginePage, requiresFeature: "availability" },
-  { id: "_divider_admin", label: "ADMIN", isDivider: true, adminOnly: true },
-  { id: "users", label: "User Management", icon: Users, component: UserManagementPage, adminOnly: true },
-  { id: "audit", label: "Audit Log", icon: Shield, component: AuditLogPage, adminOnly: true },
-  { id: "support", label: "Support Tickets", icon: MessageSquare, component: SupportTicketsPage, adminOnly: true },
+  { id: "_divider_admin", label: "ADMIN", isDivider: true, superAdminOnly: true },
+  { id: "users", label: "User Management", icon: Users, component: UserManagementPage, superAdminOnly: true },
+  { id: "audit", label: "Audit Log", icon: Shield, component: AuditLogPage, superAdminOnly: true },
+  { id: "support", label: "Support Tickets", icon: MessageSquare, component: SupportTicketsPage, superAdminOnly: true },
   { id: "settings", label: "System Settings", icon: Settings, component: SystemSettingsPage, superAdminOnly: true },
 ];
 
