@@ -4974,6 +4974,20 @@ def _autofix_dashboard_sql(sql: str) -> str:
         return sql
     import re as _re
 
+    # Fix 0 — correct hallucinated Employee_Data column names. Four columns are
+    # CamelCase in the warehouse (EmployeePosition, EmployeeEmail,
+    # EmployeeHierarchyNode, EmployeeLocation); the model sometimes writes the
+    # underscore form, which BigQuery rejects (e.g. "Name Employee_Hierarchy not
+    # found"). The OTHER Employee_* columns (Employee_Code / Employee_Status /
+    # Employee_Type) ARE genuinely underscored, so only remap these four.
+    for _pat, _repl in (
+        (r"\bEmployee_Hierarchy(?:_?Node)?\b", "EmployeeHierarchyNode"),
+        (r"\bEmployee_Position\b",             "EmployeePosition"),
+        (r"\bEmployee_Email\b",                "EmployeeEmail"),
+        (r"\bEmployee_Location\b",             "EmployeeLocation"),
+    ):
+        sql = _re.sub(_pat, _repl, sql, flags=_re.IGNORECASE)
+
     # Fix 1 — Employee_Type IN ('Foo','Bar') → LOWER(Employee_Type) IN ('foo','bar')
     def _wrap_employee_type(m):
         prefix = m.group(1) or ""   # e.g. "e." or ""
