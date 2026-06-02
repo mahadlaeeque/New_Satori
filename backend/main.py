@@ -26,9 +26,9 @@ from datetime import datetime, timedelta
 # the original TMC dataset so the existing deploy keeps working; overriding
 # either env var lets us point the same code at the migrated capability-agent-
 # prod project without touching prompts or autofix patterns.
-BQ_PROJECT  = os.environ.get("VERTEX_PROJECT",  "ai-vertex-mahad")
+BQ_PROJECT  = os.environ.get("VERTEX_PROJECT",  "capability-agent-prod")
 BQ_DATASET  = os.environ.get("VERTEX_DATASET",  "Satori_Project")
-BQ_FULL     = f"{BQ_PROJECT}.{BQ_DATASET}"          # 'ai-vertex-mahad.Satori_Project'
+BQ_FULL     = f"{BQ_PROJECT}.{BQ_DATASET}"          # 'capability-agent-prod.Satori_Project'
 BQ_BACKTICK = f"`{BQ_FULL}`"                         # for SQL embedding
 
 
@@ -4154,7 +4154,7 @@ def list_tables():
 # ── TMC Satori Dataset API (Workforce + Sales analytics) ──
 from bigquery_client import run_query as bq_run_query
 
-_TMC_PROJECT = os.environ.get("VERTEX_PROJECT", "ai-vertex-mahad")
+_TMC_PROJECT = os.environ.get("VERTEX_PROJECT", "capability-agent-prod")
 _TMC_DATASET_NAME = os.environ.get("VERTEX_DATASET", "Satori_Project")
 _TMC_DATASET = f"`{_TMC_PROJECT}.{_TMC_DATASET_NAME}`"
 
@@ -5311,7 +5311,7 @@ def _autofix_dashboard_sql(sql: str) -> str:
     # incomplete or the join-key types don't align (e.g. STRING vs INT64
     # zero-padding).
     join_re = _re.compile(
-        r"\b(?<!LEFT\s)JOIN\s+`?(?:ai-vertex-mahad\.Satori_Project\.Employee_Data)`?\s+(?P<alias>[A-Za-z_][A-Za-z0-9_]*)\s+ON\s+(?P<on>[^\n]+?)(?=\s+(?:WHERE|GROUP|ORDER|LIMIT|LEFT\s+JOIN|JOIN)\b|$)",
+        r"\b(?<!LEFT\s)JOIN\s+`?(?:[\w-]+\.Satori_Project\.)?Employee_Data`?\s+(?P<alias>[A-Za-z_][A-Za-z0-9_]*)\s+ON\s+(?P<on>[^\n]+?)(?=\s+(?:WHERE|GROUP|ORDER|LIMIT|LEFT\s+JOIN|JOIN)\b|$)",
         _re.IGNORECASE,
     )
     m = join_re.search(sql)
@@ -7961,7 +7961,7 @@ def schema_probe():
     }
     out = {}
     for name, sql in probes.items():
-        r = bq_run_query(sql, max_rows=40)
+        r = bq_run_query(normalize_bq_project(sql), max_rows=40)
         out[name] = r
     return {"probes": out}
 

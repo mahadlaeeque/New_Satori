@@ -4,7 +4,7 @@ BigQuery integration for Satori — TMC Capability Intelligence platform.
 Queries the TMC workforce + sales data warehouse and provides results as
 context for the AI chat agent.
 
-Dataset: ai-vertex-mahad.Satori_Project (10 tables)
+Dataset: capability-agent-prod.Satori_Project (10 tables)
   Workforce: Employee_Data, Attendance_Data, Allocation_Data, Timesheet_Data
   Sales:     Sales_Accounts, Sales_AM_Scorecard, Sales_Plan_vs_Pipeline,
              Sales_Pipeline_Health, Sales_Hunting_Gap, Sales_KPI_Scorecard,
@@ -19,7 +19,7 @@ _client = None
 
 # These defaults match TMC's production data layout. Override via env vars in
 # non-prod / dev environments.
-DEFAULT_PROJECT = "ai-vertex-mahad"
+DEFAULT_PROJECT = "capability-agent-prod"
 DEFAULT_DATASET = "Satori_Project"
 
 

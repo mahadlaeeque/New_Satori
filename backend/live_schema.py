@@ -7,9 +7,15 @@ tiers, etc.) plus a row count and date range per table. Cached for 1h in
 memory and rendered into a compact context block injected into the chat /
 dashboard / report system prompts.
 """
+import os
 import time
 import threading
 from bigquery_client import run_query
+
+# Live BQ target, env-driven so this module follows the same project as the
+# rest of the app (capability-agent-prod on prod). The probe SQL below is
+# written against the canonical name and rewritten to _BQ_FULL at run time.
+_BQ_FULL = f"{os.environ.get('VERTEX_PROJECT', 'capability-agent-prod')}.{os.environ.get('VERTEX_DATASET', 'Satori_Project')}"
 
 _snapshot = None
 _snapshot_at = 0.0
@@ -19,88 +25,88 @@ _lock = threading.Lock()
 _PROBES = {
     "departments": (
         "SELECT DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'(empty)') AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Employee_Data` "
+        "FROM `capability-agent-prod.Satori_Project.Employee_Data` "
         "GROUP BY v ORDER BY n DESC LIMIT 50"
     ),
     "employee_types": (
         "SELECT DISTINCT Employee_Type AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Type IS NOT NULL "
+        "FROM `capability-agent-prod.Satori_Project.Employee_Data` WHERE Employee_Type IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 30"
     ),
     "positions": (
         "SELECT DISTINCT EmployeePosition AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeePosition IS NOT NULL "
+        "FROM `capability-agent-prod.Satori_Project.Employee_Data` WHERE EmployeePosition IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 40"
     ),
     "locations": (
         "SELECT DISTINCT EmployeeLocation AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeeLocation IS NOT NULL "
+        "FROM `capability-agent-prod.Satori_Project.Employee_Data` WHERE EmployeeLocation IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 30"
     ),
     "attendance_statuses": (
         "SELECT DISTINCT attendance_status_text AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` WHERE attendance_status_text IS NOT NULL "
+        "FROM `capability-agent-prod.Satori_Project.Attendance_Data` WHERE attendance_status_text IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 20"
     ),
     "allocation_flags": (
         "SELECT DISTINCT Flag AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Allocation_Data` WHERE Flag IS NOT NULL "
+        "FROM `capability-agent-prod.Satori_Project.Allocation_Data` WHERE Flag IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 10"
     ),
     "competencies": (
         "SELECT DISTINCT emp_competency AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Allocation_Data` WHERE emp_competency IS NOT NULL "
+        "FROM `capability-agent-prod.Satori_Project.Allocation_Data` WHERE emp_competency IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 40"
     ),
     "ams": (
         "SELECT DISTINCT AM AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE AM IS NOT NULL "
+        "FROM `capability-agent-prod.Satori_Project.Sales_AM_Scorecard` WHERE AM IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 30"
     ),
     "vps": (
         "SELECT DISTINCT VP AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE VP IS NOT NULL "
+        "FROM `capability-agent-prod.Satori_Project.Sales_AM_Scorecard` WHERE VP IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 15"
     ),
     "sales_cities": (
         "SELECT DISTINCT City AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE City IS NOT NULL "
+        "FROM `capability-agent-prod.Satori_Project.Sales_AM_Scorecard` WHERE City IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 20"
     ),
     "account_tiers": (
         "SELECT DISTINCT Tier AS v, COUNT(*) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Sales_Accounts` WHERE Tier IS NOT NULL "
+        "FROM `capability-agent-prod.Satori_Project.Sales_Accounts` WHERE Tier IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 10"
     ),
     "attendance_date_range": (
         "SELECT MIN(attendance_date) AS v, MAX(attendance_date) AS n "
-        "FROM `ai-vertex-mahad.Satori_Project.Attendance_Data`"
+        "FROM `capability-agent-prod.Satori_Project.Attendance_Data`"
     ),
     "row_counts": (
-        "SELECT 'Employee_Data' AS v, COUNT(*) AS n FROM `ai-vertex-mahad.Satori_Project.Employee_Data`"
-        " UNION ALL SELECT 'Attendance_Data', COUNT(*) FROM `ai-vertex-mahad.Satori_Project.Attendance_Data`"
-        " UNION ALL SELECT 'Allocation_Data', COUNT(*) FROM `ai-vertex-mahad.Satori_Project.Allocation_Data`"
-        " UNION ALL SELECT 'Timesheet_Data', COUNT(*) FROM `ai-vertex-mahad.Satori_Project.Timesheet_Data`"
-        " UNION ALL SELECT 'Sales_AM_Scorecard', COUNT(*) FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard`"
-        " UNION ALL SELECT 'Sales_Accounts', COUNT(*) FROM `ai-vertex-mahad.Satori_Project.Sales_Accounts`"
-        " UNION ALL SELECT 'Sales_Pipeline_Health', COUNT(*) FROM `ai-vertex-mahad.Satori_Project.Sales_Pipeline_Health`"
-        " UNION ALL SELECT 'Sales_Plan_vs_Pipeline', COUNT(*) FROM `ai-vertex-mahad.Satori_Project.Sales_Plan_vs_Pipeline`"
-        " UNION ALL SELECT 'Sales_Hunting_Gap', COUNT(*) FROM `ai-vertex-mahad.Satori_Project.Sales_Hunting_Gap`"
+        "SELECT 'Employee_Data' AS v, COUNT(*) AS n FROM `capability-agent-prod.Satori_Project.Employee_Data`"
+        " UNION ALL SELECT 'Attendance_Data', COUNT(*) FROM `capability-agent-prod.Satori_Project.Attendance_Data`"
+        " UNION ALL SELECT 'Allocation_Data', COUNT(*) FROM `capability-agent-prod.Satori_Project.Allocation_Data`"
+        " UNION ALL SELECT 'Timesheet_Data', COUNT(*) FROM `capability-agent-prod.Satori_Project.Timesheet_Data`"
+        " UNION ALL SELECT 'Sales_AM_Scorecard', COUNT(*) FROM `capability-agent-prod.Satori_Project.Sales_AM_Scorecard`"
+        " UNION ALL SELECT 'Sales_Accounts', COUNT(*) FROM `capability-agent-prod.Satori_Project.Sales_Accounts`"
+        " UNION ALL SELECT 'Sales_Pipeline_Health', COUNT(*) FROM `capability-agent-prod.Satori_Project.Sales_Pipeline_Health`"
+        " UNION ALL SELECT 'Sales_Plan_vs_Pipeline', COUNT(*) FROM `capability-agent-prod.Satori_Project.Sales_Plan_vs_Pipeline`"
+        " UNION ALL SELECT 'Sales_Hunting_Gap', COUNT(*) FROM `capability-agent-prod.Satori_Project.Sales_Hunting_Gap`"
     ),
     "join_compat_attendance": (
         "WITH e AS (SELECT DISTINCT LTRIM(REGEXP_REPLACE(CAST(Employee_Code AS STRING), r'[^0-9]', ''), '0') AS k "
-        "  FROM `ai-vertex-mahad.Satori_Project.Employee_Data`), "
+        "  FROM `capability-agent-prod.Satori_Project.Employee_Data`), "
         "a AS (SELECT DISTINCT LTRIM(REGEXP_REPLACE(CAST(personal_no AS STRING), r'[^0-9]', ''), '0') AS k "
-        "  FROM `ai-vertex-mahad.Satori_Project.Attendance_Data`) "
+        "  FROM `capability-agent-prod.Satori_Project.Attendance_Data`) "
         "SELECT 'overlap' AS v, COUNT(*) AS n FROM e JOIN a USING (k) "
         "UNION ALL SELECT 'in_employee_only', COUNT(*) FROM e WHERE k NOT IN (SELECT k FROM a) "
         "UNION ALL SELECT 'in_attendance_only', COUNT(*) FROM a WHERE k NOT IN (SELECT k FROM e)"
     ),
     "join_compat_attendance_name": (
         "WITH e AS (SELECT DISTINCT UPPER(TRIM(Resource_Name)) AS k "
-        "  FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Resource_Name IS NOT NULL), "
+        "  FROM `capability-agent-prod.Satori_Project.Employee_Data` WHERE Resource_Name IS NOT NULL), "
         "a AS (SELECT DISTINCT UPPER(TRIM(employee_name)) AS k "
-        "  FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` WHERE employee_name IS NOT NULL) "
+        "  FROM `capability-agent-prod.Satori_Project.Attendance_Data` WHERE employee_name IS NOT NULL) "
         "SELECT 'overlap' AS v, COUNT(*) AS n FROM e JOIN a USING (k) "
         "UNION ALL SELECT 'in_employee_only', COUNT(*) FROM e WHERE k NOT IN (SELECT k FROM a) "
         "UNION ALL SELECT 'in_attendance_only', COUNT(*) FROM a WHERE k NOT IN (SELECT k FROM e)"
@@ -112,6 +118,8 @@ def _probe_all() -> dict:
     out = {}
     for name, sql in _PROBES.items():
         try:
+            # Follow the configured project if it differs from the default.
+            sql = sql.replace("capability-agent-prod.Satori_Project", _BQ_FULL)
             r = run_query(sql, max_rows=50)
             out[name] = {"error": r["error"]} if "error" in r else (r.get("rows") or [])
         except Exception as e:
