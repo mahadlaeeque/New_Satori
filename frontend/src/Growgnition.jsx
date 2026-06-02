@@ -10466,10 +10466,17 @@ export default function App() {
     } catch {}
   }, []);
 
-  // On mount, if we already have a token but no cached permissions, fetch them.
+  // On mount (once per login session), always pull the authoritative
+  // permissions from the server — the cached login copy can be missing fields
+  // like is_superadmin (which gates the Admin nav), so a reload must reconcile.
+  const _permsRefreshed = useRef(false);
   useEffect(() => {
-    if (isLoggedIn && !permissions) refreshPermissions();
-  }, [isLoggedIn, permissions, refreshPermissions]);
+    if (isLoggedIn && !_permsRefreshed.current) {
+      _permsRefreshed.current = true;
+      refreshPermissions();
+    }
+    if (!isLoggedIn) _permsRefreshed.current = false;
+  }, [isLoggedIn, refreshPermissions]);
 
   // -- Stale-currentUser refresh --
   // localStorage caches the user blob from login time. If anything on the

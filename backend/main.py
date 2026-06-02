@@ -315,6 +315,10 @@ def _issue_session(uid: int, row: dict) -> dict:
         }
     )
     features = _features_for_user(uid, row["role"])
+    is_superadmin = (
+        (row.get("role") or "").lower() == "admin"
+        and (row.get("email") or "").strip().lower() in _SUPERADMIN_EMAILS
+    )
     return {
         "stage": "ok",
         "token": token,
@@ -327,6 +331,10 @@ def _issue_session(uid: int, row: dict) -> dict:
         },
         "permissions": {
             "role": row["role"],
+            # is_superadmin MUST be here (not just in /api/me/permissions) — the
+            # admin nav is gated on it at login time, so omitting it hid the
+            # whole Admin section for superadmins until a later refresh.
+            "is_superadmin": is_superadmin,
             "features": features,
         },
     }
