@@ -1611,10 +1611,13 @@ def admin_lookup_dimension(dimension: str, _: dict = Depends(require_superadmin)
 # 1h; BQ failures degrade to nulls (the frontend simply hides the label).
 _freshness_cache = {"data": None, "at": 0.0}
 _FRESHNESS_TTL_SECONDS = 60 * 60
+# (table, date_col, optional_where). Allocation is restricted to actuals
+# (Forecast_Flag=0) — the Allocation_Data view carries forecasts out to 2030,
+# which would otherwise make "Data as of" jump into the future.
 _FRESHNESS_PROBES = {
-    "attendance": ("Attendance_Data", "attendance_date"),
-    "allocation": ("Allocation_Data", "Date"),
-    "timesheet":  ("Timesheet_Data", "DATE_KEY"),
+    "attendance": ("Attendance_Data", "attendance_date", ""),
+    "allocation": ("Allocation_Data", "Date", "WHERE Forecast_Flag = 0"),
+    "timesheet":  ("Timesheet_Data", "DATE_KEY", ""),
 }
 _MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -1651,9 +1654,9 @@ def data_freshness(user: dict = Depends(get_current_user)):
 
     sources = {}
     latest = None  # (date, label, raw) for the overall freshness
-    for key, (table, col) in _FRESHNESS_PROBES.items():
+    for key, (table, col, where) in _FRESHNESS_PROBES.items():
         try:
-            sql = f"SELECT CAST(MAX(`{col}`) AS STRING) AS max_date FROM {sql_table(table)}"
+            sql = f"SELECT CAST(MAX(`{col}`) AS STRING) AS max_date FROM {sql_table(table)} {where}"
             r = bq_run_query(sql, max_rows=1)
             if "error" in r:
                 print(f"[data-freshness] probe {key} BQ error: {r['error']}")
@@ -2284,8 +2287,9 @@ DATA WAREHOUSE — `ai-vertex-mahad.Satori_Project` (10 tables):
 WORKFORCE TABLES
 1. `Employee_Data` — Employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name, EmployeePosition, EmployeeEmail, EmployeeHierarchyNode (department), EmployeeLocation (city), Employee_Status, Employee_Type ('MTO'/'Permanent'/'Probation'/'Contract'). Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
 2. `Attendance_Data` — Daily attendance per employee. Cols: attendance_date (DATE), personal_no (STRING, 'E-902' format — JOIN to Employee_Data on this), employee_id (INT64 sequence, NOT a JOIN key), employee_name, employee_email, checkin_time (STRING HH:MM:SS), checkout_time (STRING), attendance_status_text ('Present'/'Absent'/'Late'/'Leave'/etc.), is_present (0/1), is_absent (0/1), is_on_leave (0/1), is_remote (0/1), is_holiday (0/1), is_weekend (0/1), leave_type_name. For "late": LOWER(attendance_status_text) = 'late'.
-3. `Allocation_Data` — Weekly project allocation. Cols: project_id, employee_id (STRING "E-1234"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag (values: 'Allocated' / 'Bench' — NOT 'Actual' / 'Forecast'), Forecast_Flag, Date. Bench/availability bands: classify on MAX(allocation_percent) per employee — Allocated = MAX(pct) >= 90; Partial = 1-89; Bench = 0/NULL.
-4. `Timesheet_Data` — Ticket/project hours. Cols: TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY, TICKET_DESCRIPTION, TICKET_SUBJECT. Join to employees on CAST(Employee_Code AS STRING) = CAST(TICKET_USER_ID AS STRING).
+3. `Allocation_Data` — Weekly project allocation (one row per employee × project × week). Cols: project_id (**JOIN to Project_Master.Project_Code for the project NAME**), employee_id (STRING "E-1234" — JOIN to Employee_Data.employee_code, digit-normalised), allocation_percent (0-100 — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Allocated' = real billable project / 'Bench' = bench project), Forecast_Flag (0 = ACTUAL, 1 = forecast — for CURRENT state ALWAYS filter Forecast_Flag=0), Date (DATE), Week/Year/Month. **Bench logic:** an employee is ON BENCH when they have NO Flag='Allocated' row with allocation_percent>0 in the recent actual weeks — a bench-project row can show allocation_percent=100 yet means they're benched, so NEVER classify on raw allocation_percent alone. Allocated = has a Flag='Allocated' row ≥100%; Partial = 1-99%.
+4. `Timesheet_Data` — Logged ticket/project hours. Cols: TICKET_USER_ID (JOIN to Employee_Data.employee_code, digit-normalised), TICKET_PROJECT_CODE (**JOIN to Project_Master.Project_Code for the project name**), TICKET_PROJECT_LABEL, TICKET_HOURS (FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT. Only ~397 employees have any timesheet rows (range ~2025-05 → 2026-04); "no timesheet" is normal for the rest.
+5. `Project_Master` — Project reference (everyone can see it). Cols: Project_Code (the key that allocation.project_id AND timesheet.TICKET_PROJECT_CODE join to), Project_Name (e.g. '1245 - TMC Project Matrix'), Client_Name, Project_Type, Project_Status, Competency, PM_ID (project manager's employee_code), Project_Start_Date, Project_EndDate. ALWAYS join here to report project NAMES rather than bare codes.
 
 SALES TABLES
 5. `Sales_Accounts` (~359 rows) — Customer accounts. Cols: VP, AM, Location, Account, Tier ('A'/'B'/'C'), Dormant ('Yes'/'No'), Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits, Zero_Visit ('Yes'/'No').
@@ -7033,15 +7037,25 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
     # Project allocations — every project this employee has touched, with
     # peak allocation % and the competency they brought to it. No Date
     # filter (Allocation_Data.Date type unreliable on prod, see _avail_kpis_sql).
+    # Current (actual) project allocations, joined to Project_Master so we show
+    # the real project NAME / client / type — not just the bare project code.
     alloc_sql = f"""
         SELECT
-          COALESCE(NULLIF(TRIM(CAST(project_id AS STRING)), ''), 'Unspecified') AS project_id,
-          COALESCE(NULLIF(TRIM(emp_competency), ''), '') AS competency,
-          MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS allocation_pct,
+          COALESCE(NULLIF(TRIM(CAST(a.project_id AS STRING)), ''), 'Unspecified') AS project_id,
+          COALESCE(NULLIF(TRIM(p.Project_Name), ''), CAST(a.project_id AS STRING)) AS project_name,
+          COALESCE(NULLIF(TRIM(p.Client_Name), ''), '') AS client_name,
+          COALESCE(NULLIF(TRIM(p.Project_Type), ''), '') AS project_type,
+          COALESCE(NULLIF(TRIM(p.Project_Status), ''), '') AS project_status,
+          COALESCE(NULLIF(TRIM(a.emp_competency), ''), '') AS competency,
+          MAX(SAFE_CAST(a.allocation_percent AS FLOAT64)) AS allocation_pct,
+          MAX(IF(a.Flag = 'Allocated', SAFE_CAST(a.allocation_percent AS FLOAT64), 0)) AS real_pct,
           COUNT(*) AS records
-        FROM {_bq_avail('Allocation_Data')}
-        WHERE {_norm_emp_id('employee_id')} = {norm_target}
-        GROUP BY project_id, competency
+        FROM {_bq_avail('Allocation_Data')} a
+        LEFT JOIN {_bq_avail('Project_Master')} p
+          ON CAST(a.project_id AS STRING) = CAST(p.Project_Code AS STRING)
+        WHERE {_norm_emp_id('a.employee_id')} = {norm_target}
+          AND a.Forecast_Flag = 0
+        GROUP BY project_id, project_name, client_name, project_type, project_status, competency
         ORDER BY allocation_pct DESC, records DESC
         LIMIT 50
     """
@@ -7053,8 +7067,13 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
     projects = [
         {
             "project_id":     row.get("project_id") or "Unspecified",
+            "project_name":   row.get("project_name") or (row.get("project_id") or "Unspecified"),
+            "client_name":    row.get("client_name") or "",
+            "project_type":   row.get("project_type") or "",
+            "project_status": row.get("project_status") or "",
             "competency":     row.get("competency") or "",
             "allocation_pct": float(row.get("allocation_pct") or 0),
+            "on_bench":       float(row.get("real_pct") or 0) == 0,
             "records":        int(row.get("records") or 0),
         }
         for row in (r1.get("rows") or [])

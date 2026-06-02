@@ -662,8 +662,10 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
                       display: "grid", gridTemplateColumns: "1fr 90px", gap: 14, alignItems: "center",
                     }}>
                       <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: C.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.project_id}</div>
-                        <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>{p.competency || "—"}</div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: C.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.project_name || p.project_id}</div>
+                        <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {[p.client_name, p.project_type, p.competency].filter(Boolean).join(" · ") || "—"}
+                        </div>
                       </div>
                       <div>
                         <div style={{ height: 6, background: C.surfaceAlt, borderRadius: 999, overflow: "hidden" }}>
