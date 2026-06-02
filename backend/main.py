@@ -4985,6 +4985,9 @@ def _autofix_dashboard_sql(sql: str) -> str:
         (r"\bEmployee_Position\b",             "EmployeePosition"),
         (r"\bEmployee_Email\b",                "EmployeeEmail"),
         (r"\bEmployee_Location\b",             "EmployeeLocation"),
+        # Table casing: the warehouse table is `Allocation_Data` (capital D);
+        # the model sometimes lowercases it, which 404s. Normalise it.
+        (r"\bAllocation_data\b",               "Allocation_Data"),
     ):
         sql = _re.sub(_pat, _repl, sql, flags=_re.IGNORECASE)
 
