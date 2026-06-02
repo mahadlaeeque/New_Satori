@@ -14,7 +14,7 @@ import {
   Volume2, VolumeX, Minimize2, Maximize2, Bot, Sparkles, ChevronDown, Download,
   Plus, ToggleLeft, ToggleRight, Phone, Hash, Trash2, Edit3, Play, Pause, ArrowRight, MessageCircle,
   HelpCircle, Calendar, Command, CreditCard, Star, MoreHorizontal, Copy, Share2, Link as LinkIcon, UserPlus,
-  Filter, Sun, Moon
+  Filter, Sun, Moon, ThumbsUp, ThumbsDown
 } from "lucide-react";
 import AvailabilityEnginePage from "./AvailabilityEngine.jsx";
 
@@ -103,6 +103,306 @@ const ChartCard = ({ title, subtitle, children, style = {} }) => (
     {children}
   </div>
 );
+
+// ── Data freshness ("Data as of ...") ──────────────────────────────────────
+// Module-level cache so the freshness probe runs once per session no matter
+// how many DataAsOf labels mount. Backend caches it 1h server-side too.
+let _freshnessCache = null;
+let _freshnessPromise = null;
+function fetchDataFreshness() {
+  if (_freshnessCache) return Promise.resolve(_freshnessCache);
+  if (_freshnessPromise) return _freshnessPromise;
+  const base = import.meta.env.VITE_API_BASE || "";
+  const token = localStorage.getItem("token");
+  _freshnessPromise = fetch(`${base}/api/data-freshness`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => { _freshnessCache = d; return d; })
+    .catch(() => null);
+  return _freshnessPromise;
+}
+
+function useDataFreshness() {
+  const [f, setF] = useState(_freshnessCache);
+  useEffect(() => {
+    let mounted = true;
+    fetchDataFreshness().then((d) => { if (mounted) setF(d); });
+    return () => { mounted = false; };
+  }, []);
+  return f;
+}
+
+// "Data as of Apr 24, 2026" pill. `source` picks a specific warehouse source
+// (attendance | allocation | timesheet); omit it for the overall latest date.
+const DataAsOf = ({ source, prefix = "Data as of", style = {} }) => {
+  const f = useDataFreshness();
+  const info = f && (source ? f.sources?.[source] : f.overall);
+  if (!info || !info.label) return null;
+  return (
+    <div
+      title={`Latest ${source || "warehouse"} data: ${info.label}`}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 5,
+        fontSize: 11, color: COLORS.textMuted, whiteSpace: "nowrap", ...style,
+      }}
+    >
+      <Clock size={11} />
+      {prefix} {info.label}
+    </div>
+  );
+};
+
+// ── First-run product tour (embedded enablement) ───────────────────────────
+// Hand-rolled spotlight tour (no external lib) anchored to elements via their
+// data-tour="…" attribute. Auto-runs once for new users; replayable from Help.
+const ONBOARDING_STEPS = [
+  { selector: null, title: "Welcome to Satori 👋",
+    body: "Your AI assistant for workforce & sales intelligence. Here's a 30-second tour of the essentials — replay it anytime from the Help button." },
+  { selector: '[data-tour="nav"]', placement: "right", title: "Find your way around",
+    body: "Switch between the AI assistant, Report Builder, Dashboard Builder, and the Availability Engine from here." },
+  { selector: '[data-tour="agent-input"]', placement: "top", title: "Just ask, in plain English",
+    body: "Ask about attendance, allocation, sales pipeline, or your team. Satori writes the SQL and answers — no query language needed." },
+  { selector: '[data-tour="sample-prompts"]', placement: "left", title: "Not sure where to start?",
+    body: "Tap a sample prompt to see what Satori can do. They're grouped by topic." },
+  { selector: '[data-tour="data-as-of"]', placement: "bottom", title: "Know how fresh your data is",
+    body: "This shows the latest date your warehouse data covers, so you always know how current an answer is." },
+  { selector: '[data-tour="help"]', placement: "left", title: "Help, anytime",
+    body: "Open Help for guidance or to replay this tour. That's it — you're ready to go!" },
+];
+
+const ONBOARDING_FLAG = "satori_onboarding_done_v1";
+
+const OnboardingTour = () => {
+  const [active, setActive] = useState(false);
+  const [idx, setIdx] = useState(0);
+  const [rect, setRect] = useState(null);
+
+  const start = useCallback(() => { setIdx(0); setActive(true); }, []);
+  const finish = useCallback(() => {
+    setActive(false);
+    try { localStorage.setItem(ONBOARDING_FLAG, "1"); } catch (_) { /* ignore */ }
+  }, []);
+
+  // Launch on the "replay" event, and auto-launch once for first-time users.
+  useEffect(() => {
+    const onStart = () => start();
+    window.addEventListener("satori:start-tour", onStart);
+    let t;
+    try {
+      if (!localStorage.getItem(ONBOARDING_FLAG)) t = setTimeout(start, 800);
+    } catch (_) { /* ignore */ }
+    return () => { window.removeEventListener("satori:start-tour", onStart); if (t) clearTimeout(t); };
+  }, [start]);
+
+  const step = ONBOARDING_STEPS[idx];
+
+  // Recompute the spotlight rect whenever the step changes or the window moves.
+  useEffect(() => {
+    if (!active) return;
+    const measure = () => {
+      const sel = step?.selector;
+      if (!sel) { setRect(null); return; }
+      const el = document.querySelector(sel);
+      const r = el ? el.getBoundingClientRect() : null;
+      // Ignore hidden / zero-size targets (e.g. a freshness pill with no data).
+      setRect(r && r.width > 4 && r.height > 4 ? r : null);
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => { window.removeEventListener("resize", measure); window.removeEventListener("scroll", measure, true); };
+  }, [active, idx, step]);
+
+  if (!active) return null;
+
+  const last = idx >= ONBOARDING_STEPS.length - 1;
+  const PAD = 8, CARD_W = 320, CARD_H = 178;
+  const vw = window.innerWidth, vh = window.innerHeight;
+
+  const spot = rect ? {
+    top: Math.max(rect.top - PAD, 0), left: Math.max(rect.left - PAD, 0),
+    width: rect.width + PAD * 2, height: rect.height + PAD * 2,
+  } : null;
+
+  let cardTop, cardLeft;
+  if (!rect) {
+    cardTop = vh / 2 - CARD_H / 2; cardLeft = vw / 2 - CARD_W / 2;
+  } else {
+    const place = step.placement || "bottom";
+    if (place === "right")     { cardLeft = rect.right + 16; cardTop = rect.top; }
+    else if (place === "left") { cardLeft = rect.left - CARD_W - 16; cardTop = rect.top + 8; }
+    else if (place === "top")  { cardLeft = rect.left; cardTop = rect.top - CARD_H - 16; }
+    else                       { cardLeft = rect.left; cardTop = rect.bottom + 16; }
+    cardLeft = Math.min(Math.max(cardLeft, 12), vw - CARD_W - 12);
+    cardTop  = Math.min(Math.max(cardTop, 12), vh - CARD_H - 12);
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 2000 }}>
+      {spot ? (
+        <div style={{
+          position: "fixed", top: spot.top, left: spot.left, width: spot.width, height: spot.height,
+          borderRadius: 12, boxShadow: "0 0 0 9999px rgba(15,23,42,0.62)", transition: "all 0.2s ease",
+          pointerEvents: "none",
+        }} />
+      ) : (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.62)", pointerEvents: "none" }} />
+      )}
+
+      {/* Blocks interaction with the app underneath while the tour is open. */}
+      <div style={{ position: "fixed", inset: 0 }} />
+
+      <div style={{
+        position: "fixed", top: cardTop, left: cardLeft, width: CARD_W,
+        background: COLORS.surface, borderRadius: 14, border: `1px solid ${COLORS.border}`,
+        boxShadow: "0 24px 60px rgba(0,0,0,0.28)", padding: 18, zIndex: 2001,
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.textPrimary }}>{step.title}</div>
+          <button onClick={finish} title="Skip tour" style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted, display: "flex" }}>
+            <X size={16} />
+          </button>
+        </div>
+        <div style={{ fontSize: 12.5, lineHeight: 1.6, color: COLORS.textSecondary, marginBottom: 16, minHeight: 56 }}>
+          {step.body}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", gap: 5 }}>
+            {ONBOARDING_STEPS.map((_, i) => (
+              <div key={i} style={{ width: 6, height: 6, borderRadius: "50%", background: i === idx ? COLORS.accent : COLORS.border }} />
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            {idx > 0 && (
+              <button onClick={() => setIdx((i) => Math.max(0, i - 1))} style={{
+                padding: "6px 12px", borderRadius: 8, border: `1px solid ${COLORS.border}`,
+                background: COLORS.surface, color: COLORS.textSecondary, fontSize: 12, fontWeight: 600, cursor: "pointer",
+              }}>Back</button>
+            )}
+            <button onClick={() => (last ? finish() : setIdx((i) => i + 1))} style={{
+              padding: "6px 14px", borderRadius: 8, border: "none",
+              background: COLORS.accent, color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer",
+            }}>{last ? "Got it" : "Next"}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── Pulse survey + non-usage nudge (feedback loop) ─────────────────────────
+const PULSE_LAST_KEY = "satori_pulse_last";
+const PULSE_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000; // ask at most every 30 days
+const LAST_SEEN_KEY = "satori_last_seen";
+const NUDGE_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;  // nudge if away 7+ days
+
+const EngagementPrompts = () => {
+  const [pulseOpen, setPulseOpen] = useState(false);
+  const [pulseDone, setPulseDone] = useState(false);
+  const [nudge, setNudge] = useState(false);
+
+  // Non-usage nudge: compare the stored last-seen time, then stamp "now".
+  useEffect(() => {
+    try {
+      const prev = parseInt(localStorage.getItem(LAST_SEEN_KEY) || "0", 10);
+      const now = Date.now();
+      if (prev && now - prev > NUDGE_THRESHOLD_MS) setNudge(true);
+      localStorage.setItem(LAST_SEEN_KEY, String(now));
+    } catch (_) { /* ignore */ }
+  }, []);
+
+  // Pulse: at most once per 30 days, only after onboarding, delayed so it
+  // doesn't collide with the first-run tour.
+  useEffect(() => {
+    let t;
+    try {
+      const onboarded = localStorage.getItem(ONBOARDING_FLAG);
+      const last = parseInt(localStorage.getItem(PULSE_LAST_KEY) || "0", 10);
+      if (onboarded && Date.now() - last > PULSE_INTERVAL_MS) {
+        t = setTimeout(() => setPulseOpen(true), 25000);
+      }
+    } catch (_) { /* ignore */ }
+    return () => { if (t) clearTimeout(t); };
+  }, []);
+
+  const stampPulse = () => { try { localStorage.setItem(PULSE_LAST_KEY, String(Date.now())); } catch (_) { /* ignore */ } };
+  const dismissPulse = () => { stampPulse(); setPulseOpen(false); };
+  const submitPulse = async (score) => {
+    stampPulse();
+    try {
+      const token = localStorage.getItem("token");
+      const base = import.meta.env.VITE_API_BASE || "";
+      await fetch(`${base}/api/pulse`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ score }),
+      });
+    } catch (_) { /* non-blocking */ }
+    setPulseDone(true);
+    setTimeout(() => setPulseOpen(false), 1600);
+  };
+
+  return (
+    <>
+      {nudge && (
+        <div style={{
+          position: "fixed", top: 76, left: "50%", transform: "translateX(-50%)", zIndex: 1500,
+          display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", borderRadius: 12,
+          background: COLORS.surface, border: `1px solid ${COLORS.border}`, boxShadow: "0 12px 32px rgba(0,0,0,0.16)",
+          fontSize: 13, color: COLORS.textPrimary, maxWidth: "90%",
+        }}>
+          <Sparkles size={16} color={COLORS.accent} />
+          <span>Welcome back! Ask Satori what changed in your data while you were away.</span>
+          <button onClick={() => setNudge(false)} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted, display: "flex" }}>
+            <X size={15} />
+          </button>
+        </div>
+      )}
+
+      {pulseOpen && (
+        <div style={{
+          position: "fixed", bottom: 28, left: 28, zIndex: 1500, width: 300,
+          background: COLORS.surface, borderRadius: 14, border: `1px solid ${COLORS.border}`,
+          boxShadow: "0 20px 50px rgba(0,0,0,0.22)", padding: 16,
+        }}>
+          {pulseDone ? (
+            <div style={{ textAlign: "center", padding: "8px 0", color: COLORS.textPrimary }}>
+              <div style={{ fontSize: 24, marginBottom: 4 }}>🙏</div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>Thanks for your feedback!</div>
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.textPrimary }}>Quick pulse</div>
+                <button onClick={dismissPulse} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted, display: "flex" }}>
+                  <X size={15} />
+                </button>
+              </div>
+              <div style={{ fontSize: 12.5, color: COLORS.textSecondary, marginBottom: 12 }}>
+                How useful is Satori for your work so far?
+              </div>
+              <div style={{ display: "flex", gap: 6, justifyContent: "space-between" }}>
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <button key={n} onClick={() => submitPulse(n)} style={{
+                    flex: 1, padding: "8px 0", borderRadius: 8, border: `1px solid ${COLORS.border}`,
+                    background: COLORS.surfaceAlt, color: COLORS.textPrimary, fontSize: 14, fontWeight: 600, cursor: "pointer",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = COLORS.accent; e.currentTarget.style.color = COLORS.accent; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = COLORS.border; e.currentTarget.style.color = COLORS.textPrimary; }}
+                  >{n}</button>
+                ))}
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 10, color: COLORS.textMuted }}>
+                <span>Not useful</span><span>Very useful</span>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </>
+  );
+};
 
 const StatusBadge = ({ status }) => {
   const config = {
@@ -772,13 +1072,44 @@ const HELP_TOPICS = [
   "What data is available in Satori?",
 ];
 
-const FabButtons = () => {
+const FabButtons = ({ pageLabel } = {}) => {
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [helpBusy, setHelpBusy] = useState(false);
   const [helpAnswer, setHelpAnswer] = useState("");
   const [helpQuestion, setHelpQuestion] = useState("");
+  // "Report an issue" modal state
+  const [reportOpen, setReportOpen] = useState(false);
+  const [reportCategory, setReportCategory] = useState("bug");
+  const [reportMsg, setReportMsg] = useState("");
+  const [reportBusy, setReportBusy] = useState(false);
+  const [reportDone, setReportDone] = useState(false);
   const apiBase = import.meta.env.VITE_API_BASE || "";
+
+  const submitReport = async () => {
+    const message = reportMsg.trim();
+    if (!message) return;
+    setReportBusy(true);
+    try {
+      const token = localStorage.getItem("token");
+      const r = await fetch(`${apiBase}/api/support/report`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({
+          message, category: reportCategory,
+          page: pageLabel || "", url: window.location.href,
+        }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setReportDone(true);
+      setReportMsg("");
+      setTimeout(() => { setReportOpen(false); setReportDone(false); }, 1800);
+    } catch (e) {
+      alert("Couldn't send your report: " + (e?.message || "unknown error"));
+    } finally {
+      setReportBusy(false);
+    }
+  };
 
   const askHelp = async (q) => {
     setHelpBusy(true); setHelpAnswer(""); setHelpQuestion(q);
@@ -810,6 +1141,7 @@ const FabButtons = () => {
         display: "flex", flexDirection: "column", gap: 12, alignItems: "flex-end",
       }}>
         <button
+          data-tour="help"
           onClick={() => setHelpOpen(o => !o)}
           title="Help — how to use Satori"
           style={fabStyle}
@@ -843,6 +1175,32 @@ const FabButtons = () => {
               <X size={15} />
             </button>
           </div>
+
+          {/* Replay the onboarding tour */}
+          <button
+            onClick={() => { setHelpOpen(false); window.dispatchEvent(new CustomEvent("satori:start-tour")); }}
+            style={{
+              display: "flex", alignItems: "center", gap: 8, width: "100%",
+              padding: "10px 16px", border: "none", borderBottom: `1px solid ${COLORS.border}`,
+              background: COLORS.surfaceAlt, color: COLORS.textPrimary, cursor: "pointer",
+              fontSize: 12.5, fontWeight: 600, textAlign: "left",
+            }}
+          >
+            <Sparkles size={14} color={COLORS.accent} /> Take the product tour
+          </button>
+
+          {/* Report an issue */}
+          <button
+            onClick={() => { setReportDone(false); setReportOpen(true); }}
+            style={{
+              display: "flex", alignItems: "center", gap: 8, width: "100%",
+              padding: "10px 16px", border: "none", borderBottom: `1px solid ${COLORS.border}`,
+              background: COLORS.surface, color: COLORS.textPrimary, cursor: "pointer",
+              fontSize: 12.5, fontWeight: 600, textAlign: "left",
+            }}
+          >
+            <AlertTriangle size={14} color={COLORS.danger} /> Report an issue
+          </button>
 
           {/* Custom question input */}
           <div style={{ padding: 10, borderBottom: `1px solid ${COLORS.border}` }}>
@@ -909,6 +1267,89 @@ const FabButtons = () => {
                   onMouseLeave={(e) => { e.currentTarget.style.background = "#F8FAFC"; e.currentTarget.style.color = COLORS.textPrimary; }}
                   >{t}</button>
                 ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Report an issue modal */}
+      {reportOpen && (
+        <div
+          onClick={() => !reportBusy && setReportOpen(false)}
+          style={{
+            position: "fixed", inset: 0, zIndex: 1000, background: "rgba(15,23,42,0.5)",
+            display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+          }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{
+            width: 460, maxWidth: "100%", background: COLORS.surface, borderRadius: 16,
+            border: `1px solid ${COLORS.border}`, boxShadow: "0 24px 60px rgba(0,0,0,0.28)", overflow: "hidden",
+          }}>
+            <div style={{
+              padding: "14px 18px", display: "flex", alignItems: "center", justifyContent: "space-between",
+              borderBottom: `1px solid ${COLORS.border}`,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700, color: COLORS.textPrimary }}>
+                <AlertTriangle size={16} color={COLORS.danger} /> Report an issue
+              </div>
+              <button onClick={() => !reportBusy && setReportOpen(false)} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted, display: "flex" }}>
+                <X size={16} />
+              </button>
+            </div>
+
+            {reportDone ? (
+              <div style={{ padding: 28, textAlign: "center", color: COLORS.textPrimary }}>
+                <div style={{ fontSize: 30, marginBottom: 8 }}>✅</div>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>Thanks — your report was sent.</div>
+                <div style={{ fontSize: 12.5, color: COLORS.textSecondary }}>The team will take a look. You can keep working.</div>
+              </div>
+            ) : (
+              <div style={{ padding: 18 }}>
+                <div style={{ fontSize: 11.5, color: COLORS.textMuted, marginBottom: 14 }}>
+                  We'll automatically include the page you're on and your browser details to help us debug.
+                </div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: COLORS.textSecondary }}>Type</label>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "6px 0 14px" }}>
+                  {[
+                    { id: "bug", label: "Something's broken" },
+                    { id: "data", label: "Data looks wrong" },
+                    { id: "feature", label: "Feature request" },
+                    { id: "other", label: "Other" },
+                  ].map((c) => (
+                    <button key={c.id} onClick={() => setReportCategory(c.id)} style={{
+                      padding: "6px 12px", borderRadius: 8, fontSize: 12, cursor: "pointer", fontWeight: 500,
+                      border: `1px solid ${reportCategory === c.id ? COLORS.accent : COLORS.border}`,
+                      background: reportCategory === c.id ? `${COLORS.accent}15` : COLORS.surface,
+                      color: reportCategory === c.id ? COLORS.accent : COLORS.textMuted,
+                    }}>{c.label}</button>
+                  ))}
+                </div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: COLORS.textSecondary }}>What happened?</label>
+                <textarea
+                  value={reportMsg}
+                  onChange={(e) => setReportMsg(e.target.value)}
+                  rows={5}
+                  placeholder="Describe the issue, what you expected, and any steps to reproduce…"
+                  style={{
+                    width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 10,
+                    border: `1px solid ${COLORS.border}`, fontSize: 13, fontFamily: "inherit",
+                    resize: "vertical", outline: "none", boxSizing: "border-box", background: COLORS.surfaceAlt,
+                    color: COLORS.textPrimary,
+                  }}
+                />
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
+                  <button onClick={() => setReportOpen(false)} disabled={reportBusy} style={{
+                    padding: "8px 14px", borderRadius: 8, border: `1px solid ${COLORS.border}`,
+                    background: COLORS.surface, color: COLORS.textSecondary, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+                  }}>Cancel</button>
+                  <button onClick={submitReport} disabled={reportBusy || !reportMsg.trim()} style={{
+                    padding: "8px 16px", borderRadius: 8, border: "none",
+                    background: reportBusy || !reportMsg.trim() ? "#E2E8F0" : COLORS.accent,
+                    color: reportBusy || !reportMsg.trim() ? COLORS.textMuted : "#fff",
+                    fontSize: 12.5, fontWeight: 600, cursor: reportBusy || !reportMsg.trim() ? "default" : "pointer",
+                  }}>{reportBusy ? "Sending…" : "Send report"}</button>
+                </div>
               </div>
             )}
           </div>
@@ -1525,11 +1966,28 @@ const AgentPage = () => {
   const [conversations, setConversations] = useState([]);
   const [conversationId, setConversationId] = useState(null);
   const [historyOpen, setHistoryOpen] = useState(true);
+  const [feedback, setFeedback] = useState({}); // { [responseId]: 'up' | 'down' }
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isTyping]);
+
+  // Thumbs ± on an AI response. Optimistic; toggles off if the same vote is
+  // clicked twice (still recorded server-side as the latest rating).
+  const sendFeedback = useCallback(async (responseId, rating) => {
+    if (responseId == null) return;
+    setFeedback(prev => ({ ...prev, [responseId]: prev[responseId] === rating ? null : rating }));
+    try {
+      const token = localStorage.getItem("token");
+      const base = import.meta.env.VITE_API_BASE || "";
+      await fetch(`${base}/api/chat/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ message_id: responseId, conversation_id: conversationId, rating }),
+      });
+    } catch (_) { /* non-blocking */ }
+  }, [conversationId]);
 
   // Fetch recent queries on mount and after each message sent
   const fetchRecentQueries = async () => {
@@ -1867,7 +2325,7 @@ const AgentPage = () => {
 
       const data = await res.json();
       setIsTyping(false);
-      setMessages(prev => [...prev, { role: "assistant", text: data.reply || "(no reply)", timestamp: new Date() }]);
+      setMessages(prev => [...prev, { role: "assistant", text: data.reply || "(no reply)", timestamp: new Date(), responseId: data.response_id ?? null }]);
       const newConvId = data.conversation_id;
       const isFirstTurn = !conversationId && newConvId;
       if (newConvId) setConversationId(newConvId);
@@ -1954,9 +2412,12 @@ const AgentPage = () => {
             </div>
           )}
 
-          {messages.map((msg, i) => (
+          {messages.map((msg, i) => {
+            const fb = msg.responseId != null ? feedback[msg.responseId] : undefined;
+            return (
             <div key={i} style={{
-              display: "flex", justifyContent: msg.role === "user" ? "flex-end" : "flex-start",
+              display: "flex", flexDirection: "column",
+              alignItems: msg.role === "user" ? "flex-end" : "flex-start",
               marginBottom: 16, animation: "fadeIn 0.3s ease"
             }}>
               <div style={{
@@ -1968,8 +2429,23 @@ const AgentPage = () => {
               }}>
                 <div style={{ fontSize: 13, lineHeight: 1.7 }}>{msg.role === "assistant" ? renderMarkdown(msg.text) : msg.text}</div>
               </div>
+              {msg.role === "assistant" && msg.responseId != null && (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, paddingLeft: 4 }}>
+                  <span style={{ fontSize: 10.5, color: COLORS.textMuted, marginRight: 2 }}>
+                    {fb === "up" ? "Thanks for the feedback!" : fb === "down" ? "Thanks — we'll improve." : "Was this helpful?"}
+                  </span>
+                  <button onClick={() => sendFeedback(msg.responseId, "up")} title="Helpful" style={{
+                    background: "none", border: "none", cursor: "pointer", padding: 2, display: "flex",
+                    color: fb === "up" ? COLORS.accent : COLORS.textMuted,
+                  }}><ThumbsUp size={14} fill={fb === "up" ? COLORS.accent : "none"} /></button>
+                  <button onClick={() => sendFeedback(msg.responseId, "down")} title="Not helpful" style={{
+                    background: "none", border: "none", cursor: "pointer", padding: 2, display: "flex",
+                    color: fb === "down" ? COLORS.danger : COLORS.textMuted,
+                  }}><ThumbsDown size={14} fill={fb === "down" ? COLORS.danger : "none"} /></button>
+                </div>
+              )}
             </div>
-          ))}
+          );})}
 
           {isTyping && (
             <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 16 }}>
@@ -1987,7 +2463,7 @@ const AgentPage = () => {
         </div>
 
         {/* Input Area */}
-        <div style={{ padding: "16px 32px 20px", borderTop: `1px solid ${COLORS.border}`, background: COLORS.surface, flexShrink: 0 }}>
+        <div data-tour="agent-input" style={{ padding: "16px 32px 20px", borderTop: `1px solid ${COLORS.border}`, background: COLORS.surface, flexShrink: 0 }}>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
             <div style={{ flex: 1, position: "relative" }}>
               <textarea
@@ -2107,7 +2583,7 @@ const AgentPage = () => {
         display: "flex", flexDirection: "column", overflowY: "auto", flexShrink: 0
       }}>
         {/* Sample Prompts */}
-        <div style={{ padding: "20px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
+        <div data-tour="sample-prompts" style={{ padding: "20px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 }}>
             <Sparkles size={14} color={COLORS.accent} /> Sample Prompts
           </div>
@@ -2770,8 +3246,11 @@ const ReportPreview = ({ config, configRev, onConfigChange, onSaveMeta, isReadOn
         display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10,
         padding: "12px 16px", borderBottom: `1px solid ${COLORS.border}`, background: COLORS.surface, flexShrink: 0
       }}>
-        <div style={{ fontSize: 12.5, color: COLORS.textSecondary }}>
-          {loading ? "Loading preview…" : `${data.rows?.length || 0} of ${data.total_rows || 0} rows · ${data.columns?.length || 0} columns`}
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 12.5, color: COLORS.textSecondary }}>
+            {loading ? "Loading preview…" : `${data.rows?.length || 0} of ${data.total_rows || 0} rows · ${data.columns?.length || 0} columns`}
+          </div>
+          <DataAsOf />
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           {!isReadOnly && hiddenColumns.length > 0 && (
@@ -5227,6 +5706,7 @@ const DashboardRenderer = ({ spec, onBack }) => {
         <div>
           <div style={{ fontSize: 20, fontWeight: 700, color: COLORS.textPrimary }}>{spec?.title || "Dashboard"}</div>
           {spec?.description && <div style={{ fontSize: 13, color: COLORS.textSecondary, marginTop: 2 }}>{spec.description}</div>}
+          <DataAsOf style={{ marginTop: 4 }} />
         </div>
       </div>
 
@@ -8086,6 +8566,127 @@ const AuditLogPage = () => {
 };
 
 
+const SupportTicketsPage = () => {
+  const [tickets, setTickets] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [filter, setFilter] = useState("");
+  const apiBase = import.meta.env.VITE_API_BASE || "";
+
+  const fetchTickets = useCallback(async () => {
+    setLoading(true); setError("");
+    const token = localStorage.getItem("token");
+    try {
+      const q = filter ? `?status=${encodeURIComponent(filter)}` : "";
+      const res = await fetch(`${apiBase}/api/admin/support/tickets${q}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error("Failed to load tickets");
+      const data = await res.json();
+      setTickets(data.tickets || []);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [apiBase, filter]);
+
+  useEffect(() => { fetchTickets(); }, [fetchTickets]);
+
+  const setStatus = async (id, status) => {
+    const token = localStorage.getItem("token");
+    try {
+      await fetch(`${apiBase}/api/admin/support/tickets/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ status }),
+      });
+      fetchTickets();
+    } catch (_) { /* ignore */ }
+  };
+
+  const fmtTime = (ts) => ts ? new Date(ts).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—";
+  const catLabel = { bug: "Broken", data: "Data", feature: "Feature", other: "Other" };
+
+  return (
+    <div style={{ height: "100%", overflowY: "auto", padding: 32, boxSizing: "border-box" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.textPrimary }}>Support Tickets</div>
+          <div style={{ fontSize: 13, color: COLORS.textSecondary, marginTop: 2 }}>
+            Issues users reported via "Report an issue". Each is also emailed to the support inbox.
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {[{ label: "All", val: "" }, { label: "Open", val: "open" }, { label: "Resolved", val: "resolved" }].map((f) => (
+            <button key={f.val} onClick={() => setFilter(f.val)} style={{
+              padding: "6px 12px", borderRadius: 8,
+              border: filter === f.val ? "none" : `1px solid ${COLORS.border}`,
+              background: filter === f.val ? `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})` : "#fff",
+              color: filter === f.val ? "#fff" : COLORS.textPrimary,
+              fontSize: 12, fontWeight: 600, cursor: "pointer",
+            }}>{f.label}</button>
+          ))}
+        </div>
+      </div>
+      {loading && (
+        <div style={{ textAlign: "center", padding: 40, color: COLORS.textSecondary }}>
+          <Activity size={20} style={{ animation: "spin 1s linear infinite" }} />
+          <div style={{ fontSize: 13, marginTop: 6 }}>Loading tickets…</div>
+        </div>
+      )}
+      {error && (
+        <div style={{ padding: 14, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, color: COLORS.danger, fontSize: 13 }}>
+          {error}
+        </div>
+      )}
+      {!loading && !error && tickets.length === 0 && (
+        <div style={{ padding: 60, textAlign: "center", color: COLORS.textSecondary, background: COLORS.surface, borderRadius: 12, border: `1px dashed ${COLORS.border}` }}>
+          No tickets here yet.
+        </div>
+      )}
+      {!loading && tickets.length > 0 && (
+        <div style={{ background: COLORS.surface, borderRadius: 12, border: `1px solid ${COLORS.border}`, overflow: "hidden" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+            <thead>
+              <tr style={{ background: COLORS.primary, color: "#fff" }}>
+                {["When", "User", "Type", "Page", "Message", "Status", ""].map((h, i) => (
+                  <th key={i} style={{ padding: "10px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {tickets.map((t, i) => (
+                <tr key={t.id} style={{ background: i % 2 ? COLORS.surfaceAlt : "#fff", borderBottom: `1px solid ${COLORS.border}` }}>
+                  <td style={{ padding: "8px 14px", whiteSpace: "nowrap", color: COLORS.textSecondary, fontFamily: "ui-monospace, monospace" }}>{fmtTime(t.created_at)}</td>
+                  <td style={{ padding: "8px 14px", whiteSpace: "nowrap" }}>{t.user_email || "—"}</td>
+                  <td style={{ padding: "8px 14px", whiteSpace: "nowrap", fontWeight: 600 }}>{catLabel[t.category] || t.category || "—"}</td>
+                  <td style={{ padding: "8px 14px", whiteSpace: "nowrap", color: COLORS.textMuted }}>{t.page || "—"}</td>
+                  <td style={{ padding: "8px 14px", color: COLORS.textSecondary, maxWidth: 420 }} title={t.message || ""}>{t.message || "—"}</td>
+                  <td style={{ padding: "8px 14px", whiteSpace: "nowrap" }}>
+                    <span style={{
+                      padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 600,
+                      background: t.status === "resolved" ? "#ECFDF5" : "#FFFBEB",
+                      color: t.status === "resolved" ? "#059669" : "#B45309",
+                    }}>{t.status === "resolved" ? "Resolved" : "Open"}</span>
+                  </td>
+                  <td style={{ padding: "8px 14px", whiteSpace: "nowrap" }}>
+                    <button onClick={() => setStatus(t.id, t.status === "resolved" ? "open" : "resolved")} style={{
+                      padding: "5px 10px", borderRadius: 8, border: `1px solid ${COLORS.border}`,
+                      background: COLORS.surface, color: COLORS.textSecondary, fontSize: 11.5, fontWeight: 600, cursor: "pointer",
+                    }}>{t.status === "resolved" ? "Reopen" : "Resolve"}</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+};
+
+
 // ─── Navigation Config ───
 // Three permission-gated workspace features + an admin-only User Management page.
 // `requiresFeature` maps to a feature_id in the backend FEATURE_CATALOG.
@@ -8596,6 +9197,7 @@ const NAV_ITEMS = [
   { id: "_divider_admin", label: "ADMIN", isDivider: true, adminOnly: true },
   { id: "users", label: "User Management", icon: Users, component: UserManagementPage, adminOnly: true },
   { id: "audit", label: "Audit Log", icon: Shield, component: AuditLogPage, adminOnly: true },
+  { id: "support", label: "Support Tickets", icon: MessageSquare, component: SupportTicketsPage, adminOnly: true },
   { id: "settings", label: "System Settings", icon: Settings, component: SystemSettingsPage, superAdminOnly: true },
 ];
 
@@ -9863,7 +10465,7 @@ export default function App() {
         </div>
 
         {/* Navigation */}
-        <nav style={{ flex: 1, padding: "16px 12px", overflowY: "auto" }}>
+        <nav data-tour="nav" style={{ flex: 1, padding: "16px 12px", overflowY: "auto" }}>
           {visibleNav.map((item, idx) => {
             if (item.isDivider) {
               return (
@@ -9940,6 +10542,13 @@ export default function App() {
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* Warehouse data freshness — visible app-wide */}
+            <span data-tour="data-as-of" style={{ display: "inline-flex" }}>
+              <DataAsOf style={{
+                padding: "6px 10px", borderRadius: 8, border: `1px solid ${COLORS.border}`,
+                background: COLORS.surfaceAlt,
+              }} />
+            </span>
             {/* Dark mode toggle */}
             <button
               onClick={() => setDarkMode(!darkMode)}
@@ -10030,7 +10639,7 @@ export default function App() {
         </header>
 
         {/* Dashboard Area */}
-        <main style={{ flex: 1, overflow: onPrivacy || activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" ? "hidden" : "auto", padding: onPrivacy || activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" || activePage === "users" || activePage === "audit" ? 0 : 32 }}>
+        <main style={{ flex: 1, overflow: onPrivacy || activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" ? "hidden" : "auto", padding: onPrivacy || activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" || activePage === "users" || activePage === "audit" || activePage === "support" ? 0 : 32 }}>
           <div style={{ animation: "fadeIn 0.3s ease", height: onPrivacy || activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" ? "100%" : "auto" }}>
             {onPrivacy ? (
               <PrivacyPage onBack={() => { window.location.hash = ""; }} />
@@ -10044,7 +10653,7 @@ export default function App() {
           {/* Footer */}
           <div style={{
             marginTop: 32, padding: "20px 0", borderTop: `1px solid ${COLORS.border}`,
-            display: activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" || activePage === "users" || activePage === "audit" ? "none" : "flex", justifyContent: "space-between", alignItems: "center"
+            display: activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" || activePage === "users" || activePage === "audit" || activePage === "support" ? "none" : "flex", justifyContent: "space-between", alignItems: "center"
           }}>
             <div style={{ fontSize: 12, color: COLORS.textMuted }}>
               Satori v1.0 &middot; TallyMarks Consulting (TMC)
@@ -10071,7 +10680,13 @@ export default function App() {
       <ChatAgent isOpen={chatOpen} onClose={() => setChatOpen(false)} dashboardContext={currentNav?.label} />
 
       {/* Floating Mic + Help buttons (ports Old Satori FAB) — visible on every page */}
-      <FabButtons />
+      <FabButtons pageLabel={currentNav?.label} />
+
+      {/* First-run product tour (replayable from Help) */}
+      <OnboardingTour />
+
+      {/* Pulse survey + welcome-back nudge */}
+      <EngagementPrompts />
 
 
       {/* Global Styles */}

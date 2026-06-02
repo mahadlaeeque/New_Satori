@@ -92,6 +92,8 @@ def init_db():
     _migrate_add_system_settings()
     _migrate_add_availability_tasks()
     _migrate_add_chat_tables()
+    _migrate_add_support_tickets()
+    _migrate_add_feedback_tables()
     _migrate_rename_sfml_to_tmc()
     _migrate_reset_passwords_to_welcome()
     _migrate_finalize_tmc_superadmin()
@@ -1020,6 +1022,109 @@ def _migrate_add_chat_tables():
         print("[DB] Migration: chat_conversations + chat_messages + chat_history tables ready")
     except Exception as e:
         print(f"[DB] chat_tables migration error: {e}")
+
+
+def _migrate_add_support_tickets():
+    """Idempotent — creates support_tickets (the "Report an Issue" capture)."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        if USE_POSTGRES:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS support_tickets (
+                    id          SERIAL PRIMARY KEY,
+                    user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    user_email  TEXT,
+                    category    TEXT,
+                    message     TEXT NOT NULL,
+                    page        TEXT,
+                    url         TEXT,
+                    user_agent  TEXT,
+                    status      TEXT NOT NULL DEFAULT 'open',
+                    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        else:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS support_tickets (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    user_email  TEXT,
+                    category    TEXT,
+                    message     TEXT NOT NULL,
+                    page        TEXT,
+                    url         TEXT,
+                    user_agent  TEXT,
+                    status      TEXT NOT NULL DEFAULT 'open',
+                    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets(status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_support_tickets_created ON support_tickets(created_at DESC)")
+        conn.commit()
+        conn.close()
+        print("[DB] Migration: support_tickets table ready")
+    except Exception as e:
+        print(f"[DB] support_tickets migration error: {e}")
+
+
+def _migrate_add_feedback_tables():
+    """Idempotent — response_feedback (thumbs ±) + pulse_responses (pulse survey)."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        if USE_POSTGRES:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS response_feedback (
+                    id              SERIAL PRIMARY KEY,
+                    user_id         INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    message_id      INTEGER,
+                    conversation_id INTEGER,
+                    rating          TEXT NOT NULL,
+                    comment         TEXT,
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (user_id, message_id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS pulse_responses (
+                    id          SERIAL PRIMARY KEY,
+                    user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    score       INTEGER NOT NULL,
+                    comment     TEXT,
+                    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        else:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS response_feedback (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id         INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    message_id      INTEGER,
+                    conversation_id INTEGER,
+                    rating          TEXT NOT NULL,
+                    comment         TEXT,
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (user_id, message_id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS pulse_responses (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    score       INTEGER NOT NULL,
+                    comment     TEXT,
+                    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_response_feedback_rating ON response_feedback(rating)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_response_feedback_created ON response_feedback(created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pulse_responses_created ON pulse_responses(created_at DESC)")
+        conn.commit()
+        conn.close()
+        print("[DB] Migration: response_feedback + pulse_responses tables ready")
+    except Exception as e:
+        print(f"[DB] feedback tables migration error: {e}")
 
 
 def _migrate_rename_sfml_to_tmc():

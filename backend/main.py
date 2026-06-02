@@ -1583,6 +1583,262 @@ def admin_lookup_dimension(dimension: str, _: dict = Depends(require_superadmin)
     return {"dimension": dimension, "label": _SCOPE_DIMENSIONS[dimension]["label"], "values": rows}
 
 
+# ── Data freshness ("Data as of ..." labels) ───────────────────────────────
+# Per-source MAX(date) probes. Each is guarded independently so one missing
+# table/column never blanks the whole response. Sales tables are quarterly
+# snapshots with no row-level date, so they're omitted. Cached in-process for
+# 1h; BQ failures degrade to nulls (the frontend simply hides the label).
+_freshness_cache = {"data": None, "at": 0.0}
+_FRESHNESS_TTL_SECONDS = 60 * 60
+_FRESHNESS_PROBES = {
+    "attendance": ("Attendance_Data", "attendance_date"),
+    "allocation": ("Allocation_Data", "Date"),
+    "timesheet":  ("Timesheet_Data", "DATE_KEY"),
+}
+_MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _parse_warehouse_date(raw):
+    """Parse a warehouse date cell (DATE, or a string like '2026-04-24' /
+    '20260424' / '04/24/2026') into a date, or None if it doesn't parse."""
+    if raw is None or raw == "":
+        return None
+    s = str(raw)[:10]
+    for fmt in ("%Y-%m-%d", "%Y%m%d", "%m/%d/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except Exception:
+            continue
+    return None
+
+
+def _date_label(d):
+    """'Apr 24, 2026' — platform-independent (avoids %-d which breaks on Windows)."""
+    return f"{_MONTH_ABBR[d.month - 1]} {d.day}, {d.year}"
+
+
+@app.get("/api/data-freshness")
+def data_freshness(user: dict = Depends(get_current_user)):
+    """Latest data date per warehouse source, for "Data as of ..." labels.
+    Cached 1h in-process; BQ errors degrade to an empty source set."""
+    import time as _time
+    now = _time.time()
+    cached = _freshness_cache["data"]
+    if cached is not None and (now - _freshness_cache["at"]) < _FRESHNESS_TTL_SECONDS:
+        return cached
+
+    sources = {}
+    latest = None  # (date, label, raw) for the overall freshness
+    for key, (table, col) in _FRESHNESS_PROBES.items():
+        try:
+            sql = f"SELECT CAST(MAX(`{col}`) AS STRING) AS max_date FROM {sql_table(table)}"
+            r = bq_run_query(sql, max_rows=1)
+            if "error" in r:
+                print(f"[data-freshness] probe {key} BQ error: {r['error']}")
+                continue
+            rows = r.get("rows") or []
+            raw = rows[0].get("max_date") if rows else None
+            d = _parse_warehouse_date(raw)
+            if not d:
+                continue
+            label = _date_label(d)
+            sources[key] = {"max_date": d.isoformat(), "label": label}
+            if latest is None or d > latest[0]:
+                latest = (d, label, d.isoformat())
+        except Exception as e:
+            print(f"[data-freshness] probe {key} failed: {e}")
+            continue
+
+    payload = {
+        "sources": sources,
+        "overall": ({"max_date": latest[2], "label": latest[1]} if latest else None),
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    _freshness_cache["data"] = payload
+    _freshness_cache["at"] = now
+    return payload
+
+
+# ── Support system ("Report an Issue") ─────────────────────────────────────
+class SupportTicketCreate(BaseModel):
+    message: str
+    category: Optional[str] = None   # 'bug' | 'data' | 'feature' | 'other'
+    page: Optional[str] = None
+    url: Optional[str] = None
+
+
+class SupportTicketUpdate(BaseModel):
+    status: str
+
+
+_SUPPORT_EMAIL_TO = os.environ.get("SUPPORT_EMAIL_TO", "mahad.laeeque@tmcltd.com")
+
+
+@app.post("/api/support/report")
+def support_report(body: SupportTicketCreate, request: Request, user: dict = Depends(get_current_user)):
+    """Capture a support / issue report: store it in support_tickets AND email
+    the destination. Auto-captures the user, page, URL, and user-agent."""
+    msg = (body.message or "").strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="Message is required")
+    try:
+        uid = int(user["sub"])
+    except Exception:
+        uid = None
+    email = user.get("email")
+    ua = request.headers.get("user-agent")
+    category = (body.category or "other").strip()[:40]
+    page = (body.page or "")[:200]
+    url = (body.url or "")[:500]
+
+    ticket_id = None
+    try:
+        db = get_db(); cur = db.cursor()
+        if USE_POSTGRES:
+            cur.execute(
+                "INSERT INTO support_tickets (user_id, user_email, category, message, page, url, user_agent) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                (uid, email, category, msg, page, url, ua),
+            )
+            row = cur.fetchone()
+            ticket_id = (row["id"] if isinstance(row, dict) else row[0]) if row else None
+        else:
+            cur.execute(
+                "INSERT INTO support_tickets (user_id, user_email, category, message, page, url, user_agent) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (uid, email, category, msg, page, url, ua),
+            )
+            ticket_id = cur.lastrowid
+        db.commit(); db.close()
+    except Exception as e:
+        print(f"[support] failed to store ticket: {e}")
+
+    # Best-effort email — never blocks or fails the response.
+    try:
+        subject = f"[Satori Support] {category} report from {email or 'a user'}"
+        text = (
+            f"A new issue was reported in Satori.\n\n"
+            f"Ticket ID: {ticket_id}\n"
+            f"From: {email} (user_id={uid})\n"
+            f"Category: {category}\n"
+            f"Page: {page or '(unknown)'}\n"
+            f"URL: {url or '(unknown)'}\n"
+            f"User agent: {ua or '(unknown)'}\n\n"
+            f"Message:\n{msg}\n\n— Satori"
+        )
+        ok, detail = emailer.send_email(_SUPPORT_EMAIL_TO, subject, text)
+        if not ok:
+            print(f"[support] ticket {ticket_id} email not sent: {detail}")
+    except Exception as e:
+        print(f"[support] email error: {e}")
+
+    try:
+        audit_log.record(user=user, request=request, action="support.issue_report",
+                         resource_type="support_ticket", resource_id=ticket_id,
+                         detail={"category": category, "page": page})
+    except Exception:
+        pass
+    return {"ok": True, "ticket_id": ticket_id}
+
+
+@app.get("/api/admin/support/tickets")
+def admin_list_support_tickets(status: Optional[str] = None, admin: dict = Depends(require_admin)):
+    """List support tickets, newest first. Optional ?status=open|resolved."""
+    db = get_db(); cur = db.cursor()
+    if status in ("open", "resolved"):
+        cur.execute("SELECT * FROM support_tickets WHERE status = ? ORDER BY created_at DESC LIMIT 500", (status,))
+    else:
+        cur.execute("SELECT * FROM support_tickets ORDER BY created_at DESC LIMIT 500")
+    rows = cur.fetchall(); db.close()
+    tickets = [r if isinstance(r, dict) else dict(r) for r in rows]
+    return {"tickets": tickets}
+
+
+@app.patch("/api/admin/support/tickets/{ticket_id}")
+def admin_update_support_ticket(ticket_id: int, body: SupportTicketUpdate, admin: dict = Depends(require_admin)):
+    """Mark a ticket open / resolved."""
+    new_status = (body.status or "").strip().lower()
+    if new_status not in ("open", "resolved"):
+        raise HTTPException(status_code=400, detail="status must be 'open' or 'resolved'")
+    db = get_db(); cur = db.cursor()
+    cur.execute("UPDATE support_tickets SET status = ? WHERE id = ?", (new_status, ticket_id))
+    db.commit(); db.close()
+    return {"ok": True}
+
+
+# ── Feedback loop (thumbs ± on responses + pulse survey) ───────────────────
+class FeedbackCreate(BaseModel):
+    message_id: Optional[int] = None
+    conversation_id: Optional[int] = None
+    rating: str                       # 'up' | 'down'
+    comment: Optional[str] = None
+
+
+class PulseCreate(BaseModel):
+    score: int                        # 1–5
+    comment: Optional[str] = None
+
+
+@app.post("/api/chat/feedback")
+def chat_feedback(body: FeedbackCreate, request: Request, user: dict = Depends(get_current_user)):
+    """Record thumbs-up/down for one assistant response. Re-rating the same
+    message overwrites the prior vote (UNIQUE(user_id, message_id))."""
+    rating = (body.rating or "").strip().lower()
+    if rating not in ("up", "down"):
+        raise HTTPException(status_code=400, detail="rating must be 'up' or 'down'")
+    try:
+        uid = int(user["sub"])
+    except Exception:
+        uid = None
+    comment = (body.comment or "")[:2000] or None
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute(
+            "INSERT INTO response_feedback (user_id, message_id, conversation_id, rating, comment) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (user_id, message_id) DO UPDATE SET "
+            "rating = excluded.rating, comment = excluded.comment, created_at = CURRENT_TIMESTAMP",
+            (uid, body.message_id, body.conversation_id, rating, comment),
+        )
+        db.commit(); db.close()
+    except Exception as e:
+        print(f"[feedback] store failed: {e}")
+    try:
+        audit_log.record(user=user, request=request, action="ai.feedback",
+                         resource_type="chat_message", resource_id=body.message_id,
+                         detail={"rating": rating})
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+@app.post("/api/pulse")
+def pulse_submit(body: PulseCreate, request: Request, user: dict = Depends(get_current_user)):
+    """Record a pulse-survey score (1–5)."""
+    score = body.score
+    if not isinstance(score, int) or score < 1 or score > 5:
+        raise HTTPException(status_code=400, detail="score must be between 1 and 5")
+    try:
+        uid = int(user["sub"])
+    except Exception:
+        uid = None
+    comment = (body.comment or "")[:2000] or None
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("INSERT INTO pulse_responses (user_id, score, comment) VALUES (?, ?, ?)",
+                    (uid, score, comment))
+        db.commit(); db.close()
+    except Exception as e:
+        print(f"[pulse] store failed: {e}")
+    try:
+        audit_log.record(user=user, request=request, action="pulse.submit",
+                         resource_type="pulse", resource_id=None, detail={"score": score})
+    except Exception:
+        pass
+    return {"ok": True}
+
+
 @app.get("/api/admin/users/{user_id}/scope")
 def admin_get_user_scope(user_id: int, _: dict = Depends(require_superadmin)):
     """Get a user's data-scope policy (per-dimension enforcement flag + allowed values)."""
@@ -3394,14 +3650,15 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
         # If the chat_conversations table is missing on the deployed DB the
         # save will throw — never let that bubble up and break the chat reply,
         # but log loudly so we can see why history isn't accumulating.
+        response_id = None
         try:
-            new_conv_id = _save_chat_turn(uid, body.conversation_id, body.message, reply)
-            print(f"[chat] saved turn — conv_id={new_conv_id} user={uid}")
+            new_conv_id, response_id = _save_chat_turn(uid, body.conversation_id, body.message, reply)
+            print(f"[chat] saved turn — conv_id={new_conv_id} response_id={response_id} user={uid}")
         except Exception as _e:
             import traceback as _tb
             print(f"[chat] conversation save failed (continuing): {_e}\n{_tb.format_exc()}")
             new_conv_id = body.conversation_id
-        return {"reply": reply, "conversation_id": new_conv_id}
+        return {"reply": reply, "conversation_id": new_conv_id, "response_id": response_id}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
 
@@ -3773,17 +4030,20 @@ def _ensure_chat_tables_exist():
         print(f"[_ensure_chat_tables_exist] migration retry failed: {e}")
 
 
-def _save_chat_turn(user_id: int, conv_id, user_message: str, ai_reply: str) -> int:
+def _save_chat_turn(user_id: int, conv_id, user_message: str, ai_reply: str):
     """Persist a (user, assistant) turn to chat_conversations + chat_messages.
-    If conv_id is None or 0, creates a fresh conversation. Returns the
-    conv_id used (so the frontend can adopt it for subsequent turns)."""
+    If conv_id is None or 0, creates a fresh conversation. Returns
+    (conv_id, response_id): the conv_id used (so the frontend can adopt it for
+    subsequent turns) and the assistant chat_messages.id (for feedback), or
+    None if it couldn't be captured."""
     from database import USE_POSTGRES
+    response_id = None
     print(f"[_save_chat_turn] user={user_id} conv_id={conv_id} msg_len={len(user_message or '')} reply_len={len(ai_reply or '')}")
     try:
         db = get_db(); cur = db.cursor()
     except Exception as e:
         print(f"[_save_chat_turn] get_db FAILED: {e}")
-        return conv_id
+        return conv_id, None
     try:
         if not conv_id:
             # Build a 60-char title from the first user message.
@@ -3815,10 +4075,19 @@ def _save_chat_turn(user_id: int, conv_id, user_message: str, ai_reply: str) -> 
             "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, ?, ?)",
             (conv_id, "user", user_message or ""),
         )
-        cur.execute(
-            "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, ?, ?)",
-            (conv_id, "assistant", ai_reply or ""),
-        )
+        if USE_POSTGRES:
+            cur.execute(
+                "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, ?, ?) RETURNING id",
+                (conv_id, "assistant", ai_reply or ""),
+            )
+            _r = cur.fetchone()
+            response_id = (_r["id"] if isinstance(_r, dict) else _r[0]) if _r else None
+        else:
+            cur.execute(
+                "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, ?, ?)",
+                (conv_id, "assistant", ai_reply or ""),
+            )
+            response_id = cur.lastrowid
         db.commit()
         print(f"[_save_chat_turn] committed conv_id={conv_id}")
     except Exception as e:
@@ -3852,10 +4121,19 @@ def _save_chat_turn(user_id: int, conv_id, user_message: str, ai_reply: str) -> 
                 "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, ?, ?)",
                 (conv_id, "user", user_message or ""),
             )
-            cur.execute(
-                "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, ?, ?)",
-                (conv_id, "assistant", ai_reply or ""),
-            )
+            if USE_POSTGRES:
+                cur.execute(
+                    "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, ?, ?) RETURNING id",
+                    (conv_id, "assistant", ai_reply or ""),
+                )
+                _r = cur.fetchone()
+                response_id = (_r["id"] if isinstance(_r, dict) else _r[0]) if _r else None
+            else:
+                cur.execute(
+                    "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, ?, ?)",
+                    (conv_id, "assistant", ai_reply or ""),
+                )
+                response_id = cur.lastrowid
             db.commit()
             print(f"[_save_chat_turn] recovered after migration retry, conv_id={conv_id}")
         except Exception as e2:
@@ -3863,7 +4141,7 @@ def _save_chat_turn(user_id: int, conv_id, user_message: str, ai_reply: str) -> 
     finally:
         try: db.close()
         except Exception: pass
-    return conv_id
+    return conv_id, response_id
 
 
 @app.get("/api/tables")
