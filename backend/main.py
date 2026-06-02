@@ -6601,23 +6601,17 @@ def _avail_kpis_sql(dept_scope: list | None = None) -> str:
           -- 'Allocated' forever (1,096/1,139 rows on prod). NULL-safe: if
           -- Allocation_Data.Date is entirely unparseable, fall back to
           -- lifetime aggregation so we don't blank everyone.
+          -- Actuals only; status driven by Flag='Allocated' (real billable
+          -- project) — Bench-project rows show allocation_percent=100 but mean
+          -- the person is on the bench, so raw max(allocation_percent) misleads.
           SELECT {emp_id_alloc} AS emp_id,
-                 MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct
+                 MAX(IF(Flag = 'Allocated', SAFE_CAST(allocation_percent AS FLOAT64), 0)) AS max_pct,
+                 COUNTIF(Flag = 'Allocated' AND SAFE_CAST(allocation_percent AS FLOAT64) > 0) AS real_alloc_rows
           FROM {_bq_avail('Allocation_Data')}
-          WHERE (SELECT MAX(COALESCE(
-                   SAFE_CAST(CAST(Date AS STRING) AS DATE),
-                   SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
-                 )) FROM {_bq_avail('Allocation_Data')}) IS NULL
-             OR COALESCE(
-                  SAFE_CAST(CAST(Date AS STRING) AS DATE),
-                  SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
-                ) >= DATE_SUB(
-                  (SELECT MAX(COALESCE(
-                    SAFE_CAST(CAST(Date AS STRING) AS DATE),
-                    SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
-                  )) FROM {_bq_avail('Allocation_Data')}),
-                  INTERVAL 90 DAY
-                )
+          WHERE Forecast_Flag = 0
+            AND Date >= DATE_SUB(
+                  (SELECT MAX(Date) FROM {_bq_avail('Allocation_Data')} WHERE Forecast_Flag = 0),
+                  INTERVAL 90 DAY)
           GROUP BY emp_id
         ),
         emp_ts AS (
@@ -6650,7 +6644,7 @@ def _avail_kpis_sql(dept_scope: list | None = None) -> str:
           (SELECT COUNT(DISTINCT emp_id) FROM active_emp) AS total_employees,
           (SELECT COUNT(DISTINCT ae.emp_id) FROM active_emp ae
              LEFT JOIN emp_alloc ea ON ea.emp_id = ae.emp_id
-             WHERE COALESCE(ea.max_pct, 0) = 0) AS on_bench,
+             WHERE COALESCE(ea.real_alloc_rows, 0) = 0) AS on_bench,
           (SELECT COUNT(DISTINCT ae.emp_id) FROM active_emp ae
              JOIN emp_alloc ea ON ea.emp_id = ae.emp_id
              WHERE ea.max_pct > 0 AND ea.max_pct < 100) AS partial,
@@ -6731,28 +6725,21 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
                 {_dept_scope_clause(dept_scope)}
         ),
         alloc AS (
-          -- 90-day window matching emp_alloc in _avail_kpis_sql so cards
-          -- and KPI counts agree. NULL-safe fallback to lifetime aggregation
-          -- if Allocation_Data.Date is entirely unparseable.
+          -- Actuals only (Forecast_Flag=0), last 90 days anchored on the latest
+          -- ACTUAL date (the view now carries forecasts out to 2030). Status is
+          -- driven by Flag='Allocated' (real billable project) — a person sitting
+          -- on a Bench project shows allocation_percent=100 but is NOT allocated,
+          -- so max(allocation_percent) alone would misclassify them.
           SELECT {emp_id_alloc} AS emp_id,
-                 MAX(SAFE_CAST(allocation_percent AS FLOAT64)) AS max_pct,
-                 COUNT(DISTINCT project_id) AS project_count,
+                 MAX(IF(Flag = 'Allocated', SAFE_CAST(allocation_percent AS FLOAT64), 0)) AS max_pct,
+                 COUNTIF(Flag = 'Allocated' AND SAFE_CAST(allocation_percent AS FLOAT64) > 0) AS real_alloc_rows,
+                 COUNT(DISTINCT IF(Flag = 'Allocated', project_id, NULL)) AS project_count,
                  ANY_VALUE(emp_competency) AS competency
           FROM {_bq_avail('Allocation_Data')}
-          WHERE (SELECT MAX(COALESCE(
-                   SAFE_CAST(CAST(Date AS STRING) AS DATE),
-                   SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
-                 )) FROM {_bq_avail('Allocation_Data')}) IS NULL
-             OR COALESCE(
-                  SAFE_CAST(CAST(Date AS STRING) AS DATE),
-                  SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
-                ) >= DATE_SUB(
-                  (SELECT MAX(COALESCE(
-                    SAFE_CAST(CAST(Date AS STRING) AS DATE),
-                    SAFE.PARSE_DATE('%Y%m%d', CAST(Date AS STRING))
-                  )) FROM {_bq_avail('Allocation_Data')}),
-                  INTERVAL 90 DAY
-                )
+          WHERE Forecast_Flag = 0
+            AND Date >= DATE_SUB(
+                  (SELECT MAX(Date) FROM {_bq_avail('Allocation_Data')} WHERE Forecast_Flag = 0),
+                  INTERVAL 90 DAY)
           GROUP BY emp_id
         ),
         emp_ts AS (
@@ -6787,7 +6774,7 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
           COALESCE(NULLIF(TRIM(a.competency), ''), ae.position) AS competency,
           COALESCE(et.hrs_90d, 0) AS hrs_90d,
           CASE
-            WHEN COALESCE(a.max_pct, 0) = 0 THEN 'Bench'
+            WHEN COALESCE(a.real_alloc_rows, 0) = 0 THEN 'Bench'
             WHEN a.max_pct >= 100 THEN 'Allocated'
             ELSE 'Partial'
           END AS status
