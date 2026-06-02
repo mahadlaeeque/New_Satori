@@ -4314,7 +4314,7 @@ _SAP_DATASET = _TMC_DATASET
 # Active-employees filter (TMC equivalent of the old "active plants" exclusion).
 _ACTIVE_EMP_SQL = (
     f"(SELECT CAST(Employee_Code AS STRING) AS emp_id FROM {_TMC_DATASET}.Employee_Data "
-    f"WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation'))"
+    f"WHERE LOWER(COALESCE(employee_status, '')) = 'active')"
 )
 
 
@@ -6604,7 +6604,7 @@ def _avail_kpis_sql(dept_scope: list | None = None) -> str:
         WITH active_emp AS (
           SELECT {emp_id_emp} AS emp_id
           FROM {_bq_avail('Employee_Data')}
-          WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
+          WHERE LOWER(COALESCE(employee_status, '')) = 'active'
                 {_dept_scope_clause(dept_scope)}
         ),
         emp_alloc AS (
@@ -6685,7 +6685,7 @@ def _avail_skills_sql(limit: int = 50, min_count: int = 5, dept_scope: list | No
           SELECT {emp_id_emp} AS emp_id,
                  COALESCE(NULLIF(TRIM(EmployeePosition), ''), '') AS position
           FROM {_bq_avail('Employee_Data')}
-          WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
+          WHERE LOWER(COALESCE(employee_status, '')) = 'active'
                 {_dept_scope_clause(dept_scope)}
         ),
         latest_alloc AS (
@@ -6734,7 +6734,7 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
                  COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS department,
                  COALESCE(NULLIF(TRIM(EmployeeLocation), ''), '') AS location
           FROM {_bq_avail('Employee_Data')}
-          WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
+          WHERE LOWER(COALESCE(employee_status, '')) = 'active'
                 {_dept_scope_clause(dept_scope)}
         ),
         alloc AS (
@@ -6804,7 +6804,7 @@ def _avail_departments_sql(dept_scope: list | None = None) -> str:
     return f"""
         SELECT DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS department
         FROM {_bq_avail('Employee_Data')}
-        WHERE LOWER(COALESCE(Employee_Type, '')) IN ('mto', 'permanent', 'probation')
+        WHERE LOWER(COALESCE(employee_status, '')) = 'active'
               {_dept_scope_clause(dept_scope)}
         ORDER BY department
     """

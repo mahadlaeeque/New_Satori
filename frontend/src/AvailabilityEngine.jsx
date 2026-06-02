@@ -1022,7 +1022,7 @@ const AvailabilityEnginePage = () => {
       if (statusFilter) qs.set("status", statusFilter);
       if (skillFilter)  qs.set("skill", skillFilter);
       if (searchTerm.trim()) qs.set("q", searchTerm.trim());
-      qs.set("limit", "500");
+      qs.set("limit", "2000"); // fetch the whole active workforce so client-side search/filter sees everyone
       const data = await fetchJson(`/api/availability/employees?${qs.toString()}`);
       setEmployees(data.employees || []);
     } catch (e) {
@@ -1211,7 +1211,7 @@ const AvailabilityEnginePage = () => {
       )}
 
       <div style={{ marginTop: 16, fontSize: 12, color: C.textMuted, textAlign: "center" }}>
-        Showing {employees.length} employees · status bands derived from MAX(allocation %) over the last 90 days
+        Showing {employees.length} of the active workforce · status from current project allocations (real billable vs bench, latest actual weeks)
       </div>
 
       <CreateTaskModal
