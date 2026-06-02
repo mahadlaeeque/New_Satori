@@ -86,6 +86,19 @@ const initials = (name) => {
   return parts.map(p => p[0]).join("").toUpperCase();
 };
 
+// The warehouse Resource_Name carries a code prefix (e.g. "C-064 - Jane Doe").
+// Strip it for display so cards show just the person's name; the bare employee
+// code is surfaced only in the detail view.
+const cleanName = (emp) => {
+  let n = (emp?.name || "").trim();
+  if (emp?.code) {
+    const esc = String(emp.code).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    n = n.replace(new RegExp("^" + esc + "\\s*[-–—]?\\s*", "i"), "");
+  }
+  n = n.replace(/^[A-Za-z]{1,4}-?\d+\s*[-–—]?\s*/, "");
+  return n.trim() || (emp?.name || "—");
+};
+
 const fmtNumber = (n) => Number(n || 0).toLocaleString();
 
 // Deterministic avatar tint per employee name so it's stable across renders.
@@ -148,13 +161,13 @@ const EmployeeCard = ({ emp, onClick }) => {
         <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
           <div style={{
             width: 40, height: 40, borderRadius: "50%",
-            background: avatarTint(emp.name) + "22",
-            color: avatarTint(emp.name),
+            background: avatarTint(cleanName(emp)) + "22",
+            color: avatarTint(cleanName(emp)),
             display: "flex", alignItems: "center", justifyContent: "center",
             fontWeight: 700, fontSize: 14, flexShrink: 0,
-          }}>{initials(emp.name)}</div>
+          }}>{initials(cleanName(emp))}</div>
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 15, fontWeight: 700, color: C.textPrimary, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{emp.name}</div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: C.textPrimary, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cleanName(emp)}</div>
             <div style={{ fontSize: 12, color: C.textMuted, marginTop: 2 }}>{emp.position || "—"}</div>
           </div>
         </div>
@@ -568,14 +581,21 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
           <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0 }}>
             <div style={{
               width: 48, height: 48, borderRadius: "50%",
-              background: avatarTint(emp.name) + "22",
-              color: avatarTint(emp.name),
+              background: avatarTint(cleanName(emp)) + "22",
+              color: avatarTint(cleanName(emp)),
               display: "flex", alignItems: "center", justifyContent: "center",
               fontWeight: 700, fontSize: 17, flexShrink: 0,
-            }}>{initials(emp.name)}</div>
+            }}>{initials(cleanName(emp))}</div>
             <div style={{ minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: C.textPrimary }}>{emp.name}</h2>
+                <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: C.textPrimary }}>{cleanName(emp)}</h2>
+                {emp.code && (
+                  <span style={{
+                    fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999,
+                    background: C.surfaceAlt, color: C.textSecondary, border: `1px solid ${C.border}`,
+                    fontVariantNumeric: "tabular-nums",
+                  }}>{emp.code}</span>
+                )}
                 <span style={{
                   fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999,
                   background: c.bg, color: c.fg, border: `1px solid ${c.border}`,

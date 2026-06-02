@@ -5090,30 +5090,56 @@ def admin_user_delete_data(target_id: int, user: dict = Depends(get_current_user
 def list_reports(user: dict = Depends(get_current_user)):
     uid = int(user["sub"])
     db = get_db(); cur = db.cursor()
+    rows = []
     try:
         cur.execute("SELECT id, name, description, updated_at, is_favorite FROM saved_reports WHERE user_id = ? ORDER BY updated_at DESC", (uid,))
         rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            r["is_shared"] = False
+        # Items shared WITH this user, with the owner's name + the granted role.
+        cur.execute(
+            "SELECT r.id, r.name, r.description, r.updated_at, r.is_favorite, "
+            "s.role, o.full_name AS shared_by_name "
+            "FROM report_shares s JOIN saved_reports r ON r.id = s.report_id "
+            "JOIN users o ON o.id = r.user_id "
+            "WHERE s.user_id = ? ORDER BY r.updated_at DESC",
+            (uid,),
+        )
+        for r in cur.fetchall():
+            d = dict(r); d["is_shared"] = True
+            rows.append(d)
     except Exception as e:
         print(f"[/api/reports] error: {e}")
-        rows = []
     db.close()
     return {"reports": rows}
 
 
 @app.get("/api/reports/{report_id}")
 def get_report(report_id: int, user: dict = Depends(get_current_user)):
+    uid = int(user["sub"])
     db = get_db(); cur = db.cursor()
+    role, owner = _share_role(cur, _SHARE_CFG["report"], report_id, uid)
+    if owner is None:
+        db.close(); raise HTTPException(status_code=404, detail="Report not found")
+    if role is None:
+        db.close(); raise HTTPException(status_code=403, detail="You don't have access to this report")
     cur.execute("SELECT id, name, description, config, user_id, updated_at FROM saved_reports WHERE id = ?", (report_id,))
-    r = cur.fetchone()
+    r = dict(cur.fetchone())
+    shared_by_name = None
+    if role != "owner":
+        cur.execute("SELECT full_name FROM users WHERE id = ?", (owner,))
+        o = cur.fetchone()
+        shared_by_name = (o["full_name"] if isinstance(o, dict) else o[0]) if o else None
     db.close()
-    if not r:
-        raise HTTPException(status_code=404, detail="Report not found")
-    r = dict(r)
     if isinstance(r.get("config"), str):
         try:
             r["config"] = json.loads(r["config"])
         except Exception:
             pass
+    r["is_shared"] = role != "owner"
+    r["role"] = role
+    r["can_edit"] = role in ("owner", "editor")
+    r["shared_by_name"] = shared_by_name
     return r
 
 
@@ -5145,6 +5171,14 @@ def create_report(body: dict, user: dict = Depends(get_current_user)):
 @app.put("/api/reports/{report_id}")
 def update_report(report_id: int, body: dict, user: dict = Depends(get_current_user)):
     from database import USE_POSTGRES
+    uid = int(user["sub"])
+    _db = get_db(); _cur = _db.cursor()
+    role, owner = _share_role(_cur, _SHARE_CFG["report"], report_id, uid)
+    _db.close()
+    if owner is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    if role not in ("owner", "editor"):
+        raise HTTPException(status_code=403, detail="You have view-only access to this report")
     name = body.get("name") or body.get("title")
     description = body.get("description")
     config = body.get("config")
@@ -5164,7 +5198,13 @@ def update_report(report_id: int, body: dict, user: dict = Depends(get_current_u
 
 @app.delete("/api/reports/{report_id}")
 def delete_report(report_id: int, user: dict = Depends(get_current_user)):
+    uid = int(user["sub"])
     db = get_db(); cur = db.cursor()
+    role, owner = _share_role(cur, _SHARE_CFG["report"], report_id, uid)
+    if owner is None:
+        db.close(); raise HTTPException(status_code=404, detail="Report not found")
+    if role != "owner":
+        db.close(); raise HTTPException(status_code=403, detail="Only the owner can delete this report")
     cur.execute("DELETE FROM saved_reports WHERE id = ?", (report_id,))
     db.commit(); db.close()
     return {"ok": True}
@@ -6035,12 +6075,25 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
 def list_dashboards(user: dict = Depends(get_current_user)):
     uid = int(user["sub"])
     db = get_db(); cur = db.cursor()
+    rows = []
     try:
         cur.execute("SELECT id, name, description, updated_at, is_favorite FROM saved_dashboards WHERE user_id = ? ORDER BY updated_at DESC", (uid,))
         rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            r["is_shared"] = False
+        cur.execute(
+            "SELECT d.id, d.name, d.description, d.updated_at, d.is_favorite, "
+            "s.role, o.full_name AS shared_by_name "
+            "FROM dashboard_shares s JOIN saved_dashboards d ON d.id = s.dashboard_id "
+            "JOIN users o ON o.id = d.user_id "
+            "WHERE s.user_id = ? ORDER BY d.updated_at DESC",
+            (uid,),
+        )
+        for r in cur.fetchall():
+            d = dict(r); d["is_shared"] = True
+            rows.append(d)
     except Exception as e:
         print(f"[/api/dashboards] error: {e}")
-        rows = []
     db.close()
     return {"dashboards": rows}
 
@@ -6072,24 +6125,44 @@ def create_dashboard(body: dict, user: dict = Depends(get_current_user)):
 
 @app.get("/api/dashboards/{dashboard_id}")
 def get_dashboard(dashboard_id: int, user: dict = Depends(get_current_user)):
+    uid = int(user["sub"])
     db = get_db(); cur = db.cursor()
+    role, owner = _share_role(cur, _SHARE_CFG["dashboard"], dashboard_id, uid)
+    if owner is None:
+        db.close(); raise HTTPException(status_code=404, detail="Dashboard not found")
+    if role is None:
+        db.close(); raise HTTPException(status_code=403, detail="You don't have access to this dashboard")
     cur.execute("SELECT id, name, description, config, user_id, updated_at FROM saved_dashboards WHERE id = ?", (dashboard_id,))
-    r = cur.fetchone()
+    r = dict(cur.fetchone())
+    shared_by_name = None
+    if role != "owner":
+        cur.execute("SELECT full_name FROM users WHERE id = ?", (owner,))
+        o = cur.fetchone()
+        shared_by_name = (o["full_name"] if isinstance(o, dict) else o[0]) if o else None
     db.close()
-    if not r:
-        raise HTTPException(status_code=404, detail="Dashboard not found")
-    r = dict(r)
     if isinstance(r.get("config"), str):
         try:
             r["config"] = json.loads(r["config"])
         except Exception:
             pass
+    r["is_shared"] = role != "owner"
+    r["role"] = role
+    r["can_edit"] = role in ("owner", "editor")
+    r["shared_by_name"] = shared_by_name
     return r
 
 
 @app.put("/api/dashboards/{dashboard_id}")
 def update_dashboard(dashboard_id: int, body: dict, user: dict = Depends(get_current_user)):
     from database import USE_POSTGRES
+    uid = int(user["sub"])
+    _db = get_db(); _cur = _db.cursor()
+    role, owner = _share_role(_cur, _SHARE_CFG["dashboard"], dashboard_id, uid)
+    _db.close()
+    if owner is None:
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+    if role not in ("owner", "editor"):
+        raise HTTPException(status_code=403, detail="You have view-only access to this dashboard")
     name = body.get("name") or body.get("title")
     description = body.get("description")
     config = body.get("config")
@@ -6109,10 +6182,175 @@ def update_dashboard(dashboard_id: int, body: dict, user: dict = Depends(get_cur
 
 @app.delete("/api/dashboards/{dashboard_id}")
 def delete_dashboard(dashboard_id: int, user: dict = Depends(get_current_user)):
+    uid = int(user["sub"])
     db = get_db(); cur = db.cursor()
+    role, owner = _share_role(cur, _SHARE_CFG["dashboard"], dashboard_id, uid)
+    if owner is None:
+        db.close(); raise HTTPException(status_code=404, detail="Dashboard not found")
+    if role != "owner":
+        db.close(); raise HTTPException(status_code=403, detail="Only the owner can delete this dashboard")
     cur.execute("DELETE FROM saved_dashboards WHERE id = ?", (dashboard_id,))
     db.commit(); db.close()
     return {"ok": True}
+
+
+# ── Sharing — dashboards + reports (Satori users only, viewer/editor) ──────
+# DB tables (dashboard_shares / report_shares) + the frontend ShareModal were
+# pre-built; these endpoints complete the feature.
+_SHARE_CFG = {
+    "dashboard": {"table": "saved_dashboards", "shares": "dashboard_shares", "fk": "dashboard_id"},
+    "report":    {"table": "saved_reports",    "shares": "report_shares",    "fk": "report_id"},
+}
+
+
+def _item_owner(cur, cfg, item_id):
+    cur.execute(f"SELECT user_id FROM {cfg['table']} WHERE id = ?", (item_id,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    return row["user_id"] if isinstance(row, dict) else row[0]
+
+
+def _share_role(cur, cfg, item_id, uid):
+    """Return (role, owner_id): role is 'owner' | 'editor' | 'viewer' | None
+    for `uid` on this item; owner_id is None when the item doesn't exist."""
+    owner = _item_owner(cur, cfg, item_id)
+    if owner is None:
+        return None, None
+    if owner == uid:
+        return "owner", owner
+    cur.execute(f"SELECT role FROM {cfg['shares']} WHERE {cfg['fk']} = ? AND user_id = ?", (item_id, uid))
+    row = cur.fetchone()
+    if not row:
+        return None, owner
+    return ((row["role"] if isinstance(row, dict) else row[0]) or "viewer"), owner
+
+
+@app.get("/api/users/search")
+def search_users(q: str = "", user: dict = Depends(get_current_user)):
+    """Find Satori users by name/email — for the share picker. Any authenticated
+    user may search; returns only safe fields and excludes the caller."""
+    q = (q or "").strip().lower()
+    if not q:
+        return {"users": []}
+    uid = int(user["sub"])
+    like = f"%{q}%"
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute(
+            "SELECT id, email, full_name FROM users "
+            "WHERE is_active = 1 AND id != ? AND (LOWER(email) LIKE ? OR LOWER(COALESCE(full_name,'')) LIKE ?) "
+            "ORDER BY full_name LIMIT 10",
+            (uid, like, like),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[/api/users/search] error: {e}")
+        rows = []
+    db.close()
+    return {"users": rows}
+
+
+def _list_shares(kind, item_id, user):
+    cfg = _SHARE_CFG[kind]
+    uid = int(user["sub"])
+    db = get_db(); cur = db.cursor()
+    role, owner = _share_role(cur, cfg, item_id, uid)
+    if owner is None:
+        db.close(); raise HTTPException(status_code=404, detail="Not found")
+    if role != "owner":
+        db.close(); raise HTTPException(status_code=403, detail="Only the owner can manage sharing")
+    cur.execute(
+        f"SELECT s.user_id, s.role, u.email, u.full_name "
+        f"FROM {cfg['shares']} s JOIN users u ON u.id = s.user_id "
+        f"WHERE s.{cfg['fk']} = ? ORDER BY u.full_name",
+        (item_id,),
+    )
+    shares = [dict(r) for r in cur.fetchall()]
+    db.close()
+    return {"shares": shares}
+
+
+def _add_share(kind, item_id, body, user, request):
+    cfg = _SHARE_CFG[kind]
+    uid = int(user["sub"])
+    target = body.get("user_id")
+    role = (body.get("role") or "viewer").strip().lower()
+    if role not in ("viewer", "editor"):
+        role = "viewer"
+    if not target:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    db = get_db(); cur = db.cursor()
+    my_role, owner = _share_role(cur, cfg, item_id, uid)
+    if owner is None:
+        db.close(); raise HTTPException(status_code=404, detail="Not found")
+    if my_role != "owner":
+        db.close(); raise HTTPException(status_code=403, detail="Only the owner can share this item")
+    if int(target) == owner:
+        db.close(); return {"ok": True, "note": "owner already has access"}
+    cur.execute(
+        f"INSERT INTO {cfg['shares']} ({cfg['fk']}, user_id, role, shared_by) VALUES (?, ?, ?, ?) "
+        f"ON CONFLICT ({cfg['fk']}, user_id) DO UPDATE SET role = excluded.role",
+        (item_id, int(target), role, uid),
+    )
+    db.commit(); db.close()
+    try:
+        audit_log.record(user=user, request=request, action="share.add",
+                         resource_type=kind, resource_id=item_id, detail={"with": target, "role": role})
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+def _remove_share(kind, item_id, target_uid, user, request):
+    cfg = _SHARE_CFG[kind]
+    uid = int(user["sub"])
+    db = get_db(); cur = db.cursor()
+    my_role, owner = _share_role(cur, cfg, item_id, uid)
+    if owner is None:
+        db.close(); raise HTTPException(status_code=404, detail="Not found")
+    # Owner can revoke anyone; a recipient may remove only their OWN share
+    # (that's the "remove from my list" action).
+    if my_role != "owner" and int(target_uid) != uid:
+        db.close(); raise HTTPException(status_code=403, detail="Not allowed")
+    cur.execute(f"DELETE FROM {cfg['shares']} WHERE {cfg['fk']} = ? AND user_id = ?", (item_id, int(target_uid)))
+    db.commit(); db.close()
+    try:
+        audit_log.record(user=user, request=request, action="share.remove",
+                         resource_type=kind, resource_id=item_id, detail={"user": target_uid})
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+@app.get("/api/dashboards/{item_id}/shares")
+def dashboard_shares_list(item_id: int, user: dict = Depends(get_current_user)):
+    return _list_shares("dashboard", item_id, user)
+
+
+@app.post("/api/dashboards/{item_id}/shares")
+def dashboard_shares_add(item_id: int, body: dict, request: Request, user: dict = Depends(get_current_user)):
+    return _add_share("dashboard", item_id, body, user, request)
+
+
+@app.delete("/api/dashboards/{item_id}/shares/{target_uid}")
+def dashboard_shares_remove(item_id: int, target_uid: int, request: Request, user: dict = Depends(get_current_user)):
+    return _remove_share("dashboard", item_id, target_uid, user, request)
+
+
+@app.get("/api/reports/{item_id}/shares")
+def report_shares_list(item_id: int, user: dict = Depends(get_current_user)):
+    return _list_shares("report", item_id, user)
+
+
+@app.post("/api/reports/{item_id}/shares")
+def report_shares_add(item_id: int, body: dict, request: Request, user: dict = Depends(get_current_user)):
+    return _add_share("report", item_id, body, user, request)
+
+
+@app.delete("/api/reports/{item_id}/shares/{target_uid}")
+def report_shares_remove(item_id: int, target_uid: int, request: Request, user: dict = Depends(get_current_user)):
+    return _remove_share("report", item_id, target_uid, user, request)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

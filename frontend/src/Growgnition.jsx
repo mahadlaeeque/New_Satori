@@ -14,7 +14,7 @@ import {
   Volume2, VolumeX, Minimize2, Maximize2, Bot, Sparkles, ChevronDown, Download,
   Plus, ToggleLeft, ToggleRight, Phone, Hash, Trash2, Edit3, Play, Pause, ArrowRight, MessageCircle,
   HelpCircle, Calendar, Command, CreditCard, Star, MoreHorizontal, Copy, Share2, Link as LinkIcon, UserPlus,
-  Filter, Sun, Moon, ThumbsUp, ThumbsDown
+  Filter, Sun, Moon, ThumbsUp, ThumbsDown, RefreshCw, Check
 } from "lucide-react";
 import AvailabilityEnginePage from "./AvailabilityEngine.jsx";
 
@@ -1967,7 +1967,49 @@ const AgentPage = () => {
   const [conversationId, setConversationId] = useState(null);
   const [historyOpen, setHistoryOpen] = useState(true);
   const [feedback, setFeedback] = useState({}); // { [responseId]: 'up' | 'down' }
+  const [copiedIdx, setCopiedIdx] = useState(null);
   const messagesEndRef = useRef(null);
+
+  // Copy an assistant message to the clipboard (ChatGPT-style action).
+  const copyMessage = useCallback((idx, text) => {
+    try { navigator.clipboard?.writeText(text || ""); } catch (_) { /* ignore */ }
+    setCopiedIdx(idx);
+    setTimeout(() => setCopiedIdx((c) => (c === idx ? null : c)), 1500);
+  }, []);
+
+  // Regenerate: re-ask the user prompt that produced this answer, in place.
+  const regenerate = useCallback(async (assistantIdx) => {
+    let userIdx = assistantIdx - 1;
+    while (userIdx >= 0 && messages[userIdx]?.role !== "user") userIdx--;
+    if (userIdx < 0) return;
+    const prompt = messages[userIdx].text;
+    const history = messages.slice(0, userIdx).map((m) => ({ role: m.role, text: m.text }));
+    setIsTyping(true);
+    try {
+      const token = localStorage.getItem("token");
+      const base = import.meta.env.VITE_API_BASE || "";
+      const res = await fetch(`${base}/api/chat`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ message: prompt, history, conversation_id: conversationId }),
+      });
+      const data = await res.json();
+      setMessages((prev) => {
+        const copy = [...prev];
+        if (copy[assistantIdx]) {
+          copy[assistantIdx] = {
+            role: "assistant", text: data.reply || "(no reply)",
+            timestamp: new Date(), responseId: data.response_id ?? null,
+          };
+        }
+        return copy;
+      });
+    } catch (_) {
+      /* leave the original answer in place on failure */
+    } finally {
+      setIsTyping(false);
+    }
+  }, [messages, conversationId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -2429,19 +2471,31 @@ const AgentPage = () => {
               }}>
                 <div style={{ fontSize: 13, lineHeight: 1.7 }}>{msg.role === "assistant" ? renderMarkdown(msg.text) : msg.text}</div>
               </div>
-              {msg.role === "assistant" && msg.responseId != null && (
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, paddingLeft: 4 }}>
-                  <span style={{ fontSize: 10.5, color: COLORS.textMuted, marginRight: 2 }}>
-                    {fb === "up" ? "Thanks for the feedback!" : fb === "down" ? "Thanks — we'll improve." : "Was this helpful?"}
-                  </span>
-                  <button onClick={() => sendFeedback(msg.responseId, "up")} title="Helpful" style={{
-                    background: "none", border: "none", cursor: "pointer", padding: 2, display: "flex",
-                    color: fb === "up" ? COLORS.accent : COLORS.textMuted,
-                  }}><ThumbsUp size={14} fill={fb === "up" ? COLORS.accent : "none"} /></button>
-                  <button onClick={() => sendFeedback(msg.responseId, "down")} title="Not helpful" style={{
-                    background: "none", border: "none", cursor: "pointer", padding: 2, display: "flex",
-                    color: fb === "down" ? COLORS.danger : COLORS.textMuted,
-                  }}><ThumbsDown size={14} fill={fb === "down" ? COLORS.danger : "none"} /></button>
+              {msg.role === "assistant" && (
+                <div style={{ display: "flex", alignItems: "center", gap: 2, marginTop: 6, paddingLeft: 4 }}>
+                  <button onClick={() => copyMessage(i, msg.text)} title={copiedIdx === i ? "Copied!" : "Copy"} style={{
+                    background: "none", border: "none", cursor: "pointer", padding: 4, display: "flex",
+                    color: copiedIdx === i ? COLORS.accent : COLORS.textMuted,
+                  }}>{copiedIdx === i ? <Check size={14} /> : <Copy size={14} />}</button>
+                  {messages.slice(0, i).some((m) => m.role === "user") && (
+                    <button onClick={() => regenerate(i)} title="Regenerate response" disabled={isTyping} style={{
+                      background: "none", border: "none", cursor: isTyping ? "default" : "pointer", padding: 4, display: "flex",
+                      color: COLORS.textMuted, opacity: isTyping ? 0.5 : 1,
+                    }}><RefreshCw size={14} /></button>
+                  )}
+                  {msg.responseId != null && (
+                    <>
+                      <button onClick={() => sendFeedback(msg.responseId, "up")} title="Helpful" style={{
+                        background: "none", border: "none", cursor: "pointer", padding: 4, display: "flex",
+                        color: fb === "up" ? COLORS.accent : COLORS.textMuted,
+                      }}><ThumbsUp size={14} fill={fb === "up" ? COLORS.accent : "none"} /></button>
+                      <button onClick={() => sendFeedback(msg.responseId, "down")} title="Not helpful" style={{
+                        background: "none", border: "none", cursor: "pointer", padding: 4, display: "flex",
+                        color: fb === "down" ? COLORS.danger : COLORS.textMuted,
+                      }}><ThumbsDown size={14} fill={fb === "down" ? COLORS.danger : "none"} /></button>
+                    </>
+                  )}
+                  {fb && <span style={{ fontSize: 10.5, color: COLORS.textMuted, marginLeft: 4 }}>{fb === "up" ? "Thanks!" : "Thanks — we'll improve."}</span>}
                 </div>
               )}
             </div>
@@ -3427,6 +3481,7 @@ const ReportsPage = () => {
   const [activeName, setActiveName] = useState("");
   const [activeFavorite, setActiveFavorite] = useState(false);
   const [activeIsShared, setActiveIsShared] = useState(false);
+  const [activeCanEdit, setActiveCanEdit] = useState(false); // editor-role recipients
   const [chatOpen, setChatOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [saveState, setSaveState] = useState("idle");
@@ -3487,6 +3542,7 @@ const ReportsPage = () => {
       setActiveName(full.name || full.config?.title || "Untitled Report");
       setActiveFavorite(!!full.is_favorite);
       setActiveIsShared(!!full.is_shared);
+      setActiveCanEdit(!!full.can_edit);
       setChatOpen(false);
       setShareOpen(false);
       setSaveState("idle");
@@ -3503,6 +3559,7 @@ const ReportsPage = () => {
     setActiveName("");
     setActiveFavorite(false);
     setActiveIsShared(false);
+    setActiveCanEdit(true);
     setChatOpen(false);
     setShareOpen(false);
     setSaveState("idle");
@@ -3536,7 +3593,7 @@ const ReportsPage = () => {
     if (!activeId) return;
     // Recipients can't write — pretend the change "saved" locally so per-column
     // toggles still feel responsive in their session, but skip the API call.
-    if (activeIsShared) {
+    if (activeIsShared && !activeCanEdit) {
       if (changes.config) {
         setActiveConfig(changes.config);
         setPreviewRev((k) => k + 1);
@@ -3571,7 +3628,7 @@ const ReportsPage = () => {
   // which is fine and rare.
   const handleSilentConfigEnrich = (enrichedConfig) => {
     setActiveConfig(enrichedConfig);
-    if (activeId && !activeIsShared) {
+    if (activeId && (!activeIsShared || activeCanEdit)) {
       const token = localStorage.getItem("token");
       const base = import.meta.env.VITE_API_BASE || "";
       fetch(`${base}/api/reports/${activeId}`, {
@@ -3786,6 +3843,23 @@ const ReportsPage = () => {
                 </button>
               </>
             )}
+            {activeIsShared && activeCanEdit && (
+              <button
+                onClick={() => setChatOpen((v) => !v)}
+                title={chatOpen ? "Close AI editor" : "Open AI editor"}
+                aria-pressed={chatOpen}
+                style={{
+                  padding: "8px 14px", borderRadius: 8,
+                  border: chatOpen ? "none" : `1px solid ${COLORS.border}`,
+                  background: chatOpen ? `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})` : "#fff",
+                  color: chatOpen ? "#fff" : COLORS.textPrimary,
+                  fontSize: 13, fontWeight: 600, cursor: "pointer",
+                  display: "flex", alignItems: "center", gap: 6,
+                }}
+              >
+                <Sparkles size={14} /> Edit with AI
+              </button>
+            )}
             <div ref={menuRef} style={{ position: "relative" }}>
               <button onClick={() => setMenuOpen((v) => !v)} title="More" style={{
                 background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
@@ -3825,10 +3899,10 @@ const ReportsPage = () => {
               configRev={previewRev}
               onConfigChange={handleSilentConfigEnrich}
               onSaveMeta={persistMeta}
-              isReadOnly={activeIsShared}
+              isReadOnly={activeIsShared && !activeCanEdit}
             />
           </div>
-          {chatOpen && !activeIsShared && (
+          {chatOpen && (!activeIsShared || activeCanEdit) && (
             <div style={{
               flex: "0 0 40%", maxWidth: 480, background: COLORS.surface,
               border: `1px solid ${COLORS.border}`, borderRadius: 16, overflow: "hidden",
@@ -6342,6 +6416,7 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
   const [searching, setSearching] = useState(false);
   const [adding, setAdding] = useState(null); // user_id being added (for spinner)
   const [error, setError] = useState("");
+  const [role, setRole] = useState("viewer"); // access level applied to new shares
   const searchTimer = useRef(null);
 
   const token = () => localStorage.getItem("token");
@@ -6396,7 +6471,7 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
       const res = await fetch(`${apiBase()}${baseUrl}`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: u.id }),
+        body: JSON.stringify({ user_id: u.id, role }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -6409,6 +6484,23 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
       setError(e.message);
     } finally {
       setAdding(null);
+    }
+  };
+
+  // Change an existing collaborator's access level (re-POST upserts the role).
+  const handleChangeRole = async (userId, newRole) => {
+    setError("");
+    setShares((prev) => prev.map((s) => (s.user_id === userId ? { ...s, role: newRole } : s)));
+    try {
+      const res = await fetch(`${apiBase()}${baseUrl}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: userId, role: newRole }),
+      });
+      if (!res.ok) throw new Error("Could not update access");
+    } catch (e) {
+      setError(e.message);
+      await fetchShares();
     }
   };
 
@@ -6482,6 +6574,23 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
               onFocus={(e) => { e.target.style.borderColor = COLORS.purple; e.target.style.background = "#fff"; }}
               onBlur={(e) => { e.target.style.borderColor = COLORS.border; e.target.style.background = COLORS.surfaceAlt; }}
             />
+          </div>
+
+          {/* Access level for new shares */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+            <span style={{ fontSize: 12, color: COLORS.textMuted, fontWeight: 500 }}>New people can:</span>
+            <div style={{ display: "flex", border: `1px solid ${COLORS.border}`, borderRadius: 8, overflow: "hidden" }}>
+              {[
+                { id: "viewer", label: "View" },
+                { id: "editor", label: "Edit" },
+              ].map((o) => (
+                <button key={o.id} onClick={() => setRole(o.id)} style={{
+                  padding: "6px 14px", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600,
+                  background: role === o.id ? COLORS.purple : COLORS.surface,
+                  color: role === o.id ? "#fff" : COLORS.textSecondary,
+                }}>{o.label}</button>
+              ))}
+            </div>
           </div>
 
           {/* Search results */}
@@ -6575,7 +6684,18 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
                 </div>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                <span style={{ fontSize: 11, color: COLORS.textMuted, fontWeight: 500 }}>Viewer</span>
+                <select
+                  value={s.role === "editor" ? "editor" : "viewer"}
+                  onChange={(e) => handleChangeRole(s.user_id, e.target.value)}
+                  style={{
+                    fontSize: 11.5, fontWeight: 600, color: COLORS.textSecondary, cursor: "pointer",
+                    border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: "3px 6px",
+                    background: COLORS.surface,
+                  }}
+                >
+                  <option value="viewer">Viewer</option>
+                  <option value="editor">Editor</option>
+                </select>
                 <button onClick={() => handleRemove(s.user_id)} title="Revoke access" style={{
                   background: "none", border: "none", padding: 4, borderRadius: 6, cursor: "pointer",
                   color: COLORS.textMuted, display: "flex", alignItems: "center"
@@ -6710,6 +6830,7 @@ const DashboardsPage = () => {
   const [activeName, setActiveName] = useState("");
   const [activeFavorite, setActiveFavorite] = useState(false);
   const [activeIsShared, setActiveIsShared] = useState(false);
+  const [activeCanEdit, setActiveCanEdit] = useState(false); // editor-role recipients
   const [chatOpen, setChatOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [saveState, setSaveState] = useState("idle");
@@ -6771,6 +6892,7 @@ const DashboardsPage = () => {
       setActiveName(full.name || full.config?.title || "Untitled Dashboard");
       setActiveFavorite(!!full.is_favorite);
       setActiveIsShared(!!full.is_shared);
+      setActiveCanEdit(!!full.can_edit);
       setChatOpen(false);
       setShareOpen(false);
       setSaveState("idle");
@@ -6787,6 +6909,7 @@ const DashboardsPage = () => {
     setActiveName("");
     setActiveFavorite(false);
     setActiveIsShared(false);
+    setActiveCanEdit(true);
     setChatOpen(false);
     setShareOpen(false);
     setSaveState("idle");
@@ -7041,6 +7164,23 @@ const DashboardsPage = () => {
                 </button>
               </>
             )}
+            {activeIsShared && activeCanEdit && (
+              <button
+                onClick={() => setChatOpen((v) => !v)}
+                title={chatOpen ? "Close AI editor" : "Open AI editor"}
+                aria-pressed={chatOpen}
+                style={{
+                  padding: "8px 14px", borderRadius: 8,
+                  border: chatOpen ? "none" : `1px solid ${COLORS.border}`,
+                  background: chatOpen ? `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})` : "#fff",
+                  color: chatOpen ? "#fff" : COLORS.textPrimary,
+                  fontSize: 13, fontWeight: 600, cursor: "pointer",
+                  display: "flex", alignItems: "center", gap: 6,
+                }}
+              >
+                <Sparkles size={14} /> Edit with AI
+              </button>
+            )}
             <div ref={menuRef} style={{ position: "relative" }}>
               <button onClick={() => setMenuOpen((v) => !v)} title="More" style={{
                 background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
@@ -7076,7 +7216,7 @@ const DashboardsPage = () => {
           }}>
             <DashboardRenderer key={renderKey} spec={activeConfig} />
           </div>
-          {chatOpen && !activeIsShared && (
+          {chatOpen && (!activeIsShared || activeCanEdit) && (
             <div style={{
               flex: "0 0 40%", maxWidth: 480, background: COLORS.surface,
               border: `1px solid ${COLORS.border}`, borderRadius: 16, overflow: "hidden",
