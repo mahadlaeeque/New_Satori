@@ -1264,7 +1264,7 @@ const FabButtons = ({ pageLabel } = {}) => {
                     transition: "all 0.15s",
                   }}
                   onMouseEnter={(e) => { e.currentTarget.style.background = `${COLORS.accent}15`; e.currentTarget.style.color = COLORS.accent; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = "#F8FAFC"; e.currentTarget.style.color = COLORS.textPrimary; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = COLORS.surfaceAlt; e.currentTarget.style.color = COLORS.textPrimary; }}
                   >{t}</button>
                 ))}
               </div>
@@ -2082,6 +2082,8 @@ const AgentPage = () => {
         role: m.role,
         text: m.content,
         timestamp: new Date(m.created_at + (m.created_at?.endsWith?.('Z') ? '' : 'Z')),
+        // Carry the DB message id so thumbs feedback works on history-loaded turns.
+        responseId: m.role === "assistant" ? (m.id ?? null) : null,
       }));
       setMessages(loaded);
       setConversationId(convId);
@@ -2464,7 +2466,7 @@ const AgentPage = () => {
             }}>
               <div style={{
                 maxWidth: "70%", padding: "14px 18px", borderRadius: msg.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
-                background: msg.role === "user" ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})` : "#fff",
+                background: msg.role === "user" ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})` : COLORS.surface,
                 color: msg.role === "user" ? "#fff" : COLORS.textPrimary,
                 border: msg.role === "assistant" ? `1px solid ${COLORS.border}` : "none",
                 boxShadow: "0 1px 3px rgba(0,0,0,0.06)"
@@ -2530,8 +2532,8 @@ const AgentPage = () => {
                   fontSize: 14, outline: "none", background: COLORS.surfaceAlt, transition: "all 0.2s", boxSizing: "border-box",
                   resize: "none", fontFamily: "inherit", lineHeight: 1.5, display: "block", margin: 0
                 }}
-                onFocus={e => { e.target.style.borderColor = COLORS.accent; e.target.style.background = "#fff"; }}
-                onBlur={e => { e.target.style.borderColor = COLORS.border; e.target.style.background = "#F8FAFC"; }}
+                onFocus={e => { e.target.style.borderColor = COLORS.accent; e.target.style.background = COLORS.surface; }}
+                onBlur={e => { e.target.style.borderColor = COLORS.border; e.target.style.background = COLORS.surfaceAlt; }}
               />
             </div>
             {/* Send button */}
@@ -2709,7 +2711,7 @@ const AgentPage = () => {
                       borderRadius: 8, cursor: "pointer", transition: "all 0.15s",
                       display: "flex", alignItems: "center", gap: 6,
                     }}
-                    onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = "#fff"; }}
+                    onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = COLORS.surface; }}
                     onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
                   >
                     <div style={{ flex: 1, minWidth: 0 }}>
@@ -3015,7 +3017,7 @@ const ReportChatPanel = ({
                 borderRadius: msg.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
                 background: msg.isScopeNotice
                   ? "#FEF9E7"
-                  : (msg.role === "user" ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})` : "#fff"),
+                  : (msg.role === "user" ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})` : COLORS.surface),
                 color: msg.role === "user" ? "#fff" : COLORS.textPrimary,
                 border: msg.isScopeNotice
                   ? `1px solid ${COLORS.warning}`
@@ -4243,7 +4245,7 @@ const RulesEnginePage = () => {
                   transition: "all 0.15s", cursor: "pointer", position: "relative"
                 }}
                 onMouseEnter={e => { e.currentTarget.style.borderColor = amber.primary; e.currentTarget.style.boxShadow = "0 2px 12px rgba(245,158,11,0.12)"; e.currentTarget.style.background = amber.light; }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor = COLORS.border; e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.background = "#fff"; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = COLORS.border; e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.background = COLORS.surface; }}
                 >
                   {/* Top row */}
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -4273,7 +4275,7 @@ const RulesEnginePage = () => {
                           </span>
                         );
                       })}
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 500, padding: "3px 8px", borderRadius: 6, background: "#F3F4F6", color: COLORS.textSecondary }}>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 500, padding: "3px 8px", borderRadius: 6, background: COLORS.surfaceAlt, color: COLORS.textSecondary }}>
                         <Clock size={10} /> {rule.schedule}
                       </span>
                     </div>
@@ -4290,7 +4292,7 @@ const RulesEnginePage = () => {
       </div>
 
       {/* ─── Right Sidebar ─── */}
-      <div style={{ width: 340, borderLeft: `1px solid ${COLORS.border}`, background: "#FAFAFA", display: "flex", flexDirection: "column", overflowY: "auto", flexShrink: 0 }}>
+      <div style={{ width: 340, borderLeft: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt, display: "flex", flexDirection: "column", overflowY: "auto", flexShrink: 0 }}>
         {/* Rule Templates */}
         <div style={{ padding: "18px 18px 14px", borderBottom: `1px solid ${COLORS.border}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
@@ -4313,7 +4315,7 @@ const RulesEnginePage = () => {
                 cursor: "pointer", transition: "all 0.15s"
               }}
               onMouseEnter={e => { e.currentTarget.style.borderColor = amber.primary; e.currentTarget.style.background = amber.light; }}
-              onMouseLeave={e => { e.currentTarget.style.borderColor = COLORS.border; e.currentTarget.style.background = "#fff"; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = COLORS.border; e.currentTarget.style.background = COLORS.surface; }}
               >
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
                   <tpl.icon size={14} color={tpl.color} />
@@ -4389,7 +4391,7 @@ const RulesEnginePage = () => {
             {/* Modal Header */}
             <div style={{ padding: "20px 28px 16px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.textPrimary }}>Create New Rule</div>
-              <button onClick={() => setShowModal(false)} style={{ width: 28, height: 28, borderRadius: 8, border: "none", background: "#F3F4F6", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <button onClick={() => setShowModal(false)} style={{ width: 28, height: 28, borderRadius: 8, border: "none", background: COLORS.surfaceAlt, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
                 <X size={14} color={COLORS.textMuted} />
               </button>
             </div>
@@ -4442,7 +4444,7 @@ const RulesEnginePage = () => {
                                 width: "100%", padding: "8px 14px 8px 24px", border: "none", background: newRule.metric === item ? amber.light : "transparent",
                                 fontSize: 12, color: COLORS.textPrimary, cursor: "pointer", textAlign: "left"
                               }}
-                              onMouseEnter={e => { if (newRule.metric !== item) e.currentTarget.style.background = "#F8FAFC"; }}
+                              onMouseEnter={e => { if (newRule.metric !== item) e.currentTarget.style.background = COLORS.surfaceAlt; }}
                               onMouseLeave={e => { if (newRule.metric !== item) e.currentTarget.style.background = "transparent"; }}
                               >{item}</button>
                             ))}
@@ -4563,7 +4565,7 @@ const RulesEnginePage = () => {
                     width: "100%", padding: "10px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 10, background: COLORS.surfaceAlt, fontSize: 13, outline: "none", marginBottom: 16, boxSizing: "border-box"
                   }} />
                   {/* Summary */}
-                  <div style={{ background: "#F9FAFB", borderRadius: 12, padding: "16px 18px", border: `1px solid ${COLORS.border}` }}>
+                  <div style={{ background: COLORS.surfaceAlt, borderRadius: 12, padding: "16px 18px", border: `1px solid ${COLORS.border}` }}>
                     <div style={{ marginBottom: 12 }}>
                       <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.textMuted, textTransform: "uppercase", marginBottom: 4 }}>Trigger</div>
                       <div style={{ fontSize: 13, color: COLORS.textPrimary }}>
@@ -5875,7 +5877,7 @@ const DashboardRenderer = ({ spec, onBack }) => {
                       )}
                       {w.sql && (
                         <pre style={{
-                          marginTop: 6, padding: 8, background: "#F9FAFB", borderRadius: 6,
+                          marginTop: 6, padding: 8, background: COLORS.surfaceAlt, borderRadius: 6,
                           fontSize: 11, color: COLORS.textSecondary, overflow: "auto", maxHeight: 220, whiteSpace: "pre-wrap"
                         }}>{w.sql}</pre>
                       )}
@@ -6281,7 +6283,7 @@ const DashboardChatPanel = ({
                 borderRadius: msg.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
                 background: msg.isScopeNotice
                   ? "#FEF9E7"
-                  : (msg.role === "user" ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})` : "#fff"),
+                  : (msg.role === "user" ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})` : COLORS.surface),
                 color: msg.role === "user" ? "#fff" : COLORS.textPrimary,
                 border: msg.isScopeNotice
                   ? `1px solid ${COLORS.warning}`
@@ -6571,7 +6573,7 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
                 border: `1px solid ${COLORS.border}`, fontSize: 13, outline: "none",
                 background: COLORS.surfaceAlt, transition: "all 0.15s", boxSizing: "border-box",
               }}
-              onFocus={(e) => { e.target.style.borderColor = COLORS.purple; e.target.style.background = "#fff"; }}
+              onFocus={(e) => { e.target.style.borderColor = COLORS.purple; e.target.style.background = COLORS.surface; }}
               onBlur={(e) => { e.target.style.borderColor = COLORS.border; e.target.style.background = COLORS.surfaceAlt; }}
             />
           </div>
@@ -9678,8 +9680,8 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                       borderRadius: 12, fontSize: 14, outline: "none", background: COLORS.surfaceAlt,
                       transition: "all 0.2s", boxSizing: "border-box"
                     }}
-                    onFocus={e => { e.target.style.borderColor = COLORS.primary; e.target.style.background = "#fff"; }}
-                    onBlur={e => { e.target.style.borderColor = "#E2E8F0"; e.target.style.background = "#F8FAFC"; }}
+                    onFocus={e => { e.target.style.borderColor = COLORS.primary; e.target.style.background = COLORS.surface; }}
+                    onBlur={e => { e.target.style.borderColor = "#E2E8F0"; e.target.style.background = COLORS.surfaceAlt; }}
                   />
                 </div>
               </div>
@@ -9695,8 +9697,8 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                       borderRadius: 12, fontSize: 14, outline: "none", background: COLORS.surfaceAlt,
                       transition: "all 0.2s", boxSizing: "border-box"
                     }}
-                    onFocus={e => { e.target.style.borderColor = COLORS.primary; e.target.style.background = "#fff"; }}
-                    onBlur={e => { e.target.style.borderColor = "#E2E8F0"; e.target.style.background = "#F8FAFC"; }}
+                    onFocus={e => { e.target.style.borderColor = COLORS.primary; e.target.style.background = COLORS.surface; }}
+                    onBlur={e => { e.target.style.borderColor = "#E2E8F0"; e.target.style.background = COLORS.surfaceAlt; }}
                   />
                 </div>
               </div>
@@ -9821,8 +9823,8 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                     boxSizing: "border-box", letterSpacing: 8, textAlign: "center",
                     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
                   }}
-                  onFocus={e => { e.target.style.borderColor = COLORS.primary; e.target.style.background = "#fff"; }}
-                  onBlur={e => { e.target.style.borderColor = "#E2E8F0"; e.target.style.background = "#F8FAFC"; }}
+                  onFocus={e => { e.target.style.borderColor = COLORS.primary; e.target.style.background = COLORS.surface; }}
+                  onBlur={e => { e.target.style.borderColor = "#E2E8F0"; e.target.style.background = COLORS.surfaceAlt; }}
                 />
               </div>
               <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: COLORS.textSecondary, cursor: "pointer" }}>
@@ -9918,8 +9920,8 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
                   textTransform: useBackupCode ? "uppercase" : "none",
                 }}
-                onFocus={e => { e.target.style.borderColor = COLORS.primary; e.target.style.background = "#fff"; }}
-                onBlur={e => { e.target.style.borderColor = "#E2E8F0"; e.target.style.background = "#F8FAFC"; }}
+                onFocus={e => { e.target.style.borderColor = COLORS.primary; e.target.style.background = COLORS.surface; }}
+                onBlur={e => { e.target.style.borderColor = "#E2E8F0"; e.target.style.background = COLORS.surfaceAlt; }}
               />
               <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: COLORS.textSecondary, cursor: "pointer" }}>
                 <input type="checkbox" checked={trustDevice} onChange={(e) => setTrustDevice(e.target.checked)} style={{ accentColor: COLORS.primary }} />
@@ -10007,7 +10009,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
         html[data-satori-theme="dark"] [style*="background: rgb(255, 255, 255)"],
         html[data-satori-theme="dark"] [style*="background:#fff"],
         html[data-satori-theme="dark"] [style*='background: #fff'],
-        html[data-satori-theme="dark"] [style*='background: "#fff"'] {
+        html[data-satori-theme="dark"] [style*='background: COLORS.surface'] {
           background: var(--c-surface) !important;
         }
         html[data-satori-theme="dark"] [style*="background: rgb(248, 250, 252)"],
@@ -10629,7 +10631,7 @@ export default function App() {
                   fontSize: 13, fontWeight: isActive ? 600 : 500,
                   transition: "all 0.15s"
                 }}
-                onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = "#F8FAFC"; }}
+                onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = COLORS.surfaceAlt; }}
                 onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
                 title={sidebarCollapsed ? item.label : undefined}
               >
@@ -10753,7 +10755,7 @@ export default function App() {
                         fontSize: 13, color: COLORS.textSecondary, textDecoration: "none",
                         borderTop: `1px solid ${COLORS.border}`,
                       }}
-                      onMouseEnter={e => { e.currentTarget.style.background = "#F8FAF5"; e.currentTarget.style.color = COLORS.textPrimary; }}
+                      onMouseEnter={e => { e.currentTarget.style.background = COLORS.surfaceAlt; e.currentTarget.style.color = COLORS.textPrimary; }}
                       onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = COLORS.textSecondary; }}
                     >
                       <Shield size={15} /> Privacy & data

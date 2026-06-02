@@ -3329,7 +3329,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                         if _em_text:
                             print(f"[CHAT] emergency fallback succeeded "
                                   f"({len(_em_text)} chars)")
-                            return {"reply": _em_text}
+                            return _finalize_chat(body, _em_text, user)
                         print("[CHAT] emergency fallback also returned empty text")
                     except Exception as _eme:
                         print(f"[CHAT] emergency fallback raised: {_eme}")
@@ -3489,7 +3489,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                     if _last_err or _last_sql_attempted:
                         _log_chat_error(user, body.message, _last_sql_attempted, _last_err, "refusal_unmask")
 
-                return {"reply": reply}
+                return _finalize_chat(body, reply, user)
 
             # Execute each function call and append results
             contents.append(response.candidates[0].content)
@@ -4142,6 +4142,22 @@ def _save_chat_turn(user_id: int, conv_id, user_message: str, ai_reply: str):
         try: db.close()
         except Exception: pass
     return conv_id, response_id
+
+
+def _finalize_chat(body, reply, user):
+    """Persist a chat turn and return the standardized response shape
+    ({reply, conversation_id, response_id}). Used at every terminal return of
+    the chat handler so history + thumbs feedback work no matter which path the
+    model took (direct answer, tool rounds, or scope refusal)."""
+    new_conv_id = getattr(body, "conversation_id", None)
+    response_id = None
+    try:
+        uid = int(user["sub"])
+        new_conv_id, response_id = _save_chat_turn(uid, body.conversation_id, body.message, reply)
+    except Exception as _e:
+        import traceback as _tb
+        print(f"[chat] _finalize_chat save failed (continuing): {_e}\n{_tb.format_exc()}")
+    return {"reply": reply, "conversation_id": new_conv_id, "response_id": response_id}
 
 
 @app.get("/api/tables")
