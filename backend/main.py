@@ -2289,8 +2289,8 @@ WORKFORCE TABLES
 
 SALES TABLES
 5. `Sales_Accounts` (~359 rows) — Customer accounts. Cols: VP, AM, Location, Account, Tier ('A'/'B'/'C'), Dormant ('Yes'/'No'), Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits, Zero_Visit ('Yes'/'No').
-6. `Sales_AM_Scorecard` (8 AMs) — AM performance. Cols: VP, AM, Role, City, col_2026_Target (USD), Q1_ACH (USD), Open_Pipeline (USD), Hist_Win_Rate (decimal 0-1 — multiply by 100 for %).
-7. `Sales_Plan_vs_Pipeline` — Revenue plan vs actual. Cols: AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio, Status, Action.
+6. `Sales_AM_Scorecard` — AM performance + account coverage. Cols: VP, AM, Role, City, A, B, C (counts of tier-A/B/C accounts), Active_Book, Dormant (dormant-account count), Q1_Visits, Zero_Visit (count of accounts with zero Q1 visits), col_2026_Target, Q1_ACH, Open_Pipeline (all STRING USD — SAFE_CAST AS FLOAT64), Hist_Win_Rate (STRING decimal 0-1 or 'n/a' — SAFE_CAST, ×100 for %). For "zero-visit accounts" use the Zero_Visit column; for account tiers use A/B/C.
+7. `Sales_Plan_vs_Pipeline` — Revenue plan vs actual. Cols: AM, Role, col_2026_Target, Q1_Target, Q1_ACH, Q1_pct_Plan, Remaining_2026, CRM_Pipeline, Coverage_Ratio (FLOAT-like, already a ratio), Status, Action.
 8. `Sales_Pipeline_Health` — All salespeople. Cols: Salesperson, Open_Pipeline (USD), Open_Deals, Win_Rate_by (decimal 0-1).
 9. `Sales_Hunting_Gap` — New-business quotas + gaps per AM.
 10. `Sales_KPI_Scorecard` — KPI definitions (reference only).
@@ -2573,10 +2573,11 @@ WORKFORCE
   • Timesheet_Data — TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (INT YYYYMMDD — use SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)) for date filters).
 
 SALES
-  • Sales_AM_Scorecard — VP, AM, Role, City, col_2026_Target, Q1_ACH, Open_Pipeline (all STRING USD — SAFE_CAST AS FLOAT64), Hist_Win_Rate (decimal 0-1, multiply by 100 for %).
-  • Sales_Accounts — VP, AM, Location, Account, Tier (A/B/C), Dormant ('Yes'/'No'), Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits (STRING — SAFE_CAST).
-  • Sales_Pipeline_Health — Salesperson, Open_Pipeline (USD STRING), Open_Deals, Win_Rate_by.
-  • Sales_Plan_vs_Pipeline — AM, col_2026_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio, Status.
+  • Sales_AM_Scorecard — VP, AM, Role, City, A, B, C (counts of tier-A/B/C accounts per AM), Active_Book, Dormant (dormant-account count), Q1_Visits, Zero_Visit (count of zero-visit accounts), col_2026_Target, Q1_ACH, Open_Pipeline (all STRING USD — SAFE_CAST AS FLOAT64), Hist_Win_Rate (STRING decimal 0-1 or 'n/a' — SAFE_CAST, ×100 for %). USE THIS for account-tier (A/B/C) and zero-visit questions — it carries the per-AM totals.
+  • Sales_Accounts — NO per-account list is loaded; for tier / visit / zero-visit metrics use the per-AM columns in Sales_AM_Scorecard instead.
+  • Sales_Pipeline_Health — Salesperson, Open_Pipeline (USD STRING), Open_Deals, Win_Rate_by (note: this table is a summary, not per-salesperson rows).
+  • Sales_Plan_vs_Pipeline — AM, Role, col_2026_Target, Q1_Target, Q1_ACH, Q1_pct_Plan, Remaining_2026, CRM_Pipeline, Coverage_Ratio, Status, Action.
+  • Sales_Dormant_Accounts — VP, AM, Location, Account, Q1_Visits (per-account list of dormant accounts).
   • Sales_Hunting_Gap — AM, City, Hunting_Target, Hunting_Achieved, Hunting_Gap.
 
 DEPARTMENTS (real EmployeeHierarchyNode values): SAP Supply Chain, SAP Finance, SAP ABAP & Fiori, SAP HCM & SLCM, Professional Services, Emerging Tech, KPO, SAP SF & Workday, SAP EAM, SAP Basis, LMS & UniTime, SAP Controlling, PMO Islamabad, Qlik, SAP Analytics, Cloud, Account Management, Finance, BOD, Marketing, HR Ops, IT, Admin, Textile.
