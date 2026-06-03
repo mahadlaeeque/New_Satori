@@ -2714,7 +2714,7 @@ const AgentPage = () => {
               <Plus size={11} /> New
             </button>
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 360, overflowY: "auto" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 360, overflowY: "auto", paddingRight: 4, paddingBottom: 64 }}>
             {conversations.length === 0 ? (
               <div style={{ fontSize: 11, color: COLORS.textMuted, padding: "8px 10px" }}>No saved conversations yet.</div>
             ) : (
@@ -2733,18 +2733,14 @@ const AgentPage = () => {
                       background: isActive ? `${COLORS.accent}1a` : "transparent",
                       border: isActive ? `1px solid ${COLORS.accent}66` : "1px solid transparent",
                       borderRadius: 8, cursor: "pointer", transition: "all 0.15s",
-                      display: "flex", alignItems: "center", gap: 6,
+                      display: "flex", alignItems: "center", gap: 8,
                     }}
                     onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = COLORS.surface; }}
                     onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
                   >
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 11.5, fontWeight: 500, color: COLORS.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2 }}>{conv.title || "(untitled)"}</div>
-                      <div style={{ fontSize: 9.5, color: COLORS.textMuted, display: "flex", gap: 6 }}>
-                        <span>{timeAgo}</span>
-                        {conv.message_count ? <span>· {conv.message_count} msgs</span> : null}
-                      </div>
-                    </div>
+                    {/* Delete lives on the LEFT and is always visible — the floating
+                        help/mic action buttons overlap the right edge of this panel,
+                        so a right-aligned (hover-only) trash icon was unreachable. */}
                     <button
                       onClick={(e) => deleteConversation(conv.id, e)}
                       title="Delete this conversation"
@@ -2752,12 +2748,20 @@ const AgentPage = () => {
                         width: 22, height: 22, padding: 0, borderRadius: 6, border: "none",
                         background: "transparent", color: COLORS.textMuted, cursor: "pointer",
                         display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                        opacity: 0.6, transition: "all 0.15s",
                       }}
-                      onMouseEnter={e => { e.currentTarget.style.background = "#FEE2E2"; e.currentTarget.style.color = COLORS.danger; }}
-                      onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = COLORS.textMuted; }}
+                      onMouseEnter={e => { e.stopPropagation(); e.currentTarget.style.background = "#FEE2E2"; e.currentTarget.style.color = COLORS.danger; e.currentTarget.style.opacity = 1; }}
+                      onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = COLORS.textMuted; e.currentTarget.style.opacity = 0.6; }}
                     >
                       <Trash2 size={12} />
                     </button>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 11.5, fontWeight: 500, color: COLORS.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2 }}>{conv.title || "(untitled)"}</div>
+                      <div style={{ fontSize: 9.5, color: COLORS.textMuted, display: "flex", gap: 6 }}>
+                        <span>{timeAgo}</span>
+                        {conv.message_count ? <span>· {conv.message_count} msgs</span> : null}
+                      </div>
+                    </div>
                   </div>
                 );
               })
@@ -10388,8 +10392,130 @@ const ResetPasswordPage = () => {
   );
 };
 
+// ─── Boot splash ──────────────────────────────────────────────────────
+//
+// A short, branded "boot sequence" shown right after sign-in (and once per
+// browser session when landing with a live token). Pure CSS keyframes — no
+// extra deps. Self-dismisses (~2.9s) and calls onDone so the app underneath
+// is fully rendered and ready by the time it fades away.
+const SatoriBootSplash = ({ onDone, userName }) => {
+  const [leaving, setLeaving] = useState(false);
+  useEffect(() => {
+    const t1 = setTimeout(() => setLeaving(true), 2450);  // begin fade-out
+    const t2 = setTimeout(() => onDone?.(), 3000);        // unmount
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, [onDone]);
+
+  const firstName = (userName || "").trim().split(/\s+/)[0] || "";
+
+  return (
+    <div
+      role="status"
+      aria-label="Loading Satori"
+      style={{
+        position: "fixed", inset: 0, zIndex: 99999,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        background: "radial-gradient(1200px 820px at 50% 36%, #0c2418 0%, #07140d 55%, #03070500 100%), #040806",
+        opacity: leaving ? 0 : 1,
+        transform: leaving ? "scale(1.04)" : "scale(1)",
+        transition: "opacity 0.55s ease, transform 0.6s ease",
+        pointerEvents: leaving ? "none" : "auto",
+        overflow: "hidden",
+        fontFamily: "'Red Hat Display', 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif",
+      }}
+    >
+      <style>{`
+        @keyframes satboot-fadeUp { 0% { opacity:0; transform: translateY(16px);} 100% { opacity:1; transform: translateY(0);} }
+        @keyframes satboot-grow   { 0% { width:0; opacity:0;} 100% { width:64px; opacity:1;} }
+        @keyframes satboot-pulse  { 0%,100% { transform: scale(1); opacity:0.55;} 50% { transform: scale(1.4); opacity:1;} }
+        @keyframes satboot-ring   { 0% { transform: scale(0.85); opacity:0.55;} 70% { opacity:0;} 100% { transform: scale(1.9); opacity:0;} }
+        @keyframes satboot-shimmer{ 0% { background-position: -180% 0;} 100% { background-position: 180% 0;} }
+        @keyframes satboot-bar    { 0% { transform: translateX(-100%);} 100% { transform: translateX(0);} }
+      `}</style>
+
+      {/* Brand tally-mark diagonal lines */}
+      <div style={{ position: "absolute", inset: 0, opacity: 0.07, pointerEvents: "none" }}>
+        {Array.from({ length: 22 }, (_, i) => (
+          <div key={i} style={{
+            position: "absolute", width: 2, height: 260, background: "#8AC441",
+            transform: "rotate(15deg)", top: `${-12 + (i % 5) * 22}%`, left: `${i * 4.8}%`,
+          }} />
+        ))}
+      </div>
+      {/* Faint grid, masked to a soft center spotlight */}
+      <div style={{
+        position: "absolute", inset: 0, opacity: 0.6, pointerEvents: "none",
+        backgroundImage: "linear-gradient(rgba(138,196,65,0.045) 1px, transparent 1px), linear-gradient(90deg, rgba(138,196,65,0.045) 1px, transparent 1px)",
+        backgroundSize: "46px 46px",
+        WebkitMaskImage: "radial-gradient(circle at 50% 42%, #000 0%, transparent 68%)",
+        maskImage: "radial-gradient(circle at 50% 42%, #000 0%, transparent 68%)",
+      }} />
+
+      <div style={{ position: "relative", zIndex: 2, display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", padding: 24 }}>
+        {/* WELCOME TO THE FUTURE + pulsing dot */}
+        <div style={{ display: "flex", alignItems: "center", gap: 11, marginBottom: 34, animation: "satboot-fadeUp 0.7s ease both" }}>
+          <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#8AC441", boxShadow: "0 0 16px #8AC441", animation: "satboot-pulse 1.6s ease-in-out infinite" }} />
+          <span style={{ fontSize: 12.5, letterSpacing: "6px", fontWeight: 600, color: "#8AC441", textTransform: "uppercase" }}>Welcome to the Future</span>
+        </div>
+
+        {/* TMC logo with expanding glow ring */}
+        <div style={{ position: "relative", marginBottom: 30, animation: "satboot-fadeUp 0.7s ease 0.12s both" }}>
+          <div style={{ position: "absolute", inset: -20, borderRadius: "50%", border: "1px solid rgba(138,196,65,0.4)", animation: "satboot-ring 2.4s ease-out infinite" }} />
+          <img
+            src="/tmc-logo-light.png"
+            alt="TMC"
+            onError={(e) => { e.currentTarget.style.display = "none"; }}
+            style={{ height: 52, width: "auto", filter: "drop-shadow(0 0 24px rgba(138,196,65,0.4))" }}
+          />
+        </div>
+
+        {/* satori wordmark with a sweeping shimmer */}
+        <div style={{ animation: "satboot-fadeUp 0.8s ease 0.32s both" }}>
+          <div style={{
+            fontSize: 74, fontWeight: 800, letterSpacing: "-2.5px", lineHeight: 1, textTransform: "lowercase",
+            backgroundImage: "linear-gradient(100deg, #ffffff 0%, #ffffff 38%, #c9f08a 50%, #ffffff 62%, #ffffff 100%)",
+            backgroundSize: "200% auto", WebkitBackgroundClip: "text", backgroundClip: "text",
+            WebkitTextFillColor: "transparent", color: "transparent",
+            animation: "satboot-shimmer 2.6s linear infinite",
+          }}>satori</div>
+        </div>
+
+        {/* Accent divider that grows in */}
+        <div style={{ height: 3, background: "#8AC441", borderRadius: 2, margin: "16px 0 16px", boxShadow: "0 0 12px rgba(138,196,65,0.6)", animation: "satboot-grow 0.7s ease 0.7s both" }} />
+
+        {/* Tagline */}
+        <div style={{ fontSize: 14.5, fontWeight: 300, letterSpacing: "2px", color: "rgba(255,255,255,0.55)", animation: "satboot-fadeUp 0.8s ease 0.92s both" }}>
+          TMC's Capability Intelligence Matrix
+        </div>
+
+        {/* Personalised line */}
+        {firstName ? (
+          <div style={{ marginTop: 22, fontSize: 12.5, letterSpacing: "0.5px", color: "rgba(255,255,255,0.42)", animation: "satboot-fadeUp 0.8s ease 1.15s both" }}>
+            Initializing your workspace, {firstName}…
+          </div>
+        ) : null}
+
+        {/* Indeterminate progress bar */}
+        <div style={{ width: 220, height: 3, marginTop: firstName ? 22 : 30, borderRadius: 3, background: "rgba(255,255,255,0.08)", overflow: "hidden", animation: "satboot-fadeUp 0.6s ease 1.05s both" }}>
+          <div style={{ height: "100%", width: "100%", borderRadius: 3, background: "linear-gradient(90deg, rgba(104,147,63,0) 0%, #8AC441 60%, #8AC441 100%)", boxShadow: "0 0 10px rgba(138,196,65,0.7)", animation: "satboot-bar 2.1s cubic-bezier(0.4,0,0.2,1) 0.3s both" }} />
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(() => !!localStorage.getItem("token"));
+  // Boot splash: show once per browser session when arriving with a live token,
+  // and on every explicit sign-in (handleLogin sets it too).
+  const [showSplash, setShowSplash] = useState(() => {
+    try {
+      const hasToken = !!localStorage.getItem("token");
+      const seen = sessionStorage.getItem("satori_boot_shown");
+      if (hasToken && !seen) { sessionStorage.setItem("satori_boot_shown", "1"); return true; }
+    } catch { /* sessionStorage unavailable — skip splash */ }
+    return false;
+  });
   const [currentUser, setCurrentUser] = useState(() => {
     try { return JSON.parse(localStorage.getItem("user") || "null"); } catch { return null; }
   });
@@ -10526,6 +10652,8 @@ export default function App() {
     if (perms) setPermissions(perms);
     setIsLoggedIn(true);
     setSessionExpiredMsg(""); // clear any expiry banner on successful login
+    try { sessionStorage.setItem("satori_boot_shown", "1"); } catch { /* ignore */ }
+    setShowSplash(true); // play the branded boot sequence on every sign-in
     if (!perms) refreshPermissions();
   };
   const handleLogout = () => {
@@ -10615,6 +10743,13 @@ export default function App() {
 
   return (
     <div style={{ display: "flex", height: "100vh", background: COLORS.surfaceAlt, fontFamily: "'Red Hat Display', 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif" }}>
+      {/* Branded boot sequence on sign-in (fixed overlay, self-dismisses) */}
+      {showSplash && (
+        <SatoriBootSplash
+          userName={currentUser?.full_name || currentUser?.name || currentUser?.email}
+          onDone={() => setShowSplash(false)}
+        />
+      )}
       {/* Sidebar */}
       <div style={{
         width: sidebarCollapsed ? 72 : 260, background: COLORS.surface, borderRight: `1px solid ${COLORS.border}`,
