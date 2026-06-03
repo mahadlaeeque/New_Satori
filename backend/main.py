@@ -4855,11 +4855,15 @@ ALLOCATION DATA — read before writing any allocation query:
   on bench", trust the timesheet; never call someone with recent logged hours
   idle/bench.
 
-TICKETING (Timesheet_Data) — it carries the full ticket dataset:
-- FLAG = 'Assigned' / 'Un-Assigned' (Timesheet's own flag — NOT Allocation's
-  Allocated/Bench). When asked about assigned vs unassigned tickets, run them as
-  SEPARATE segregated queries (filter FLAG). TICKET_TYPE = 'Task' / 'Ticket'
-  (NULL on Un-Assigned).
+TICKETING (Timesheet_Data) — it carries the full ticket dataset. TWO SEPARATE,
+IMPORTANT dimensions users ask about — keep them DISTINCT, never conflate:
+- FLAG = 'Assigned' / 'Un-Assigned' — was the logged time against an assigned
+  work item or unassigned ad-hoc work (Timesheet's own flag — NOT Allocation's
+  Allocated/Bench). "assigned vs unassigned" → GROUP BY FLAG / segregated queries.
+- TICKET_TYPE = 'Task' / 'Ticket' — the KIND of assigned item (two different
+  things); only on Assigned rows (Un-Assigned ⇒ NULL). "tasks vs tickets" →
+  GROUP BY TICKET_TYPE (within FLAG='Assigned'). This is a DIFFERENT question
+  from assigned-vs-unassigned.
 - OPEN vs CLOSED → TICKET_CLOSED_STATUS ('1' = closed, '0' = open, NULL = n/a).
   Count DISTINCT tickets, decided per ticket: closed_tickets =
   COUNT(DISTINCT IF(TICKET_CLOSED_STATUS='1', TICKET_NUMBER, NULL)); open =
@@ -8580,10 +8584,13 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "Ticket / project + logged-hours data — this is the full TICKETING dataset too (~188k rows).\n"
             "Columns: EMPLOYEE_CODE (STRING 'E-1571' — the employee who logged the hours; the employee key, "
             "JOIN/filter on it digit-normalised), TICKET_USER_ID (STRING — an unrelated internal id, do NOT join/filter on it), "
-            "FLAG (STRING — 'Assigned' / 'Un-Assigned' (note the hyphen): whether the logged work is an ASSIGNED ticket/task "
-            "or UN-ASSIGNED ad-hoc work. ⚠️ This is Timesheet's own FLAG and is DIFFERENT from Allocation_Data.Flag which is 'Allocated'/'Bench' — never mix them up. "
-            "Assigned vs Un-Assigned are usually reported as SEPARATE segregated queries: filter FLAG='Assigned' or FLAG='Un-Assigned'), "
-            "TICKET_TYPE (STRING — 'Task' / 'Ticket'; NULL on Un-Assigned rows), "
+            "FLAG (STRING — 'Assigned' / 'Un-Assigned', note the hyphen) and TICKET_TYPE (STRING — 'Task' / 'Ticket') are TWO SEPARATE, "
+            "IMPORTANT dimensions that users ask about — keep them DISTINCT, never conflate: "
+            "(a) FLAG = was the logged time against an ASSIGNED work item or UN-ASSIGNED ad-hoc work (segregate with FLAG='Assigned' vs FLAG='Un-Assigned'). "
+            "⚠️ This is Timesheet's OWN flag, NOT Allocation_Data.Flag ('Allocated'/'Bench') — never mix them. "
+            "(b) TICKET_TYPE = the KIND of assigned item: a 'Task' or a 'Ticket' (two different things) — only populated on Assigned rows (Un-Assigned ⇒ NULL TICKET_TYPE). "
+            "So 'tasks vs tickets' = GROUP BY TICKET_TYPE (within FLAG='Assigned'); 'assigned vs unassigned' = GROUP BY FLAG; they are independent questions. "
+            "Counts verified: Un-Assigned 155,300 rows (no type); Assigned = Task 32,086 + Ticket 1,157), "
             "TICKET_ID (STRING), TICKET_NUMBER (STRING), TICKET_SUBJECT, TICKET_DESCRIPTION, TICKET_REASON, "
             "TICKET_PROJECT_CODE (STRING — JOIN to Project_Master.Project_Code for the project name), TICKET_PROJECT_LABEL (STRING), "
             "TICKET_STATUS (STRING — APPROVAL state: 'Approved' / 'Submitted'; this is NOT open/closed), "
@@ -8665,6 +8672,7 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "Do NOT use MAX(allocation_percent) alone",                 # pre per-project allocation note
     "by TICKET_STATUS / TICKET_CLOSED_STATUS, by TICKET_PRIORITY",  # pre open/closed ticket note
     "surfaces planned future allocations too.",                 # pre allocation-is-forward / timesheet-is-actual note
+    "are usually reported as SEPARATE segregated queries: filter FLAG",  # pre tasks-vs-tickets two-dimension note
 )
 
 
