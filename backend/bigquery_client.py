@@ -216,10 +216,10 @@ LIMIT 10""",
                 "sql": """SELECT
   COALESCE(NULLIF(TRIM(TICKET_PROJECT_LABEL), ''), 'Unassigned') AS project,
   ROUND(SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)), 1)              AS total_hours,
-  COUNT(DISTINCT TICKET_USER_ID)                                 AS contributors,
+  COUNT(DISTINCT EMPLOYEE_CODE)                                  AS contributors,
   COUNT(*)                                                        AS ticket_entries
 FROM `{project}.{dataset}.Timesheet_Data`
-WHERE SAFE.PARSE_DATE('%Y-%m-%d', CAST(DATE_KEY AS STRING)) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+WHERE COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
 GROUP BY project
 ORDER BY total_hours DESC
 LIMIT 25""",
@@ -227,14 +227,15 @@ LIMIT 25""",
             {
                 "name": "Top 10 Contributors by Hours (last 30 days)",
                 "sql": """SELECT
-  t.TICKET_USER_ID,
+  t.EMPLOYEE_CODE,
   e.Resource_Name,
   ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)), 1) AS hours
 FROM `{project}.{dataset}.Timesheet_Data` t
 LEFT JOIN `{project}.{dataset}.Employee_Data` e
-  ON CAST(e.Employee_Code AS STRING) = CAST(t.TICKET_USER_ID AS STRING)
-WHERE SAFE.PARSE_DATE('%Y-%m-%d', CAST(t.DATE_KEY AS STRING)) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
-GROUP BY t.TICKET_USER_ID, e.Resource_Name
+  ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
+   = LTRIM(REGEXP_REPLACE(CAST(t.EMPLOYEE_CODE AS STRING), r'[^0-9]', ''), '0')
+WHERE COALESCE(SAFE_CAST(CAST(t.DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(t.DATE_KEY AS STRING))) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+GROUP BY t.EMPLOYEE_CODE, e.Resource_Name
 ORDER BY hours DESC
 LIMIT 10""",
             },

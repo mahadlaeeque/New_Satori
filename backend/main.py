@@ -2582,7 +2582,7 @@ WORKFORCE
   • Employee_Data — Employee_Code, Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Joining_Date, Gender. Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation','contractual fixed term').
   • Attendance_Data — attendance_date (DATE), personal_no (STRING 'E-902' — JOIN to Employee_Data on this), employee_id (INT64 sequence, not a JOIN key), employee_name, employee_email, checkin_time (STRING HH:MM:SS — for the moment they checked in), checkout_time (STRING HH:MM:SS — for the moment they checked out), attendance_status_text ('Present'/'Absent'/'Weekend'/'Holiday'/'On Leave'/'Missing Punch'/'Remote Work'), is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1). NO 'Late' status — closest concept is 'Missing Punch'.
   • Allocation_Data — project_id, employee_id, emp_name, allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Allocated'/'Bench'), Date, Week, Year, Month.
-  • Timesheet_Data — TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (INT YYYYMMDD — use SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)) for date filters).
+  • Timesheet_Data — EMPLOYEE_CODE ('E-1571' — the employee key; JOIN/filter on this digit-normalised, NOT TICKET_USER_ID which is an unrelated internal id matching no employee), TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_CODE (JOIN to Project_Master.Project_Code), TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (DATE — filter via COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))).
 
 SALES
   • Sales_AM_Scorecard — VP, AM, Role, City, A, B, C (counts of tier-A/B/C accounts per AM), Active_Book, Dormant (dormant-account count), Q1_Visits, Zero_Visit (count of zero-visit accounts), col_2026_Target, Q1_ACH, Open_Pipeline (all STRING USD — SAFE_CAST AS FLOAT64), Hist_Win_Rate (STRING decimal 0-1 or 'n/a' — SAFE_CAST, ×100 for %). USE THIS for account-tier (A/B/C) and zero-visit questions — it carries the per-AM totals.
@@ -4659,9 +4659,9 @@ _DASHBOARD_SAP_SCHEMAS = """Detailed table schemas (BigQuery project `ai-vertex-
 
 WORKFORCE TABLES:
 - `Employee_Data` — employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name (STRING), EmployeePosition (STRING), EmployeeEmail (STRING), EmployeeHierarchyNode (STRING — department), EmployeeLocation (STRING — city), Employee_Status (STRING), Employee_Type (STRING — 'MTO'/'Permanent'/'Probation'/'Contract'). Active employees = Employee_Type IN ('MTO','Permanent','Probation').
-- `Attendance_Data` — daily attendance per employee. Cols: attendance_date (DATE), employee_id (INT64 — CAST AS STRING to join), employee_name (STRING), checkin_time (STRING HH:MM:SS), checkout_time (STRING), attendance_status_text (STRING — 'Present'/'Absent'/'Late'/'Leave'/etc), is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 — 0/1). For "late": LOWER(attendance_status_text)='late'.
+- `Attendance_Data` — daily attendance per employee. Cols: attendance_date (DATE), personal_no (STRING "E-902" — THIS is the JOIN KEY to Employee_Code, digit-normalised), employee_id (INT64 — an unrelated sequence number, NOT a join key), employee_name (STRING), checkin_time (STRING HH:MM:SS), checkout_time (STRING), attendance_status_text (STRING — 'Present'/'Absent'/'On Leave'/'Holiday'/'Weekend'/'Missing Punch'/'Remote Work'; there is NO 'Late'), is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 — 0/1).
 - `Allocation_Data` — weekly project allocation. Cols: project_id (STRING), employee_id (STRING — "E-1234"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency (STRING), Flag (STRING — 'Actual'/'Forecast'), Forecast_Flag (STRING), Date (DATE). Allocated = MAX(pct)>=90; Partial = 1-89; Bench = 0/NULL.
-- `Timesheet_Data` — ticket/project hours. Cols: TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (INT64 — YYYYMMDD), TICKET_DESCRIPTION, TICKET_SUBJECT.
+- `Timesheet_Data` — ticket/project hours. Cols: EMPLOYEE_CODE (STRING "E-1571" — THIS is the employee who logged the hours; JOIN/filter on this, digit-normalised), TICKET_USER_ID (an unrelated internal numeric id — NEVER join or filter on it; it matches no employee), TICKET_NUMBER, TICKET_PROJECT_CODE (JOIN to Project_Master.Project_Code for the project name), TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT. For DATE_KEY filters use the type-agnostic form: COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))).
 
 SALES TABLES:
 - `Sales_Accounts` (~359 rows) — Customer accounts. Cols: VP, AM, Location, Account, Tier ('A'/'B'/'C'), Dormant ('Yes'/'No'), Jan_Visits/Feb_Visits/Mar_Visits/Q1_Visits (STRING — SAFE_CAST AS INT64), Zero_Visit.
@@ -4670,9 +4670,10 @@ SALES TABLES:
 - `Sales_Pipeline_Health` — all salespeople. Cols: Salesperson, Open_Pipeline, Open_Deals, Win_Rate_by.
 - `Sales_Hunting_Gap`, `Sales_KPI_Scorecard` (reference), `Sales_Dormant_Accounts`, `Sales_Workload_Feasibility`.
 
-JOINS:
-- Employee → Attendance / Allocation: CAST(Employee_Code AS STRING) = CAST(employee_id AS STRING).
-- Employee → Timesheet: CAST(Employee_Code AS STRING) = CAST(TICKET_USER_ID AS STRING).
+JOINS — always digit-normalise both sides: norm(x) = LTRIM(REGEXP_REPLACE(CAST(x AS STRING), r'[^0-9]', ''), '0'). NEVER join on names (Resource_Name carries a code prefix so name joins match almost nothing).
+- Employee → Attendance: ON norm(Employee_Code) = norm(personal_no)  (Attendance's personal_no 'E-902', NOT employee_id — employee_id is an unrelated sequence that matches ~0 rows).
+- Employee → Allocation: ON norm(Employee_Code) = norm(employee_id)  (Allocation's employee_id holds the 'E-2141' code).
+- Employee → Timesheet: ON norm(Employee_Code) = norm(EMPLOYEE_CODE)  (Timesheet's EMPLOYEE_CODE, NOT TICKET_USER_ID — that id matches no employee).
 - Sales tables: join on `AM` (Sales_Pipeline_Health uses `Salesperson` ≈ AM).
 
 DATA QUALITY (READ TWICE — these are the column-type rules that break queries):
@@ -5583,10 +5584,21 @@ def _autofix_dashboard_sql(sql: str) -> str:
     )
     sql = join_key_re2.sub(lambda m: f"{_norm_key(m.group(1))} = {_norm_key(m.group(2))}", sql)
 
-    # Fix 6 — Swap the digit-normalized Employee_Code/employee_id join for a
-    # name-based join. The diagnostic snapshot showed only 1/1199 rows match
-    # on digit-stripped IDs, but Resource_Name <-> employee_name overlaps for
-    # almost every employee. Same for Allocation_Data.emp_name.
+    # Fix 6 — NEUTRALIZED (2026-06). This used to swap the digit-normalized
+    # Employee_Code/employee_id join for a name-based join, because on the OLD
+    # ai-vertex-mahad warehouse only ~1/1199 rows matched on digit-stripped IDs
+    # while Resource_Name <-> employee_name overlapped for almost everyone.
+    # The PRODUCTION warehouse (capability-agent-prod) is the REVERSE: the digit
+    # join is correct/canonical and the name join is broken because
+    # Resource_Name carries a code prefix ("E-1571 Mahad Laeeque") that doesn't
+    # equal Attendance.employee_name ("Mahad Laeeque"). Verified live:
+    # Attendance digit-join = 226,171 rows vs name-join = 1,658; Allocation
+    # digit = 949,637 vs name = 942,357. So converting to a name join silently
+    # empties attendance dashboards. We keep the matchers (so any name-join an
+    # old saved config still carries gets folded back to a digit join) but the
+    # lookup dicts below map every id column to None → the original digit join
+    # is preserved untouched. Fix 5 already guarantees CAST joins are digit-
+    # normalized, so this fix is now a no-op guard rather than a rewriter.
     name_join_re = _re.compile(
         r"LTRIM\(REGEXP_REPLACE\(CAST\(([A-Za-z_][A-Za-z0-9_]*)\.Employee_Code\s+AS\s+STRING\),\s*r'\[\^0-9\]',\s*''\),\s*'0'\)"
         r"\s*=\s*"
@@ -5598,7 +5610,7 @@ def _autofix_dashboard_sql(sql: str) -> str:
         a_alias = m.group(2)
         a_col = m.group(3)
         # employee_id -> employee_name; TICKET_USER_ID has no name -> fallback to digit join
-        name_col = {"employee_id": "employee_name", "TICKET_USER_ID": None}.get(a_col)
+        name_col = {"employee_id": None, "TICKET_USER_ID": None}.get(a_col)  # neutralized: keep digit join
         if not name_col:
             # No name column on the other side — keep the original digit match.
             return m.group(0)
@@ -5615,7 +5627,7 @@ def _autofix_dashboard_sql(sql: str) -> str:
         a_alias = m.group(1)
         a_col = m.group(2)
         e_alias = m.group(3)
-        name_col = {"employee_id": "employee_name", "TICKET_USER_ID": None}.get(a_col)
+        name_col = {"employee_id": None, "TICKET_USER_ID": None}.get(a_col)  # neutralized: keep digit join
         if not name_col:
             return m.group(0)
         return f"UPPER(TRIM({a_alias}.{name_col})) = UPPER(TRIM({e_alias}.Resource_Name))"
@@ -5635,7 +5647,7 @@ def _autofix_dashboard_sql(sql: str) -> str:
         e_alias = m.group(1)
         a_alias = m.group(2)
         a_col = m.group(3)
-        name_col = {"employee_id": "employee_name", "TICKET_USER_ID": None}.get(a_col)
+        name_col = {"employee_id": None, "TICKET_USER_ID": None}.get(a_col)  # neutralized: keep digit join
         if not name_col:
             return m.group(0)
         return f"UPPER(TRIM({e_alias}.Resource_Name)) = UPPER(TRIM({a_alias}.{name_col}))"
@@ -5731,6 +5743,35 @@ def _autofix_dashboard_sql(sql: str) -> str:
             r"\1 \2 \3", sql, flags=_re.IGNORECASE,
         )
 
+    # Fix 13 — Timesheet_Data's employee identity is EMPLOYEE_CODE ('E-1571'),
+    # NOT TICKET_USER_ID. TICKET_USER_ID is an unrelated internal numeric id
+    # that does NOT join to Employee_Data and is NOT the person who logged the
+    # hours — filtering/joining on it silently returns ZERO rows (this is why a
+    # personal "Project Hours" dashboard showed 0 everything after the warehouse
+    # was re-fed). EMPLOYEE_CODE is digit-normalised the same way ('E-1571' →
+    # '1571'), so any existing `norm(TICKET_USER_ID) = '<digits>'` filter keeps
+    # working once the column is swapped. Replace the column token everywhere it
+    # appears in dashboard/report SQL — there is no legitimate dashboard use of
+    # TICKET_USER_ID. (Runs AFTER Fix 6, which deliberately leaves TICKET_USER_ID
+    # joins as digit-matches rather than name-joins, so order is correct.)
+    sql = _re.sub(r"(?<![A-Za-z0-9_])TICKET_USER_ID(?![A-Za-z0-9_])", "EMPLOYEE_CODE", sql)
+
+    # Fix 14 — DATE_KEY is now a real DATE column on the live warehouse (it used
+    # to be an INT64 in YYYYMMDD form). The AI keeps emitting
+    # `SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))`, which returns NULL
+    # for every row when DATE_KEY is a DATE (CAST gives ISO "2026-01-15", which
+    # the '%Y%m%d' format rejects) → the date filter throws out every row. Wrap
+    # it in a type-agnostic COALESCE that parses BOTH shapes. The guard makes
+    # the rewrite idempotent: if the SQL already carries the COALESCE form (ours
+    # or one the AI produced correctly) we leave it untouched so we never nest.
+    if not _re.search(r"COALESCE\(\s*SAFE_CAST\(\s*CAST\(\s*DATE_KEY\s+AS\s+STRING", sql, _re.IGNORECASE):
+        sql = _re.sub(
+            r"(?:SAFE\.)?PARSE_DATE\(\s*'%Y%m%d'\s*,\s*CAST\(\s*DATE_KEY\s+AS\s+STRING\s*\)\s*\)",
+            "COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), "
+            "SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))",
+            sql, flags=_re.IGNORECASE,
+        )
+
     return sql
 
 
@@ -5740,7 +5781,7 @@ _REPAIR_PROMPT = """You are a BigQuery SQL repair assistant. The query below fai
 - `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Employee_Status.
 - `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), employee_id (INT64), employee_name (STRING), checkin_time, checkout_time, attendance_status_text, is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 0/1).
 - `{BQ_FULL}.Allocation_Data` — project_id, employee_id (STRING "E-1234"), allocation_percent (STRING), emp_competency, Flag ('Allocated'/'Bench'), Date.
-- `{BQ_FULL}.Timesheet_Data` — TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (INT64 YYYYMMDD).
+- `{BQ_FULL}.Timesheet_Data` — EMPLOYEE_CODE (STRING "E-1571" — the employee key; JOIN/filter on this, NOT TICKET_USER_ID), TICKET_USER_ID (unrelated internal id — never join/filter on it), TICKET_PROJECT_CODE, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (DATE — filter via COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))).
 - `{BQ_FULL}.Sales_AM_Scorecard` — VP, AM, Role, City, col_2026_Target (STRING), Q1_ACH (STRING), Open_Pipeline (STRING), Hist_Win_Rate (FLOAT64 decimal 0-1 — NEVER REPLACE).
 - `{BQ_FULL}.Sales_Plan_vs_Pipeline` — AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio (FLOAT64 — NEVER REPLACE), Status, Action.
 - `{BQ_FULL}.Sales_Pipeline_Health` — Salesperson, Open_Pipeline (STRING), Open_Deals (INT64), Win_Rate_by (FLOAT64).
@@ -5767,7 +5808,7 @@ detail behind that single category so they understand WHO/WHAT makes up the numb
 - `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, EmployeePosition, EmployeeEmail, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Employee_Status.
 - `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), personal_no (STRING "E-902" — the JOIN KEY to Employee_Code), employee_id (INT64 — NOT a join key), employee_name, checkin_time, checkout_time, attendance_status_text. There are NO is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend columns — derive every count from attendance_status_text (values: 'Present','Absent','On Leave','Holiday','Weekend','Missing Punch','Remote Work').
 - `{BQ_FULL}.Allocation_Data` — project_id, employee_id (STRING "E-2141"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag (values 'Allocated'/'Bench'), Date.
-- `{BQ_FULL}.Timesheet_Data` — TICKET_USER_ID, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY.
+- `{BQ_FULL}.Timesheet_Data` — EMPLOYEE_CODE (STRING "E-1571" — the employee key; JOIN/filter on this, NOT TICKET_USER_ID), TICKET_USER_ID (unrelated internal id — never join/filter on it), TICKET_PROJECT_CODE, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (DATE).
 - `{BQ_FULL}.Sales_AM_Scorecard` — VP, AM, Role, City, col_2026_Target (STRING), Q1_ACH (STRING), Open_Pipeline (STRING), Hist_Win_Rate (FLOAT64 — NEVER REPLACE).
 - `{BQ_FULL}.Sales_Plan_vs_Pipeline` — AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio (FLOAT64 — NEVER REPLACE), Status, Action.
 - `{BQ_FULL}.Sales_Pipeline_Health` — Salesperson, Open_Pipeline, Open_Deals, Win_Rate_by.
@@ -5777,7 +5818,7 @@ detail behind that single category so they understand WHO/WHAT makes up the numb
 Let norm(x) = LTRIM(REGEXP_REPLACE(CAST(x AS STRING), r'[^0-9]', ''), '0').
 - Attendance_Data → Employee_Data: ON norm(a.personal_no) = norm(e.Employee_Code)
 - Allocation_Data  → Employee_Data: ON norm(al.employee_id) = norm(e.Employee_Code)
-- Timesheet_Data   → Employee_Data: ON norm(t.TICKET_USER_ID) = norm(e.Employee_Code)
+- Timesheet_Data   → Employee_Data: ON norm(t.EMPLOYEE_CODE) = norm(e.Employee_Code)  (Timesheet's EMPLOYEE_CODE, NOT TICKET_USER_ID — that id matches no employee)
 NEVER join Attendance on employee_id, and NEVER join on Resource_Name = employee_name — Employee_Data.Resource_Name carries a code prefix (e.g. "E-1571 Mahad Laeeque") so a name join matches almost nothing.
 
 ═══ HARD RULES ═══
@@ -7100,8 +7141,9 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
     # Timesheet breakdown over last 90d — top projects by hours, with
     # ticket counts and last-entry date. Uses the same type-agnostic
     # DATE_KEY filter as the list endpoints (handles DATE + INT64 shapes).
-    # TICKET_USER_ID match is normalised so leading zeros / `.0` suffixes
-    # don't break the per-employee lookup.
+    # EMPLOYEE_CODE match is normalised so leading zeros / `.0` suffixes
+    # don't break the per-employee lookup (EMPLOYEE_CODE is the timesheet
+    # employee key — TICKET_USER_ID is an unrelated internal id).
     ts_sql = f"""
         WITH t AS (
           SELECT
@@ -8134,12 +8176,16 @@ _DEFAULT_SCHEMA_SETTINGS = [
         "sort_order": 40,
         "description": (
             "Ticket / project hours (~279k rows).\n"
-            "Columns: FLAG (STRING), Key (STRING), TICKET_USER_ID (INT64 — employee), TICKET_ID (INT64), "
-            "TICKET_NUMBER (STRING), TICKET_PROJECT_CODE (STRING), TICKET_PROJECT_LABEL (STRING), "
+            "Columns: FLAG (STRING), Key (STRING), EMPLOYEE_CODE (STRING 'E-1571' — the employee who logged "
+            "the hours; THIS is the employee key, JOIN/filter on it digit-normalised), "
+            "TICKET_USER_ID (INT64 — an unrelated internal id; NEVER join or filter on it, it matches no employee), "
+            "TICKET_ID (INT64), TICKET_NUMBER (STRING), TICKET_PROJECT_CODE (STRING — JOIN to "
+            "Project_Master.Project_Code for the project name), TICKET_PROJECT_LABEL (STRING), "
             "TICKET_DESCRIPTION, TICKET_STATUS (STRING), TICKET_WEEK_NO, TICKET_PRIORITY, "
-            "TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), DATE_KEY (INT64 — YYYYMMDD).\n"
-            "Timesheet has no name field — joining to Employee_Data is unreliable. Prefer to report against "
-            "TICKET_PROJECT_LABEL / TICKET_USER_ID directly."
+            "TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), DATE_KEY (DATE — filter via "
+            "COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))).\n"
+            "To attribute hours to a person/department, JOIN Employee_Data on "
+            "norm(EMPLOYEE_CODE)=norm(Employee_Code) where norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0')."
         ),
     },
     {
