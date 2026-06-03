@@ -203,18 +203,35 @@ function useDataFreshness() {
 // (attendance | allocation | timesheet); omit it for the overall latest date.
 const DataAsOf = ({ source, prefix = "Data as of", style = {} }) => {
   const f = useDataFreshness();
+  // Live clock — only used to append a time when the data is current to today.
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 30000);
+    return () => clearInterval(t);
+  }, []);
   const info = f && (source ? f.sources?.[source] : f.overall);
   if (!info || !info.label) return null;
+  // The warehouse freshness is a DATE (no time-of-day). When that date is TODAY
+  // — i.e. the 30-min pipeline has the data current — append the live local
+  // time so the pill reads as an "as of now" timestamp. On a day the feed lags,
+  // show the data date alone (mixing an old date with the current clock would
+  // be misleading).
+  const localToday = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const isToday = info.max_date === localToday;
+  const timeStr = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const display = isToday ? `${info.label}, ${timeStr}` : info.label;
   return (
     <div
-      title={`Latest ${source || "warehouse"} data: ${info.label}`}
+      title={isToday
+        ? `Latest ${source || "warehouse"} data: ${info.label} (current as of ${timeStr})`
+        : `Latest ${source || "warehouse"} data: ${info.label}`}
       style={{
         display: "inline-flex", alignItems: "center", gap: 5,
         fontSize: 11, color: COLORS.textMuted, whiteSpace: "nowrap", ...style,
       }}
     >
       <Clock size={11} />
-      {prefix} {info.label}
+      {prefix} {display}
     </div>
   );
 };
