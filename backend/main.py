@@ -4847,6 +4847,13 @@ ALLOCATION DATA — read before writing any allocation query:
   that collapses to "Qlik Bench 100%" for every month (a known wrong answer).
 - "Billable/real allocation %" = MAX over Flag='Allocated' rows. The Bench
   project shows 100% but means UNALLOCATED.
+- Allocation is a PLANNED / FORWARD allocation (upcoming weeks; can lag reality)
+  — NOT proof of current work. What someone is ACTUALLY working on now = their
+  recent Timesheet hours by project (last ~90 days). Someone can read 'Bench' in
+  allocation yet be actively logging hours on a real project (e.g. Sufyan Baig
+  is on Packages Qlik SLA per his timesheet). For "what is X working on / is X
+  on bench", trust the timesheet; never call someone with recent logged hours
+  idle/bench.
 
 TICKETING (Timesheet_Data) — it carries the full ticket dataset:
 - FLAG = 'Assigned' / 'Un-Assigned' (Timesheet's own flag — NOT Allocation's
@@ -8549,7 +8556,8 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "JOIN to Employee_Data on norm(employee_id)=norm(Employee_Code), norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0') (NOT on emp_name — names don't match).\n"
             "⚠️ ROWS ARE WEEKLY SNAPSHOTS — there are MANY rows per employee per project per month, and one or more 'Bench' rows. NEVER list raw rows or group by Month and pick one project: the Bench project '00Q - Qlik Bench' (Flag='Bench') sits at allocation_percent=100, so a per-month MAX collapses to 'Qlik Bench (100%)' for almost everyone (this is a known wrong answer).\n"
             "TO SHOW AN EMPLOYEE'S PROJECT ALLOCATIONS (mirror the Availability Engine): GROUP BY project_id, take MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per project, JOIN Project_Master ON CAST(project_id AS STRING)=Project_Code for the name (some project_ids aren't in Project_Master — fall back to the code), keep the Flag, ORDER BY allocation DESC. Show every project (real + the Bench one), not one-per-month.\n"
-            "REAL/BILLABLE allocation % = MAX over Flag='Allocated' rows only. Bench classification: a person is Bench when they have NO Flag='Allocated' row with pct>0; don't take MAX(allocation_percent) blindly (the Bench row is 100%). The feed carries forward-planned future weeks (out to ~Dec), so for 'current/now' state filter Date <= CURRENT_DATE(); a per-project MAX over all rows (as the engine does) surfaces planned future allocations too."
+            "REAL/BILLABLE allocation % = MAX over Flag='Allocated' rows only; don't take MAX(allocation_percent) blindly (the Bench row is 100%).\n"
+            "⚠️ ALLOCATION IS A PLANNED / FORWARD allocation (it carries upcoming weeks and can lag or differ from what a person is actually doing) — it is NOT proof of current work, and an allocation 'Bench' does NOT mean someone is idle. GROUND TRUTH for what someone is ACTUALLY working on now = recent Timesheet_Data hours by project (last ~90 days, TICKET_PROJECT_LABEL/TICKET_PROJECT_CODE). If a person is logging substantial hours on a project they ARE allocated/working on it — e.g. Sufyan Baig reads 'Bench' in allocation but is actually on Packages Qlik SLA per his timesheet. So: for 'what is X working on / X's current project(s) / is X really on bench', answer from their top recent timesheet projects, and NEVER call someone with recent logged hours bench/idle. Use Allocation_Data for the forward plan (filter Date <= CURRENT_DATE() for the 'now' snapshot), Timesheet_Data for actuals."
         ),
     },
     {
@@ -8643,6 +8651,7 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "it matches no employee",                                   # pre TICKET_TYPE/FLAG timesheet note
     "Do NOT use MAX(allocation_percent) alone",                 # pre per-project allocation note
     "by TICKET_STATUS / TICKET_CLOSED_STATUS, by TICKET_PRIORITY",  # pre open/closed ticket note
+    "surfaces planned future allocations too.",                 # pre allocation-is-forward / timesheet-is-actual note
 )
 
 
