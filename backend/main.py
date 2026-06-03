@@ -4798,6 +4798,26 @@ WHEN TO ASK vs. WHEN TO ACT:
   those are senior-analyst defaults. Just apply them and mention briefly in the
   description: "across active employees, working days only".
 
+BIGQUERY (GoogleSQL) DIALECT — this warehouse is BigQuery, NOT MySQL/T-SQL:
+- NEVER use MySQL/T-SQL functions: TIME_TO_SEC, SEC_TO_TIME, STR_TO_DATE,
+  DATE_FORMAT, NOW(), CURDATE(), DATEDIFF(d1,d2), IFNULL is fine but prefer
+  COALESCE. Use BigQuery functions only.
+- checkin_time / checkout_time are FULL datetime STRINGS ("2026-05-25
+  09:49:26.772000"), NOT "HH:MM:SS". Clock time = TIME(SAFE.PARSE_TIMESTAMP(
+  '%Y-%m-%d %H:%M:%E*S', checkin_time)).
+- You CANNOT AVG()/SUM() a TIME, DATE, or TIMESTAMP. To average a clock-time,
+  average SECONDS-SINCE-MIDNIGHT and rebuild a TIME. CANONICAL recipe — use
+  EXACTLY this shape for "average check-in/out time" (KPI or per-row):
+    FORMAT_TIME('%H:%M:%S',
+      TIME(TIMESTAMP_SECONDS(CAST(AVG(
+        EXTRACT(HOUR   FROM TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)))*3600 +
+        EXTRACT(MINUTE FROM TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)))*60 +
+        EXTRACT(SECOND FROM TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)))
+      ) AS INT64))))
+  (filter to checkin_time IS NOT NULL and LOWER(attendance_status_text) IN
+  ('present','remote work')). Worked-hours/day = TIMESTAMP_DIFF(parse(checkout),
+  parse(checkin), MINUTE)/60.0 where both are non-null.
+
 SANITY CHECK YOUR OWN NUMBERS BEFORE EMITTING SQL:
 - TMC has roughly 1,190 active employees. A "Total Employees" KPI in the
   tens of thousands means you counted attendance rows, not people — fix the SQL.
@@ -4805,6 +4825,8 @@ SANITY CHECK YOUR OWN NUMBERS BEFORE EMITTING SQL:
   the denominator — fix the filter.
 - Pipeline coverage of 0% or NULL across every AM means Coverage_Ratio got
   wrapped in REPLACE() — remove the wrapper.
+- Any "average time" KPI must use the seconds-since-midnight recipe above —
+  AVG(TIME(...)) and TIME_TO_SEC do not exist / do not work in BigQuery.
 """
 
 
@@ -5475,6 +5497,40 @@ def _infer_chart_keys(columns: list, rows: list, chart_cfg: dict):
     return label_key, value_keys
 
 
+def _replace_balanced_call(sql: str, fname: str, build) -> str:
+    """Replace every call `FNAME( <args> )` in `sql` with build(args_str).
+    Case-insensitive on the function name; balances nested parens in the args
+    (a flat regex can't, because the args themselves contain function calls).
+    Used to translate MySQL-isms the model invents into valid BigQuery."""
+    if not sql:
+        return sql
+    import re as _re
+    pat = _re.compile(r"(?<![A-Za-z0-9_])" + _re.escape(fname) + r"\s*\(", _re.IGNORECASE)
+    out = sql
+    idx = 0
+    while True:
+        m = pat.search(out, idx)
+        if not m:
+            break
+        depth = 1
+        i = m.end()
+        while i < len(out) and depth > 0:
+            c = out[i]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            i += 1
+        if depth != 0:  # unbalanced / truncated — don't risk a bad rewrite
+            idx = m.end()
+            continue
+        inner = out[m.end():i - 1]
+        rep = build(inner)
+        out = out[:m.start()] + rep + out[i:]
+        idx = m.start() + len(rep)
+    return out
+
+
 def _rewrite_avg_of_time(sql: str) -> str:
     """BigQuery cannot AVG()/SUM() a TIME value ("No matching signature for
     AVG: TIME"). The model produces `AVG(TIME(<expr>))` for "average check-in
@@ -5585,7 +5641,22 @@ def _autofix_column_formats(sql: str) -> str:
         sql, flags=_re.IGNORECASE,
     )
 
-    # Fix 16 — AVG(TIME(…)) is invalid (can't average a TIME). Rewrite to
+    # Fix 16 — MySQL time functions the model invents but BigQuery lacks. These
+    # are the standard ways a model converts between a clock-time and seconds, so
+    # covering them (plus AVG(TIME(...)) below) handles the whole "average a
+    # check-in/out time" family deterministically:
+    #   TIME_TO_SEC(t)  →  seconds-since-midnight of t  (EXTRACT-based)
+    #   SEC_TO_TIME(n)  →  TIME(TIMESTAMP_SECONDS(CAST(n AS INT64)))
+    sql = _replace_balanced_call(
+        sql, "TIME_TO_SEC",
+        lambda e: f"(EXTRACT(HOUR FROM {e})*3600 + EXTRACT(MINUTE FROM {e})*60 + EXTRACT(SECOND FROM {e}))",
+    )
+    sql = _replace_balanced_call(
+        sql, "SEC_TO_TIME",
+        lambda e: f"TIME(TIMESTAMP_SECONDS(CAST({e} AS INT64)))",
+    )
+
+    # Fix 17 — AVG(TIME(…)) is invalid (can't average a TIME). Rewrite to
     # average seconds-since-midnight rebuilt into a TIME. Runs AFTER the parse
     # fixes above so CAST(...AS TIME)→TIME(...) is already normalised.
     sql = _rewrite_avg_of_time(sql)
