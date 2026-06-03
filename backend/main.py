@@ -4930,6 +4930,12 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
   KPI display reads `rows[0]["value"]`.
 - Every CHART's `labelKey` MUST exactly match a column alias in its SQL (the x-axis / category).
 - Every CHART's `valueKeys` entries MUST each exactly match a column alias in the chart's SQL (the y-axis / numeric series).
+- A chart `valueKeys` series MUST be a NUMBER (the y-axis). For a time-of-day
+  trend (avg check-in/out over time), it's fine to output the
+  FORMAT_TIME('%H:%M:%S', …) clock string — the UI converts it for plotting and
+  labels the axis in HH:MM — OR output decimal hours. NEVER make a chart series
+  a non-numeric, non-time text column (it renders as an empty chart). KPIs
+  (single values) may be any formatted string.
 - DO NOT use generic aliases like `label` / `value` on charts unless you also list those exact strings in labelKey / valueKeys.
 - Always emit `id`, `title`, `format` for KPIs and `id`, `title`, `type`, `labelKey`, `valueKeys` for charts.
 

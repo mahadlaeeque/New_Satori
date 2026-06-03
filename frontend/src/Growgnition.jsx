@@ -5753,8 +5753,41 @@ const DashboardRenderer = ({ spec, onBack }) => {
       </div>
     );
 
+    // ── Make string value-series plottable ───────────────────────────────
+    // Recharts only draws NUMERIC series. Values arrive as strings in two
+    // common cases that otherwise render a blank chart:
+    //   • time-of-day "09:28:00" (FORMAT_TIME output) → decimal hours
+    //   • numeric text "8.0" / "1,234" (un-SAFE_CAST STRING column) → number
+    // Coerce per value-key; remember clock-time keys so the axis/tooltip read
+    // back as HH:MM. Guarantees a chart with real rows is never empty.
+    const TIME_RE = /^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/;
+    const toHours = (s) => { const m = TIME_RE.exec(String(s).trim()); return m ? (+m[1]) + (+m[2]) / 60 + (m[3] ? (+m[3]) / 3600 : 0) : null; };
+    const hoursToClock = (h) => {
+      if (h == null || !Number.isFinite(+h)) return "";
+      let mins = Math.round(+h * 60); mins = ((mins % 1440) + 1440) % 1440;
+      return `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
+    };
+    const _keyIsTime = {};
+    for (const vk of valueKeys) {
+      const vals = (chartData || []).map((r) => r?.[vk]).filter((x) => x != null && x !== "");
+      _keyIsTime[vk] = vals.length > 0 && vals.every((x) => typeof x === "string" && TIME_RE.test(x.trim()));
+    }
+    const plotData = (chartData || []).map((r) => {
+      const o = { ...r };
+      for (const vk of valueKeys) {
+        const raw = o[vk];
+        if (raw == null || raw === "") { o[vk] = null; continue; }
+        if (_keyIsTime[vk]) o[vk] = toHours(raw);
+        else if (typeof raw === "string") { const n = Number(raw.replace(/,/g, "")); if (Number.isFinite(n)) o[vk] = n; }
+      }
+      return o;
+    });
+    const allTime = valueKeys.length > 0 && valueKeys.every((vk) => _keyIsTime[vk]);
+    const yTickFmt = allTime ? hoursToClock : fmtAxisShort;
+    const valTooltipFmt = allTime ? ((v) => hoursToClock(v)) : ((v) => fmtTooltip(v));
+
     if (type === "pie") {
-      const pieData = compactPieData(chartData, labelKey, valueKeys[0]);
+      const pieData = compactPieData(plotData, labelKey, valueKeys[0]);
       return (
         <ChartCard key={idx} title={title}>
           <ResponsiveContainer width="100%" height={300}>
@@ -5772,7 +5805,7 @@ const DashboardRenderer = ({ spec, onBack }) => {
               >
                 {pieData.map((_, i) => <Cell key={i} fill={colors[i % colors.length]} />)}
               </Pie>
-              <Tooltip formatter={(v) => fmtTooltip(v)} />
+              <Tooltip formatter={valTooltipFmt} />
               <Legend />
             </PieChart>
           </ResponsiveContainer>
@@ -5786,7 +5819,7 @@ const DashboardRenderer = ({ spec, onBack }) => {
         <ChartCard key={idx} title={title}>
           <ResponsiveContainer width="100%" height={300}>
             <LineChart
-              data={chartData}
+              data={plotData}
               onClick={(state) => {
                 const lbl = state?.activeLabel ?? state?.activePayload?.[0]?.payload?.[labelKey];
                 if (lbl != null) openDrill(chart, lbl);
@@ -5795,8 +5828,8 @@ const DashboardRenderer = ({ spec, onBack }) => {
             >
               <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
               <XAxis dataKey={labelKey} tick={{ fontSize: 11 }} />
-              <YAxis tick={{ fontSize: 11 }} tickFormatter={fmtAxisShort} width={56} />
-              <Tooltip formatter={(v) => fmtTooltip(v)} />
+              <YAxis tick={{ fontSize: 11 }} tickFormatter={yTickFmt} width={allTime ? 64 : 56} domain={allTime ? ["dataMin", "dataMax"] : undefined} />
+              <Tooltip formatter={valTooltipFmt} />
               <Legend />
               {valueKeys.map((vk, vi) => (
                 <Line key={vk} type="monotone" dataKey={vk} stroke={colors[vi % colors.length]} strokeWidth={2} dot={{ r: 3 }} activeDot={{ r: 6, cursor: "pointer" }} />
@@ -5828,7 +5861,7 @@ const DashboardRenderer = ({ spec, onBack }) => {
     return (
       <ChartCard key={idx} title={title}>
         <ResponsiveContainer width="100%" height={isHorizontal ? horizontalHeight : 300}>
-          <BarChart data={chartData} layout={isHorizontal ? "vertical" : "horizontal"} margin={{ top: 8, right: 20, left: 8, bottom: 8 }}>
+          <BarChart data={plotData} layout={isHorizontal ? "vertical" : "horizontal"} margin={{ top: 8, right: 20, left: 8, bottom: 8 }}>
             <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
             {isHorizontal ? (
               <>
@@ -5840,15 +5873,15 @@ const DashboardRenderer = ({ spec, onBack }) => {
                   interval={0}
                   tickFormatter={(v) => clipLabel(v, 28)}
                 />
-                <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={fmtAxisShort} />
+                <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={yTickFmt} domain={allTime ? ["dataMin", "dataMax"] : undefined} />
               </>
             ) : (
               <>
                 <XAxis dataKey={labelKey} tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} tickFormatter={fmtAxisShort} width={56} />
+                <YAxis tick={{ fontSize: 11 }} tickFormatter={yTickFmt} width={allTime ? 64 : 56} domain={allTime ? ["dataMin", "dataMax"] : undefined} />
               </>
             )}
-            <Tooltip formatter={(v) => fmtTooltip(v)} />
+            <Tooltip formatter={valTooltipFmt} />
             <Legend />
             {valueKeys.map((vk, vi) => (
               // When there's only one value series, color each bar
