@@ -4831,9 +4831,29 @@ DASHBOARD-LEVEL COMMON SENSE:
 - A "sales dashboard" without further input should include: total pipeline,
   coverage ratio, win rate %, top AMs by Q1 achievement, pipeline by city or
   tier — using AMs from Sales_AM_Scorecard.
-- A "bench / utilization dashboard" should join Allocation_Data → Employee_Data,
-  classify by MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per Employee_Code:
-  Allocated >= 90, Partial 1-89, Bench 0/NULL.
+- A "bench / utilization dashboard" should join Allocation_Data → Employee_Data
+  and classify each employee by their REAL billable allocation = MAX over
+  Flag='Allocated' rows: Allocated >= 100, Partial 1-99, Bench when they have no
+  Flag='Allocated' row with pct > 0. Do NOT classify on MAX(allocation_percent)
+  across ALL rows — the Bench project '00Q - Qlik Bench' (Flag='Bench') is 100%,
+  so that wrongly marks bench people as fully allocated.
+
+ALLOCATION DATA — read before writing any allocation query:
+- Allocation_Data rows are WEEKLY snapshots: many rows per employee/project/month
+  plus Bench rows. To list someone's project allocations, GROUP BY project_id and
+  take MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per project (join
+  Project_Master on CAST(project_id AS STRING)=Project_Code for the name), keep
+  Flag, ORDER BY allocation DESC. NEVER group by Month and pick one project —
+  that collapses to "Qlik Bench 100%" for every month (a known wrong answer).
+- "Billable/real allocation %" = MAX over Flag='Allocated' rows. The Bench
+  project shows 100% but means UNALLOCATED.
+
+TICKETING (Timesheet_Data) — it carries the full ticket dataset:
+- FLAG = 'Assigned' / 'Un-Assigned' (Timesheet's own flag — NOT Allocation's
+  Allocated/Bench). When asked about assigned vs unassigned tickets, run them as
+  SEPARATE segregated queries (filter FLAG). TICKET_TYPE = 'Task' / 'Ticket'
+  (NULL on Un-Assigned). Also: TICKET_STATUS, TICKET_CLOSED_STATUS,
+  TICKET_PRIORITY, TICKET_PLANNED_HOURS, TICKET_HOURS (FLOAT64).
 
 WHEN TO ASK vs. WHEN TO ACT:
 - ASK only when the answer materially depends on a choice you can't infer:
@@ -8521,23 +8541,31 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "Flag (STRING — values: 'Allocated' / 'Bench' — NOT 'Actual' / 'Forecast'), Forecast_Flag, "
             "week_id, year_id, Week, Date (DATE), Year, Month (STRING), Data_Type.\n"
             "JOIN to Employee_Data on norm(employee_id)=norm(Employee_Code), norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0') (NOT on emp_name — names don't match).\n"
-            "Bench classification: a person is Bench if their real-project rows are all Flag='Bench' — i.e. they have NO row with Flag='Allocated' in the window. Do NOT use MAX(allocation_percent) alone: a bench person can still show 100% on a Bench-flagged row. Allocation feed includes forward-planned future weeks, so for 'current' state cap at Date <= CURRENT_DATE()."
+            "⚠️ ROWS ARE WEEKLY SNAPSHOTS — there are MANY rows per employee per project per month, and one or more 'Bench' rows. NEVER list raw rows or group by Month and pick one project: the Bench project '00Q - Qlik Bench' (Flag='Bench') sits at allocation_percent=100, so a per-month MAX collapses to 'Qlik Bench (100%)' for almost everyone (this is a known wrong answer).\n"
+            "TO SHOW AN EMPLOYEE'S PROJECT ALLOCATIONS (mirror the Availability Engine): GROUP BY project_id, take MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per project, JOIN Project_Master ON CAST(project_id AS STRING)=Project_Code for the name (some project_ids aren't in Project_Master — fall back to the code), keep the Flag, ORDER BY allocation DESC. Show every project (real + the Bench one), not one-per-month.\n"
+            "REAL/BILLABLE allocation % = MAX over Flag='Allocated' rows only. Bench classification: a person is Bench when they have NO Flag='Allocated' row with pct>0; don't take MAX(allocation_percent) blindly (the Bench row is 100%). The feed carries forward-planned future weeks (out to ~Dec), so for 'current/now' state filter Date <= CURRENT_DATE(); a per-project MAX over all rows (as the engine does) surfaces planned future allocations too."
         ),
     },
     {
         "table_name": "Timesheet_Data",
         "sort_order": 40,
         "description": (
-            "Ticket / project hours (~279k rows).\n"
-            "Columns: FLAG (STRING), Key (STRING), EMPLOYEE_CODE (STRING 'E-1571' — the employee who logged "
-            "the hours; THIS is the employee key, JOIN/filter on it digit-normalised), "
-            "TICKET_USER_ID (INT64 — an unrelated internal id; NEVER join or filter on it, it matches no employee), "
-            "TICKET_ID (INT64), TICKET_NUMBER (STRING), TICKET_PROJECT_CODE (STRING — JOIN to "
-            "Project_Master.Project_Code for the project name), TICKET_PROJECT_LABEL (STRING), "
-            "TICKET_DESCRIPTION, TICKET_STATUS (STRING), TICKET_WEEK_NO, TICKET_PRIORITY, "
-            "TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), DATE_KEY (DATE — filter via "
+            "Ticket / project + logged-hours data — this is the full TICKETING dataset too (~188k rows).\n"
+            "Columns: EMPLOYEE_CODE (STRING 'E-1571' — the employee who logged the hours; the employee key, "
+            "JOIN/filter on it digit-normalised), TICKET_USER_ID (STRING — an unrelated internal id, do NOT join/filter on it), "
+            "FLAG (STRING — 'Assigned' / 'Un-Assigned' (note the hyphen): whether the logged work is an ASSIGNED ticket/task "
+            "or UN-ASSIGNED ad-hoc work. ⚠️ This is Timesheet's own FLAG and is DIFFERENT from Allocation_Data.Flag which is 'Allocated'/'Bench' — never mix them up. "
+            "Assigned vs Un-Assigned are usually reported as SEPARATE segregated queries: filter FLAG='Assigned' or FLAG='Un-Assigned'), "
+            "TICKET_TYPE (STRING — 'Task' / 'Ticket'; NULL on Un-Assigned rows), "
+            "TICKET_ID (STRING), TICKET_NUMBER (STRING), TICKET_SUBJECT, TICKET_DESCRIPTION, TICKET_REASON, "
+            "TICKET_PROJECT_CODE (STRING — JOIN to Project_Master.Project_Code for the project name), TICKET_PROJECT_LABEL (STRING), "
+            "TICKET_STATUS (STRING), TICKET_CLOSED_STATUS (STRING), TICKET_CLOSED_DATE, TICKET_PRIORITY (STRING), "
+            "TICKET_PLANNED_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_WP_ID, TICKET_WEEK_NO, LOG_SCORE, LOG_DATE, "
+            "TICKET_HOURS (FLOAT64 — sum directly), DATE_KEY (DATE — filter via "
             "COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))).\n"
-            "To attribute hours to a person/department, JOIN Employee_Data on "
+            "TICKETING use cases: counts/hours by TICKET_TYPE, by TICKET_STATUS / TICKET_CLOSED_STATUS, by TICKET_PRIORITY, "
+            "and ALWAYS segregate Assigned vs Un-Assigned via FLAG when asked about assigned/unassigned tickets.\n"
+            "To attribute hours/tickets to a person/department, JOIN Employee_Data on "
             "norm(EMPLOYEE_CODE)=norm(Employee_Code) where norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0')."
         ),
     },
@@ -8602,6 +8630,8 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per employee = 0 or NULL",  # bad bench rule
     "there is NO 'Late' status",                                # pre late=after-09:30 rule
     "there is NO 'Late' value",                                 # pre permitted-location note
+    "it matches no employee",                                   # pre TICKET_TYPE/FLAG timesheet note
+    "Do NOT use MAX(allocation_percent) alone",                 # pre per-project allocation note
 )
 
 
