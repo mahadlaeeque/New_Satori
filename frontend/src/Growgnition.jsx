@@ -91,18 +91,75 @@ const KPICard = ({ title, value, change, changeType, icon: Icon, color, subtitle
   </div>
 );
 
-const ChartCard = ({ title, subtitle, children, style = {} }) => (
-  <div style={{
-    background: COLORS.surface, borderRadius: 16, padding: 24,
-    boxShadow: "0 1px 3px rgba(0,0,0,0.06)", border: `1px solid ${COLORS.border}`, ...style
-  }}>
-    <div style={{ marginBottom: 16 }}>
-      <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.textPrimary }}>{title}</div>
-      {subtitle && <div style={{ fontSize: 12, color: COLORS.textMuted, marginTop: 2 }}>{subtitle}</div>}
+const ChartCard = ({ title, subtitle, children, style = {} }) => {
+  // Per-chart controls: view full screen + download as PNG. The buttons are
+  // tagged data-html2canvas-ignore so they don't appear in the exported image.
+  const cardRef = useRef(null);
+  const [isFs, setIsFs] = useState(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const onFs = () => setIsFs(document.fullscreenElement === cardRef.current);
+    document.addEventListener("fullscreenchange", onFs);
+    return () => document.removeEventListener("fullscreenchange", onFs);
+  }, []);
+  const toggleFs = () => {
+    const el = cardRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) document.exitFullscreen?.();
+    else { try { el.requestFullscreen?.(); } catch { /* blocked — no-op */ } }
+  };
+  const download = async () => {
+    const el = cardRef.current;
+    if (!el || busy) return;
+    setBusy(true);
+    try {
+      const html2canvas = (await import("html2canvas")).default;
+      const canvas = await html2canvas(el, {
+        backgroundColor: getComputedStyle(el).backgroundColor || "#ffffff",
+        scale: 2, useCORS: true, logging: false,
+      });
+      const a = document.createElement("a");
+      a.href = canvas.toDataURL("image/png");
+      a.download = `${String(title || "chart").replace(/[^\w-]+/g, "_").slice(0, 60) || "chart"}.png`;
+      document.body.appendChild(a); a.click(); a.remove();
+    } catch (e) {
+      console.error("chart download failed", e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const iconBtn = {
+    background: "transparent", border: `1px solid ${COLORS.border}`, borderRadius: 8,
+    padding: "5px 7px", cursor: "pointer", color: COLORS.textMuted,
+    display: "flex", alignItems: "center", transition: "all 0.15s",
+  };
+  return (
+    <div ref={cardRef} className="satori-chartcard" style={{
+      background: COLORS.surface, borderRadius: 16, padding: 24,
+      boxShadow: "0 1px 3px rgba(0,0,0,0.06)", border: `1px solid ${COLORS.border}`, ...style
+    }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 16 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.textPrimary }}>{title}</div>
+          {subtitle && <div style={{ fontSize: 12, color: COLORS.textMuted, marginTop: 2 }}>{subtitle}</div>}
+        </div>
+        <div data-html2canvas-ignore="true" style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+          <button onClick={download} title="Download as PNG" disabled={busy} style={{ ...iconBtn, opacity: busy ? 0.5 : 1 }}
+            onMouseEnter={e => { e.currentTarget.style.background = COLORS.surfaceAlt; e.currentTarget.style.color = COLORS.textPrimary; }}
+            onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = COLORS.textMuted; }}>
+            <Download size={15} />
+          </button>
+          <button onClick={toggleFs} title={isFs ? "Exit full screen" : "View full screen"} style={iconBtn}
+            onMouseEnter={e => { e.currentTarget.style.background = COLORS.surfaceAlt; e.currentTarget.style.color = COLORS.textPrimary; }}
+            onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = COLORS.textMuted; }}>
+            {isFs ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+          </button>
+        </div>
+      </div>
+      {children}
     </div>
-    {children}
-  </div>
-);
+  );
+};
 
 // ── Data freshness ("Data as of ...") ──────────────────────────────────────
 // Module-level cache so the freshness probe runs once per session no matter
@@ -6879,41 +6936,6 @@ const DashboardsPage = () => {
     return () => document.removeEventListener("mousedown", h);
   }, []);
 
-  // ── Full-screen + download (PDF) for the dashboard viewer ──
-  const dashViewRef = useRef(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  useEffect(() => {
-    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
-    document.addEventListener("fullscreenchange", onFsChange);
-    return () => document.removeEventListener("fullscreenchange", onFsChange);
-  }, []);
-  const toggleFullscreen = useCallback(() => {
-    const el = dashViewRef.current;
-    if (!el) return;
-    if (document.fullscreenElement) {
-      document.exitFullscreen?.();
-    } else {
-      try { el.requestFullscreen?.(); } catch { /* fullscreen blocked — no-op */ }
-    }
-  }, []);
-  // Download = isolate the dashboard card and open the browser's print dialog
-  // (user picks "Save as PDF"). No extra deps; preserves theme + chart SVGs.
-  const downloadDashboard = useCallback(() => {
-    const el = dashViewRef.current;
-    if (!el) return;
-    setMenuOpen(false);
-    if (document.fullscreenElement) document.exitFullscreen?.();
-    el.setAttribute("data-print-root", "true");
-    document.body.classList.add("satori-printing");
-    const cleanup = () => {
-      document.body.classList.remove("satori-printing");
-      el.removeAttribute("data-print-root");
-      window.removeEventListener("afterprint", cleanup);
-    };
-    window.addEventListener("afterprint", cleanup);
-    setTimeout(() => { try { window.print(); } catch { cleanup(); } }, 80);
-  }, []);
-
   const fetchDashboards = useCallback(async () => {
     setLoading(true);
     const token = localStorage.getItem("token");
@@ -7246,20 +7268,6 @@ const DashboardsPage = () => {
                 <Sparkles size={14} /> Edit with AI
               </button>
             )}
-            <button onClick={downloadDashboard} title="Download as PDF" style={{
-              background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
-              padding: "8px 10px", cursor: "pointer", color: COLORS.textSecondary,
-              display: "flex", alignItems: "center"
-            }}>
-              <Download size={15} />
-            </button>
-            <button onClick={toggleFullscreen} title={isFullscreen ? "Exit full screen" : "View full screen"} style={{
-              background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
-              padding: "8px 10px", cursor: "pointer", color: COLORS.textSecondary,
-              display: "flex", alignItems: "center"
-            }}>
-              {isFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
-            </button>
             <div ref={menuRef} style={{ position: "relative" }}>
               <button onClick={() => setMenuOpen((v) => !v)} title="More" style={{
                 background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
@@ -7288,7 +7296,7 @@ const DashboardsPage = () => {
           </div>
         </div>
         <div style={{ flex: 1, display: "flex", gap: 16, minHeight: 0 }}>
-          <div ref={dashViewRef} style={{
+          <div style={{
             flex: chatOpen ? "1 1 60%" : "1 1 100%",
             background: COLORS.surface, borderRadius: 16, border: `1px solid ${COLORS.border}`,
             padding: 20, overflowY: "auto", minWidth: 0, transition: "flex 0.2s ease"

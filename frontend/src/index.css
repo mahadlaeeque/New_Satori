@@ -21,26 +21,17 @@ body {
   background-color: #F8FAF5;
 }
 
-/* Dashboard "Download as PDF": isolate the dashboard card for printing.
-   The Download button tags the card with [data-print-root] and adds
-   .satori-printing to <body>; everything else is hidden so the print/Save-as-PDF
-   output is just the dashboard (KPIs + chart SVGs), with the theme preserved
-   (same document → CSS vars resolve). */
-@media print {
-  body.satori-printing * { visibility: hidden !important; }
-  body.satori-printing [data-print-root="true"],
-  body.satori-printing [data-print-root="true"] * { visibility: visible !important; }
-  body.satori-printing [data-print-root="true"] {
-    position: absolute !important;
-    left: 0 !important;
-    top: 0 !important;
-    width: 100% !important;
-    height: auto !important;
-    max-height: none !important;
-    overflow: visible !important;
-    border: none !important;
-    box-shadow: none !important;
-    border-radius: 0 !important;
-  }
-  @page { margin: 12mm; }
+/* A chart card taken full screen (per-chart "View full screen"): fill the
+   viewport, keep the card's own surface color, and center its content so the
+   chart uses the available width (great for dense daily bar charts). */
+.satori-chartcard:fullscreen {
+  overflow: auto;
+  padding: 40px clamp(24px, 6vw, 120px);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  border-radius: 0;
+}
+.satori-chartcard:fullscreen .recharts-responsive-container {
+  min-height: 60vh;
 }
