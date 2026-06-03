@@ -4989,10 +4989,11 @@ def refine_dashboard(user_message: str, history: list, existing_config=None, sco
                 system_instruction=system,
                 temperature=0.4,
                 # Dashboard configs include several charts each with their own
-                # SQL block — 2048 tokens was clipping them mid-statement.
-                # 8192 gives plenty of headroom; raise again if the model
-                # complains.
-                max_output_tokens=8192,
+                # SQL block. The verbose-but-correct attendance/time + digit-
+                # normalised-join SQL is long, so multi-panel dashboards were
+                # still clipping at 8192. 16384 gives ample headroom; any panel
+                # that still gets clipped is dropped by _sql_looks_complete.
+                max_output_tokens=16384,
             ),
         )
         return response.text or "I wasn't able to generate a response. Please try again."
@@ -5474,6 +5475,54 @@ def _infer_chart_keys(columns: list, rows: list, chart_cfg: dict):
     return label_key, value_keys
 
 
+def _rewrite_avg_of_time(sql: str) -> str:
+    """BigQuery cannot AVG()/SUM() a TIME value ("No matching signature for
+    AVG: TIME"). The model produces `AVG(TIME(<expr>))` for "average check-in
+    time" KPIs. Rewrite each `AVG(TIME(<expr>))` to average seconds-since-
+    midnight and rebuild a TIME, so an outer FORMAT_TIME('%H:%M:%S', …) still
+    works. Uses balanced-paren scanning (the inner expr has nested parens like
+    SAFE.PARSE_TIMESTAMP(...)), which a flat regex can't match reliably."""
+    if not sql or "avg(" not in sql.lower():
+        return sql
+    import re as _re
+    out = sql
+    pat = _re.compile(r"AVG\(\s*TIME\(", _re.IGNORECASE)
+    idx = 0
+    while True:
+        m = pat.search(out, idx)
+        if not m:
+            break
+        # Walk from just after 'TIME(' to its matching ')'.
+        depth = 1
+        i = m.end()
+        while i < len(out) and depth > 0:
+            c = out[i]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            i += 1
+        if depth != 0:  # unbalanced (truncated) — leave it, don't risk a bad rewrite
+            idx = m.end()
+            continue
+        time_inner = out[m.end():i - 1]          # expr inside TIME( … )
+        j = i
+        while j < len(out) and out[j].isspace():
+            j += 1
+        if j >= len(out) or out[j] != ")":        # not the simple AVG(TIME(x)) shape
+            idx = i
+            continue
+        te = f"TIME({time_inner})"
+        replacement = (
+            "TIME_ADD(TIME '00:00:00', INTERVAL CAST(AVG("
+            f"EXTRACT(HOUR FROM {te})*3600 + EXTRACT(MINUTE FROM {te})*60 + EXTRACT(SECOND FROM {te})"
+            ") AS INT64) SECOND)"
+        )
+        out = out[:m.start()] + replacement + out[j + 1:]
+        idx = m.start() + len(replacement)
+    return out
+
+
 def _autofix_column_formats(sql: str) -> str:
     """Column-FORMAT corrections that are safe on EVERY query path — chat,
     dashboard, report, drilldown, voice. These touch only how individual
@@ -5535,6 +5584,11 @@ def _autofix_column_formats(sql: str) -> str:
         lambda m: f"TIME(SAFE.PARSE_TIMESTAMP({_TS}, {m.group(1)}))",
         sql, flags=_re.IGNORECASE,
     )
+
+    # Fix 16 — AVG(TIME(…)) is invalid (can't average a TIME). Rewrite to
+    # average seconds-since-midnight rebuilt into a TIME. Runs AFTER the parse
+    # fixes above so CAST(...AS TIME)→TIME(...) is already normalised.
+    sql = _rewrite_avg_of_time(sql)
 
     return sql
 
@@ -7815,6 +7869,36 @@ def _try_repair_json(s: str):
         return None
 
 
+def _sql_looks_complete(sql) -> bool:
+    """True if a generated panel SQL is structurally whole. Catches SQL that was
+    clipped mid-statement by max_output_tokens (and survived JSON repair as a
+    truncated-but-non-empty string) — e.g. '... CAST(a.personal_' which BigQuery
+    rejects with "Expected keyword AS but got end of script". We drop such panels
+    instead of executing them, so the user sees a clean "couldn't build this
+    panel" rather than a raw SQL syntax error."""
+    if not sql or not isinstance(sql, str):
+        return False
+    s = sql.strip()
+    up = s.upper()
+    if "SELECT" not in up or "FROM" not in up:
+        return False
+    # Balanced parentheses (truncation inside CAST(/REGEXP_REPLACE(/… leaves these open).
+    if s.count("(") != s.count(")"):
+        return False
+    # Balanced single quotes (string/format literal cut mid-way).
+    if s.count("'") % 2 != 0:
+        return False
+    # A complete statement never ends on an operator / open token, nor on a
+    # dangling SQL keyword (use the last whitespace-delimited TOKEN so we don't
+    # false-positive on aliases like 'reason' that merely end in 'on').
+    if s[-1] in "(,.+-*/=<>":
+        return False
+    last_token = up.split()[-1] if up.split() else ""
+    if last_token in ("AS", "AND", "OR", "JOIN", "LEFT", "INNER", "ON", "BY", "GROUP", "ORDER", "WHERE", "SELECT", "FROM", "INTERVAL", "CAST"):
+        return False
+    return True
+
+
 def _extract_ready_config(reply_text: str):
     """The refine AIs are instructed to emit `{"ready": true, "config": {...}}` JSON
     when the user has confirmed the design. Parse it out if present, repairing
@@ -7854,12 +7938,15 @@ def _extract_ready_config(reply_text: str):
         repaired = _try_repair_json(candidate)
         if isinstance(repaired, dict) and repaired.get("ready") and isinstance(repaired.get("config"), dict):
             cfg = repaired["config"]
-            # Drop dashboard kpis/charts that lost their SQL during truncation.
-            # NOTE: do NOT touch the top-level `sql` field on report configs —
-            # the single-SQL report shape carries `sql` directly on `cfg`.
+            # Drop dashboard kpis/charts whose SQL is missing OR was clipped
+            # mid-statement by truncation (incomplete SQL would reach BigQuery
+            # and error). _sql_looks_complete rejects unbalanced parens/quotes
+            # and dangling operators. NOTE: do NOT touch the top-level `sql`
+            # field on report configs — the single-SQL report shape carries
+            # `sql` directly on `cfg`.
             for key in ("kpis", "charts"):
                 if isinstance(cfg.get(key), list):
-                    cfg[key] = [x for x in cfg[key] if isinstance(x, dict) and x.get("sql")]
+                    cfg[key] = [x for x in cfg[key] if isinstance(x, dict) and _sql_looks_complete(x.get("sql"))]
             return cfg, True
     # If we saw a `"ready"` marker but couldn't parse anything at all, signal
     # truncation so the frontend can show a retry hint.
@@ -7902,8 +7989,9 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
                 temperature=0.4,
                 # Reports often span 3-6 sections each with a SQL block;
                 # 2048 tokens reliably clipped the last section's sql mid-
-                # statement. 8192 gives plenty of headroom.
-                max_output_tokens=8192,
+                # statement. 16384 gives ample headroom for the verbose
+                # parse/join SQL; any clipped section is dropped downstream.
+                max_output_tokens=16384,
             ),
         )
         reply_text = resp.text or "I wasn't able to generate a response. Please try again."
