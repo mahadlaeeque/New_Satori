@@ -2296,7 +2296,7 @@ WORKFORCE TABLES
 1. `Employee_Data` — Employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name, EmployeePosition, EmployeeEmail, EmployeeHierarchyNode (department), EmployeeLocation (city), Employee_Status, Employee_Type ('MTO'/'Permanent'/'Probation'/'Contract'). Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
 2. `Attendance_Data` — Daily attendance per employee. Cols: attendance_date (DATE), personal_no (STRING, 'E-902' format — JOIN to Employee_Data on this), employee_id (INT64 sequence, NOT a JOIN key), employee_name, employee_email, checkin_time (STRING HH:MM:SS), checkout_time (STRING), attendance_status_text ('Present'/'Absent'/'Late'/'Leave'/etc.), is_present (0/1), is_absent (0/1), is_on_leave (0/1), is_remote (0/1), is_holiday (0/1), is_weekend (0/1), leave_type_name. For "late": LOWER(attendance_status_text) = 'late'.
 3. `Allocation_Data` — Weekly project allocation (one row per employee × project × week). Cols: project_id (**JOIN to Project_Master.Project_Code for the project NAME**), employee_id (STRING "E-1234" — JOIN to Employee_Data.employee_code, digit-normalised), allocation_percent (0-100 — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Allocated' = real billable project / 'Bench' = bench project), Forecast_Flag (0 = ACTUAL, 1 = forecast — for CURRENT state ALWAYS filter Forecast_Flag=0), Date (DATE), Week/Year/Month. **Bench logic:** an employee is ON BENCH when they have NO Flag='Allocated' row with allocation_percent>0 in the recent actual weeks — a bench-project row can show allocation_percent=100 yet means they're benched, so NEVER classify on raw allocation_percent alone. Allocated = has a Flag='Allocated' row ≥100%; Partial = 1-99%.
-4. `Timesheet_Data` — Logged ticket/project hours. Cols: TICKET_USER_ID (JOIN to Employee_Data.employee_code, digit-normalised), TICKET_PROJECT_CODE (**JOIN to Project_Master.Project_Code for the project name**), TICKET_PROJECT_LABEL, TICKET_HOURS (FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT. Only ~397 employees have any timesheet rows (range ~2025-05 → 2026-04); "no timesheet" is normal for the rest.
+4. `Timesheet_Data` — Logged ticket/project hours. Cols: EMPLOYEE_CODE (the 'E-1571' code — **JOIN to Employee_Data.employee_code, digit-normalised; this is the employee link, NOT TICKET_USER_ID** which is a different internal numeric id), TICKET_USER_ID (internal id — do NOT join on it), TICKET_PROJECT_CODE (**JOIN to Project_Master.Project_Code for the project name**), TICKET_PROJECT_LABEL, TICKET_HOURS (FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT.
 5. `Project_Master` — Project reference (everyone can see it). Cols: Project_Code (the key that allocation.project_id AND timesheet.TICKET_PROJECT_CODE join to), Project_Name (e.g. '1245 - TMC Project Matrix'), Client_Name, Project_Type, Project_Status, Competency, PM_ID (project manager's employee_code), Project_Start_Date, Project_EndDate. ALWAYS join here to report project NAMES rather than bare codes.
 
 SALES TABLES
@@ -2776,7 +2776,7 @@ def _dept_scope_addon_str(dept_scope: "list[str] | None") -> str:
         f"that filter. Use norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0'):\n"
         f"  - Attendance_Data: JOIN Employee_Data e ON norm(a.personal_no)=norm(e.Employee_Code)\n"
         f"  - Allocation_Data: JOIN Employee_Data e ON norm(al.employee_id)=norm(e.Employee_Code)\n"
-        f"  - Timesheet_Data:  JOIN Employee_Data e ON norm(t.TICKET_USER_ID)=norm(e.Employee_Code)\n"
+        f"  - Timesheet_Data:  JOIN Employee_Data e ON norm(t.EMPLOYEE_CODE)=norm(e.Employee_Code)  (NOT TICKET_USER_ID)\n"
         f"NEVER return employee, attendance, allocation, timesheet, or practice data for any "
         f"department outside the list above — not even by fuzzy/partial match. If the user asks "
         f"about another department, reply that it's outside their scope ({human}). Sales tables "
@@ -2883,7 +2883,7 @@ WAREHOUSE CONTEXT:
   * Employee_Data (EmployeeHierarchyNode column = department)
   * Attendance_Data (JOIN on personal_no, NOT employee_id)
   * Allocation_Data (joined via employee_id)
-  * Timesheet_Data (joined via TICKET_USER_ID)
+  * Timesheet_Data (joined via EMPLOYEE_CODE)
   * Practice_Heads_List
 - Sales data tables in the same project (Sales_Accounts, Sales_AM_Scorecard, Sales_Pipeline_Health, Sales_Plan_vs_Pipeline, Sales_Hunting_Gap, Sales_KPI_Scorecard, Sales_Dormant_Accounts, Sales_Workload_Feasibility, Account_Coverage_Plan__*, Project_Master) are shared - everyone sees them.
 
@@ -4790,7 +4790,7 @@ ANALYST_COMMON_SENSE_COMPACT = """ANALYST COMMON SENSE (apply silently):
 - Already FLOAT64/INT64 (NEVER REPLACE): Coverage_Ratio, Hist_Win_Rate, Open_Deals, Win_Rate_by, is_*.
 - Timesheet_Data.DATE_KEY: type varies — DATE on capability-agent-prod, INT64 YYYYMMDD elsewhere. ALWAYS filter with `COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))) >= <cutoff>`. Plain `PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))` errors when DATE_KEY is DATE (CAST gives ISO "2025-07-01" which `%Y%m%d` rejects).
 - Allocation_Data.Date: type unreliable across environments — DON'T filter on it. Aggregate MAX(allocation_percent) per employee across all rows; the latest peak still wins for Bench / Partial / Allocated classification.
-- "Utilization" / "hours worked" → Timesheet_Data, not Allocation_Data. SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) grouped by TICKET_USER_ID, joined to Employee_Data via CAST(Employee_Code AS STRING) = CAST(TICKET_USER_ID AS STRING). Optional 90-day window via the COALESCE pattern above.
+- "Utilization" / "hours worked" → Timesheet_Data, not Allocation_Data. SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) grouped by EMPLOYEE_CODE, joined to Employee_Data on norm(EMPLOYEE_CODE)=norm(employee_code) (NOT TICKET_USER_ID). Optional 90-day window via the COALESCE pattern above.
 - TMC has roughly 1,190 active employees. If your headcount is in the tens of thousands you counted attendance rows, not people.
 - Apply defaults silently; only ask when the answer materially depends on a choice you can't infer."""
 
@@ -4872,7 +4872,7 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
       ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
        = LTRIM(REGEXP_REPLACE(CAST(a.employee_id   AS STRING), r'[^0-9]', ''), '0')
 
-    -- Timesheet_Data: JOIN on TICKET_USER_ID (numeric like '1643').
+    -- Timesheet_Data: JOIN on EMPLOYEE_CODE ('E-1571'), NOT TICKET_USER_ID.
     LEFT JOIN `<proj>.<ds>.Timesheet_Data` t
       ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
        = LTRIM(REGEXP_REPLACE(CAST(t.TICKET_USER_ID AS STRING), r'[^0-9]', ''), '0')
@@ -6599,7 +6599,7 @@ def _norm_emp_id(col: str) -> str:
 def _avail_kpis_sql(dept_scope: list | None = None) -> str:
     emp_id_emp   = _norm_emp_id("Employee_Code")
     emp_id_alloc = _norm_emp_id("employee_id")
-    emp_id_ts    = _norm_emp_id("TICKET_USER_ID")
+    emp_id_ts    = _norm_emp_id("EMPLOYEE_CODE")  # timesheet links to employee via EMPLOYEE_CODE, NOT TICKET_USER_ID
     return f"""
         WITH active_emp AS (
           SELECT {emp_id_emp} AS emp_id
@@ -6727,7 +6727,7 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
     status band (Bench / Partial / Allocated)."""
     emp_id_emp   = _norm_emp_id("Employee_Code")
     emp_id_alloc = _norm_emp_id("employee_id")
-    emp_id_ts    = _norm_emp_id("TICKET_USER_ID")
+    emp_id_ts    = _norm_emp_id("EMPLOYEE_CODE")  # timesheet links to employee via EMPLOYEE_CODE, NOT TICKET_USER_ID
     return f"""
         WITH active_emp AS (
           -- One row per employee. Employee_Data can contain duplicate rows for
@@ -6948,7 +6948,7 @@ def availability_diag(_: dict = Depends(require_admin)):
     well under one BQ slot-minute."""
     norm_emp   = _norm_emp_id("Employee_Code")
     norm_alloc = _norm_emp_id("employee_id")
-    norm_ts    = _norm_emp_id("TICKET_USER_ID")
+    norm_ts    = _norm_emp_id("EMPLOYEE_CODE")
     sql = f"""
         WITH emp_sample AS (
           SELECT DISTINCT
@@ -7112,7 +7112,7 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
               SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))
             ) AS d
           FROM {_bq_avail('Timesheet_Data')}
-          WHERE {_norm_emp_id('TICKET_USER_ID')} = {norm_target}
+          WHERE {_norm_emp_id('EMPLOYEE_CODE')} = {norm_target}
         )
         SELECT
           project,
