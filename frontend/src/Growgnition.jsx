@@ -166,8 +166,12 @@ const ChartCard = ({ title, subtitle, children, style = {} }) => {
 // how many DataAsOf labels mount. Backend caches it 1h server-side too.
 let _freshnessCache = null;
 let _freshnessPromise = null;
-function fetchDataFreshness() {
-  if (_freshnessCache) return Promise.resolve(_freshnessCache);
+// Re-poll cadence — matches the 30-min Drive→BigQuery pipeline, so the
+// "Data as of" timestamp advances roughly when the warehouse actually reloads
+// (NOT a per-minute wall clock).
+const FRESHNESS_POLL_MS = 30 * 60 * 1000;
+function fetchDataFreshness(force = false) {
+  if (!force && _freshnessCache) return Promise.resolve(_freshnessCache);
   if (_freshnessPromise) return _freshnessPromise;
   const base = import.meta.env.VITE_API_BASE || "";
   const token = localStorage.getItem("token");
@@ -175,8 +179,8 @@ function fetchDataFreshness() {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   })
     .then((r) => (r.ok ? r.json() : null))
-    .then((d) => { _freshnessCache = d; return d; })
-    .catch(() => null)
+    .then((d) => { if (d) _freshnessCache = d; return d || _freshnessCache; })
+    .catch(() => _freshnessCache)
     // Clear the in-flight handle once settled so a failed/empty fetch retries
     // next time instead of caching a permanently-rejected promise.
     .finally(() => { _freshnessPromise = null; });
@@ -194,7 +198,12 @@ function useDataFreshness() {
   useEffect(() => {
     let mounted = true;
     fetchDataFreshness().then((d) => { if (mounted) setF(d); });
-    return () => { mounted = false; };
+    // Refresh every ~30 min so the displayed last-loaded time keeps up with the
+    // pipeline without polling every minute.
+    const id = setInterval(() => {
+      fetchDataFreshness(true).then((d) => { if (mounted && d) setF(d); });
+    }, FRESHNESS_POLL_MS);
+    return () => { mounted = false; clearInterval(id); };
   }, []);
   return f;
 }
@@ -203,28 +212,28 @@ function useDataFreshness() {
 // (attendance | allocation | timesheet); omit it for the overall latest date.
 const DataAsOf = ({ source, prefix = "Data as of", style = {} }) => {
   const f = useDataFreshness();
-  // Live clock — only used to append a time when the data is current to today.
-  const [now, setNow] = useState(() => new Date());
-  useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 30000);
-    return () => clearInterval(t);
-  }, []);
   const info = f && (source ? f.sources?.[source] : f.overall);
-  if (!info || !info.label) return null;
-  // The warehouse freshness is a DATE (no time-of-day). When that date is TODAY
-  // — i.e. the 30-min pipeline has the data current — append the live local
-  // time so the pill reads as an "as of now" timestamp. On a day the feed lags,
-  // show the data date alone (mixing an old date with the current clock would
-  // be misleading).
-  const localToday = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-  const isToday = info.max_date === localToday;
-  const timeStr = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  const display = isToday ? `${info.label}, ${timeStr}` : info.label;
+  // Prefer the real pipeline load time (when data was last pulled into
+  // BigQuery). Show it as date + time in the viewer's local timezone. Fall back
+  // to the latest data-coverage date if the load time isn't available, or for
+  // source-specific pills (which want that source's data date).
+  const loaded = (!source && f?.last_loaded) ? new Date(f.last_loaded) : null;
+  let display = null;
+  let titleText = "";
+  if (loaded && !isNaN(loaded.getTime())) {
+    display = loaded.toLocaleString([], {
+      month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
+    });
+    titleText = `Warehouse last refreshed from BigQuery: ${display}`
+      + (info?.label ? ` · latest data date ${info.label}` : "");
+  } else if (info?.label) {
+    display = info.label;
+    titleText = `Latest ${source || "warehouse"} data: ${info.label}`;
+  }
+  if (!display) return null;
   return (
     <div
-      title={isToday
-        ? `Latest ${source || "warehouse"} data: ${info.label} (current as of ${timeStr})`
-        : `Latest ${source || "warehouse"} data: ${info.label}`}
+      title={titleText}
       style={{
         display: "inline-flex", alignItems: "center", gap: 5,
         fontSize: 11, color: COLORS.textMuted, whiteSpace: "nowrap", ...style,

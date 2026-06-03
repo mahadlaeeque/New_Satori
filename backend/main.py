@@ -1618,7 +1618,13 @@ def admin_lookup_dimension(dimension: str, _: dict = Depends(require_superadmin)
 # snapshots with no row-level date, so they're omitted. Cached in-process for
 # 1h; BQ failures degrade to nulls (the frontend simply hides the label).
 _freshness_cache = {"data": None, "at": 0.0}
-_FRESHNESS_TTL_SECONDS = 60 * 60
+# 10 min — short enough that "Data as of" reflects a new 30-min pipeline load
+# within ~10 min, cheap enough (a few metadata/MAX(date) queries) to re-run.
+_FRESHNESS_TTL_SECONDS = 10 * 60
+# Core tables the Drive→BigQuery pipeline WRITE_TRUNCATE-loads every 30 min;
+# their newest last_modified_time = the moment data was last pulled into BQ.
+_LAST_LOADED_TABLES = ("Attendance_Data", "Timesheet_Data", "Employee_Data",
+                       "Allocation_Data_Final", "Project_Master")
 # (table, date_col, optional_where). Allocation is restricted to actuals
 # (Forecast_Flag=0) — the Allocation_Data view carries forecasts out to 2030,
 # which would otherwise make "Data as of" jump into the future.
@@ -1648,6 +1654,29 @@ def _parse_warehouse_date(raw):
 def _date_label(d):
     """'Apr 24, 2026' — platform-independent (avoids %-d which breaks on Windows)."""
     return f"{_MONTH_ABBR[d.month - 1]} {d.day}, {d.year}"
+
+
+def _warehouse_last_loaded():
+    """The most recent table-load timestamp across the core warehouse tables —
+    i.e. the last time the 30-min Drive→BigQuery pipeline actually refreshed the
+    data. Read from `__TABLES__.last_modified_time` (epoch ms). Returns an ISO
+    UTC string ('2026-06-03T12:31:31Z') or None. This is the true "data as of"
+    moment — NOT the server/wall clock."""
+    try:
+        names = ",".join(f"'{t}'" for t in _LAST_LOADED_TABLES)
+        sql = (
+            "SELECT FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%SZ', TIMESTAMP_MILLIS(MAX(last_modified_time))) AS ts "
+            f"FROM {sql_table('__TABLES__')} WHERE table_id IN ({names})"
+        )
+        r = bq_run_query(sql, max_rows=1)
+        if "error" in r:
+            print(f"[data-freshness] last_loaded probe error: {r['error']}")
+            return None
+        rows = r.get("rows") or []
+        return (rows[0].get("ts") if rows else None) or None
+    except Exception as e:
+        print(f"[data-freshness] last_loaded failed: {e}")
+        return None
 
 
 @app.get("/api/data-freshness")
@@ -1685,6 +1714,10 @@ def data_freshness(user: dict = Depends(get_current_user)):
     payload = {
         "sources": sources,
         "overall": ({"max_date": latest[2], "label": latest[1]} if latest else None),
+        # When the pipeline last loaded data into BigQuery (the real "data as of"
+        # timestamp shown in the UI). ISO-8601 UTC; the frontend renders it in
+        # the viewer's local timezone.
+        "last_loaded": _warehouse_last_loaded(),
         "generated_at": datetime.utcnow().isoformat() + "Z",
     }
     _freshness_cache["data"] = payload
