@@ -1624,7 +1624,7 @@ _FRESHNESS_TTL_SECONDS = 60 * 60
 # which would otherwise make "Data as of" jump into the future.
 _FRESHNESS_PROBES = {
     "attendance": ("Attendance_Data", "attendance_date", ""),
-    "allocation": ("Allocation_Data", "Date", "WHERE Forecast_Flag = 0"),
+    "allocation": ("Allocation_Data", "Date", "WHERE Date <= CURRENT_DATE()"),
     "timesheet":  ("Timesheet_Data", "DATE_KEY", ""),
 }
 _MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -6621,9 +6621,12 @@ def _avail_kpis_sql(dept_scope: list | None = None) -> str:
                  MAX(IF(Flag = 'Allocated', SAFE_CAST(allocation_percent AS FLOAT64), 0)) AS max_pct,
                  COUNTIF(Flag = 'Allocated' AND SAFE_CAST(allocation_percent AS FLOAT64) > 0) AS real_alloc_rows
           FROM {_bq_avail('Allocation_Data')}
-          WHERE Forecast_Flag = 0
+          -- "Current" = the latest allocation week AT OR BEFORE today, then 90
+          -- days back. The feed carries forward-planned weeks (out to Dec), so
+          -- we cap at CURRENT_DATE() instead of MAX(Date) to reflect today.
+          WHERE Date <= CURRENT_DATE()
             AND Date >= DATE_SUB(
-                  (SELECT MAX(Date) FROM {_bq_avail('Allocation_Data')} WHERE Forecast_Flag = 0),
+                  (SELECT MAX(Date) FROM {_bq_avail('Allocation_Data')} WHERE Date <= CURRENT_DATE()),
                   INTERVAL 90 DAY)
           GROUP BY emp_id
         ),
@@ -6749,9 +6752,12 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
                  COUNT(DISTINCT IF(Flag = 'Allocated', project_id, NULL)) AS project_count,
                  ANY_VALUE(emp_competency) AS competency
           FROM {_bq_avail('Allocation_Data')}
-          WHERE Forecast_Flag = 0
+          -- "Current" = the latest allocation week AT OR BEFORE today, then 90
+          -- days back. The feed carries forward-planned weeks (out to Dec), so
+          -- we cap at CURRENT_DATE() instead of MAX(Date) to reflect today.
+          WHERE Date <= CURRENT_DATE()
             AND Date >= DATE_SUB(
-                  (SELECT MAX(Date) FROM {_bq_avail('Allocation_Data')} WHERE Forecast_Flag = 0),
+                  (SELECT MAX(Date) FROM {_bq_avail('Allocation_Data')} WHERE Date <= CURRENT_DATE()),
                   INTERVAL 90 DAY)
           GROUP BY emp_id
         ),
