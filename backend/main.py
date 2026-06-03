@@ -4779,6 +4779,9 @@ DEFAULT FILTERS — apply automatically without asking:
    Always TRIM and COALESCE empties to 'Unspecified' when grouping.
 7. Sales currency — USD values are STRING; SAFE_CAST AS FLOAT64 before sums.
    Coverage_Ratio is already a decimal — multiply by 100 only when DISPLAYING.
+8. EmployeeEmail is internal TMC work data (e.g. name@tmcltd.com) and a normal
+   queryable column. When asked for employees' emails, show the FULL address —
+   never mask, redact, anonymize, or replace it with a placeholder.
 
 DASHBOARD-LEVEL COMMON SENSE:
 - An "attendance dashboard" without further input should include: overall
