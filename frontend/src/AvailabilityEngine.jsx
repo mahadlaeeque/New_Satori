@@ -1013,31 +1013,44 @@ const AvailabilityEnginePage = () => {
     })();
   }, []);
 
-  // ── Employee list re-fetches on filter change ──
+  // ── Fetch the whole active workforce ONCE, then filter client-side. ──
+  // (Filtering server-side per keystroke was unreliable; with ~1.2k employees
+  // client-side filtering is instant and robust.)
   const fetchEmployees = useCallback(async () => {
     setLoadingList(true);
     setErrorList(null);
     try {
-      const qs = new URLSearchParams();
-      if (statusFilter) qs.set("status", statusFilter);
-      if (skillFilter)  qs.set("skill", skillFilter);
-      if (searchTerm.trim()) qs.set("q", searchTerm.trim());
-      qs.set("limit", "2000"); // fetch the whole active workforce so client-side search/filter sees everyone
-      const data = await fetchJson(`/api/availability/employees?${qs.toString()}`);
+      const data = await fetchJson(`/api/availability/employees?limit=2000`);
       setEmployees(data.employees || []);
     } catch (e) {
       setErrorList(String(e.message || e));
     } finally {
       setLoadingList(false);
     }
-  }, [statusFilter, skillFilter, searchTerm]);
+  }, []);
 
-  // Debounce free-text search
-  useEffect(() => {
-    if (searchDebounce.current) clearTimeout(searchDebounce.current);
-    searchDebounce.current = setTimeout(() => { fetchEmployees(); }, 220);
-    return () => searchDebounce.current && clearTimeout(searchDebounce.current);
-  }, [fetchEmployees]);
+  useEffect(() => { fetchEmployees(); }, [fetchEmployees]);
+
+  // Search (name incl. code, position, dept, location, competency, code) +
+  // status + skill, all applied client-side over the loaded list.
+  const filteredEmployees = useMemo(() => {
+    let list = employees;
+    const term = searchTerm.trim().toLowerCase();
+    if (term) {
+      list = list.filter((e) => {
+        const hay = [e.name, cleanName(e), e.position, e.department, e.location, e.competency, e.code]
+          .filter(Boolean).join(" ").toLowerCase();
+        return term.split(/\s+/).every((w) => hay.includes(w));
+      });
+    }
+    if (statusFilter) list = list.filter((e) => (e.status || "") === statusFilter);
+    if (skillFilter) {
+      const sk = skillFilter.toLowerCase();
+      list = list.filter((e) =>
+        (e.competency || "").toLowerCase().includes(sk) || (e.position || "").toLowerCase().includes(sk));
+    }
+    return list;
+  }, [employees, searchTerm, statusFilter, skillFilter]);
 
   // ── Create task: Find Best Fit ──
   const handleFindBestFit = async (payload) => {
@@ -1199,19 +1212,19 @@ const AvailabilityEnginePage = () => {
         <div style={{ padding: 40, textAlign: "center", color: C.textMuted }}>
           <Loader2 size={24} className="spin" /> <div style={{ marginTop: 8 }}>Loading employees…</div>
         </div>
-      ) : employees.length === 0 ? (
+      ) : filteredEmployees.length === 0 ? (
         <div style={{ padding: 40, textAlign: "center", color: C.textMuted, background: C.surface, border: `1px dashed ${C.border}`, borderRadius: 12 }}>
           <Users size={28} style={{ opacity: 0.4 }} />
           <div style={{ marginTop: 8, fontSize: 14 }}>No employees match the current filters.</div>
         </div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 16 }}>
-          {employees.map(emp => <EmployeeCard key={emp.code} emp={emp} onClick={() => setDetailEmp(emp)} />)}
+          {filteredEmployees.map(emp => <EmployeeCard key={emp.code} emp={emp} onClick={() => setDetailEmp(emp)} />)}
         </div>
       )}
 
       <div style={{ marginTop: 16, fontSize: 12, color: C.textMuted, textAlign: "center" }}>
-        Showing {employees.length} of the active workforce · status from current project allocations (real billable vs bench, latest actual weeks)
+        Showing {filteredEmployees.length} of {employees.length} active employees · status from current project allocations (real billable vs bench, latest actual weeks)
       </div>
 
       <CreateTaskModal
