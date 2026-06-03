@@ -7031,24 +7031,35 @@ def _avail_kpis_sql(dept_scope: list | None = None) -> str:
                   FROM {_bq_avail('Timesheet_Data')}
                 )
           GROUP BY emp_id
+        ),
+        emp_status AS (
+          -- One row per active employee with their CURRENT status.
+          -- PRACTICE-HEAD RULE: for elapsed/past days look at TIMESHEET (actual
+          -- work), for the future look at ALLOCATION (the plan). So a person who
+          -- logged real hours recently is ACTIVE — never 'Bench' — even if the
+          -- allocation snapshot shows them on the bench project (e.g. Sufyan
+          -- Baig: allocation=Bench but timesheet shows Packages Qlik SLA work).
+          SELECT
+            ae.emp_id,
+            COALESCE(ea.real_alloc_rows, 0) AS real_alloc_rows,
+            COALESCE(ea.max_pct, 0)         AS max_pct,
+            COALESCE(et.hrs_90d, 0)         AS hrs_90d,
+            CASE
+              WHEN COALESCE(et.hrs_90d, 0) > 0 OR COALESCE(ea.max_pct, 0) >= 100 THEN 'allocated'
+              WHEN COALESCE(ea.real_alloc_rows, 0) = 0 THEN 'bench'
+              ELSE 'partial'
+            END AS status
+          FROM (SELECT DISTINCT emp_id FROM active_emp) ae
+          LEFT JOIN emp_alloc ea ON ea.emp_id = ae.emp_id
+          LEFT JOIN emp_ts   et ON et.emp_id = ae.emp_id
         )
         SELECT
-          (SELECT COUNT(DISTINCT emp_id) FROM active_emp) AS total_employees,
-          (SELECT COUNT(DISTINCT ae.emp_id) FROM active_emp ae
-             LEFT JOIN emp_alloc ea ON ea.emp_id = ae.emp_id
-             WHERE COALESCE(ea.real_alloc_rows, 0) = 0) AS on_bench,
-          (SELECT COUNT(DISTINCT ae.emp_id) FROM active_emp ae
-             JOIN emp_alloc ea ON ea.emp_id = ae.emp_id
-             WHERE ea.max_pct > 0 AND ea.max_pct < 100) AS partial,
-          (SELECT COUNT(DISTINCT ae.emp_id) FROM active_emp ae
-             JOIN emp_alloc ea ON ea.emp_id = ae.emp_id
-             WHERE ea.max_pct >= 100) AS allocated,
-          (SELECT COUNT(DISTINCT ae.emp_id) FROM active_emp ae
-             JOIN emp_ts et ON et.emp_id = ae.emp_id
-             WHERE et.hrs_90d >= 120) AS high_activity,
-          (SELECT COUNT(DISTINCT ae.emp_id) FROM active_emp ae
-             LEFT JOIN emp_ts et ON et.emp_id = ae.emp_id
-             WHERE COALESCE(et.hrs_90d, 0) = 0) AS no_timesheet
+          (SELECT COUNT(*)                       FROM emp_status) AS total_employees,
+          (SELECT COUNTIF(status = 'bench')      FROM emp_status) AS on_bench,
+          (SELECT COUNTIF(status = 'partial')    FROM emp_status) AS partial,
+          (SELECT COUNTIF(status = 'allocated')  FROM emp_status) AS allocated,
+          (SELECT COUNTIF(hrs_90d >= 120)        FROM emp_status) AS high_activity,
+          (SELECT COUNTIF(hrs_90d = 0)           FROM emp_status) AS no_timesheet
     """
 
 
@@ -7173,8 +7184,10 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
           COALESCE(NULLIF(TRIM(a.competency), ''), ae.position) AS competency,
           COALESCE(et.hrs_90d, 0) AS hrs_90d,
           CASE
+            -- Elapsed days → timesheet (actual work), future → allocation.
+            -- Recent logged hours OR a forward 100% plan ⇒ active, never Bench.
+            WHEN COALESCE(et.hrs_90d, 0) > 0 OR a.max_pct >= 100 THEN 'Allocated'
             WHEN COALESCE(a.real_alloc_rows, 0) = 0 THEN 'Bench'
-            WHEN a.max_pct >= 100 THEN 'Allocated'
             ELSE 'Partial'
           END AS status
         FROM active_emp ae
