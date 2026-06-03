@@ -2256,8 +2256,16 @@ EXACT COLUMN NAMES IN Attendance_Data (all lowercase or special):
 - personal_no (STRING 'E-902' - THIS IS THE JOIN KEY to Employee_Data.employee_code)
 - employee_id (INT64 sequence number - NOT A JOIN KEY)
 - employee_name, employee_email
-- attendance_status_text (STRING — the ONLY status source. Values: 'Present', 'Absent', 'On Leave', 'Holiday', 'Weekend', 'Missing Punch', 'Remote Work', plus 'Submitted ...' variants). There are NO is_present / is_absent / is_on_leave / is_remote / is_holiday / is_weekend flag columns — derive every count with COUNTIF(LOWER(attendance_status_text) = '<status>').
-- attendance_status, checkin_time, checkout_time
+- attendance_status_text (STRING — the canonical status. Values: 'Present', 'Absent', 'On Leave', 'Holiday', 'Weekend', 'Missing Punch', 'Remote Work', plus 'Submitted ...' variants). Count with COUNTIF(LOWER(attendance_status_text) = '<status>').
+- is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend, is_missing_punch (INT64 0/1) — these DO exist; SUM(is_present) is equivalent to COUNTIF(LOWER(attendance_status_text)='present'). Use either. Working-day denominator = COUNTIF(LOWER(attendance_status_text) NOT IN ('weekend','holiday')). There is NO 'Late' status.
+- checkin_time, checkout_time (STRING — FULL datetime like '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'. They can be NULL/blank on non-working or missing-punch days.)
+  • To get the clock time, parse the whole string then take TIME:  TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time))
+  • NEVER use PARSE_TIME('%H:%M:%S', checkin_time) or CONCAT a date onto it — those return NULL for every row.
+  • AVERAGE check-in/out time = average seconds-since-midnight, then format back:
+      WITH t AS (SELECT TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) AS c FROM <att rows> WHERE checkin_time IS NOT NULL)
+      SELECT FORMAT_TIME('%H:%M:%S', TIME_ADD(TIME '00:00:00', INTERVAL CAST(AVG(EXTRACT(HOUR FROM c)*3600 + EXTRACT(MINUTE FROM c)*60 + EXTRACT(SECOND FROM c)) AS INT64) SECOND)) AS avg_checkin FROM t WHERE c IS NOT NULL
+  • For "worked hours" per day = TIMESTAMP_DIFF(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkout_time), SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time), MINUTE)/60.0 (only where both are non-null).
+  • Restrict time aggregates to actually-worked days: LOWER(attendance_status_text) IN ('present','remote work').
 
 REQUIRED JOIN PATTERN for Employee_Data <-> Attendance_Data:
   LEFT JOIN `<proj>.<ds>.Attendance_Data` a
@@ -2294,7 +2302,7 @@ DATA WAREHOUSE — `ai-vertex-mahad.Satori_Project` (10 tables):
 
 WORKFORCE TABLES
 1. `Employee_Data` — Employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name, EmployeePosition, EmployeeEmail, EmployeeHierarchyNode (department), EmployeeLocation (city), Employee_Status, Employee_Type ('MTO'/'Permanent'/'Probation'/'Contract'). Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
-2. `Attendance_Data` — Daily attendance per employee. Cols: attendance_date (DATE), personal_no (STRING, 'E-902' format — JOIN to Employee_Data on this), employee_id (INT64 sequence, NOT a JOIN key), employee_name, employee_email, checkin_time (STRING HH:MM:SS), checkout_time (STRING), attendance_status_text ('Present'/'Absent'/'Late'/'Leave'/etc.), is_present (0/1), is_absent (0/1), is_on_leave (0/1), is_remote (0/1), is_holiday (0/1), is_weekend (0/1), leave_type_name. For "late": LOWER(attendance_status_text) = 'late'.
+2. `Attendance_Data` — Daily attendance per employee. Cols: attendance_date (DATE), personal_no (STRING, 'E-902' format — JOIN to Employee_Data on this), employee_id (INT64 sequence, NOT a JOIN key), employee_name, employee_email, checkin_time (STRING — FULL datetime '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'; clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time))), checkout_time (STRING — same format), attendance_status_text ('Present'/'Absent'/'On Leave'/'Holiday'/'Weekend'/'Missing Punch'/'Remote Work' + 'Submitted …' variants; there is NO 'Late' status), is_present (0/1), is_absent (0/1), is_on_leave (0/1), is_remote (0/1), is_holiday (0/1), is_weekend (0/1), leave_type_name.
 3. `Allocation_Data` — Weekly project allocation (one row per employee × project × week). Cols: project_id (**JOIN to Project_Master.Project_Code for the project NAME**), employee_id (STRING "E-1234" — JOIN to Employee_Data.employee_code, digit-normalised), allocation_percent (0-100 — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Allocated' = real billable project / 'Bench' = bench project), Forecast_Flag (0 = ACTUAL, 1 = forecast — for CURRENT state ALWAYS filter Forecast_Flag=0), Date (DATE), Week/Year/Month. **Bench logic:** an employee is ON BENCH when they have NO Flag='Allocated' row with allocation_percent>0 in the recent actual weeks — a bench-project row can show allocation_percent=100 yet means they're benched, so NEVER classify on raw allocation_percent alone. Allocated = has a Flag='Allocated' row ≥100%; Partial = 1-99%.
 4. `Timesheet_Data` — Logged ticket/project hours. Cols: EMPLOYEE_CODE (the 'E-1571' code — **JOIN to Employee_Data.employee_code, digit-normalised; this is the employee link, NOT TICKET_USER_ID** which is a different internal numeric id), TICKET_USER_ID (internal id — do NOT join on it), TICKET_PROJECT_CODE (**JOIN to Project_Master.Project_Code for the project name**), TICKET_PROJECT_LABEL, TICKET_HOURS (FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT.
 5. `Project_Master` — Project reference (everyone can see it). Cols: Project_Code (the key that allocation.project_id AND timesheet.TICKET_PROJECT_CODE join to), Project_Name (e.g. '1245 - TMC Project Matrix'), Client_Name, Project_Type, Project_Status, Competency, PM_ID (project manager's employee_code), Project_Start_Date, Project_EndDate. ALWAYS join here to report project NAMES rather than bare codes.
@@ -2531,10 +2539,26 @@ User: "What time did Mahad check in on Monday?"
   → run_sql: SELECT attendance_date, checkin_time, checkout_time, attendance_status_text FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` WHERE LOWER(employee_name) LIKE '%mahad%' AND attendance_date = DATE '2026-03-17' LIMIT 1
   → Speak: "On Monday March 17th, Mahad checked in at 9:32 AM and checked out at 6:15 PM."
 
-[D] SINGLE EMPLOYEE — AVERAGE CHECKIN OVER A PERIOD
-User: "What's Mahad's average checkin time this month?"
-  → run_sql: SELECT FORMAT_TIME('%I:%M %p', TIME(TIMESTAMP_SECONDS(CAST(AVG(UNIX_SECONDS(TIMESTAMP(CONCAT('2000-01-01 ', checkin_time)))) AS INT64)))) AS avg_in FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` WHERE LOWER(employee_name) LIKE '%mahad%' AND attendance_date BETWEEN DATE_TRUNC(CURRENT_DATE(),MONTH) AND CURRENT_DATE() AND is_present=1 AND checkin_time IS NOT NULL
-  → Speak: "Mahad's average checkin this month is about 9:18 AM."
+[D] AVERAGE CHECKIN/CHECKOUT OVER A PERIOD (one person OR a whole department)
+User: "What's the Qlik department's average check-in & check-out time in May 2026?"
+  NOTE: checkin_time/checkout_time are FULL datetime strings — parse the whole
+  string, take TIME, average seconds-since-midnight, format back. Restrict to
+  actually-worked days (present / remote work).
+  → run_sql: WITH t AS (
+       SELECT TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', a.checkin_time))  AS cin,
+              TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', a.checkout_time)) AS cout
+       FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` a
+       JOIN `ai-vertex-mahad.Satori_Project.Employee_Data` e
+         ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING),r'[^0-9]',''),'0') = LTRIM(REGEXP_REPLACE(CAST(a.personal_no AS STRING),r'[^0-9]',''),'0')
+       WHERE LOWER(e.EmployeeHierarchyNode)='qlik'
+         AND LOWER(COALESCE(e.Employee_Type,'')) IN ('mto','permanent','probation')
+         AND a.attendance_date BETWEEN DATE '2026-05-01' AND DATE '2026-05-31'
+         AND LOWER(a.attendance_status_text) IN ('present','remote work'))
+     SELECT
+       FORMAT_TIME('%I:%M %p', TIME_ADD(TIME '00:00:00', INTERVAL CAST(AVG(EXTRACT(HOUR FROM cin)*3600+EXTRACT(MINUTE FROM cin)*60+EXTRACT(SECOND FROM cin)) AS INT64) SECOND))  AS avg_checkin,
+       FORMAT_TIME('%I:%M %p', TIME_ADD(TIME '00:00:00', INTERVAL CAST(AVG(EXTRACT(HOUR FROM cout)*3600+EXTRACT(MINUTE FROM cout)*60+EXTRACT(SECOND FROM cout)) AS INT64) SECOND)) AS avg_checkout
+     FROM t WHERE cin IS NOT NULL
+  → Speak: "In May, the Qlik team checked in around 9:23 AM on average and checked out around 6:11 PM."
 
 [D2] SIMPLER FALLBACK — list per-day checkin/checkout for the period
   → run_sql: SELECT attendance_date, checkin_time, checkout_time FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` WHERE LOWER(employee_name) LIKE '%mahad%' AND attendance_date BETWEEN DATE '2026-03-01' AND DATE '2026-03-31' AND is_present=1 ORDER BY attendance_date
@@ -2580,7 +2604,7 @@ CRITICAL: If you are not sure which exact column to use, STILL CALL run_sql with
 
 WORKFORCE
   • Employee_Data — Employee_Code, Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Joining_Date, Gender. Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation','contractual fixed term').
-  • Attendance_Data — attendance_date (DATE), personal_no (STRING 'E-902' — JOIN to Employee_Data on this), employee_id (INT64 sequence, not a JOIN key), employee_name, employee_email, checkin_time (STRING HH:MM:SS — for the moment they checked in), checkout_time (STRING HH:MM:SS — for the moment they checked out), attendance_status_text ('Present'/'Absent'/'Weekend'/'Holiday'/'On Leave'/'Missing Punch'/'Remote Work'), is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1). NO 'Late' status — closest concept is 'Missing Punch'.
+  • Attendance_Data — attendance_date (DATE), personal_no (STRING 'E-902' — JOIN to Employee_Data on this), employee_id (INT64 sequence, not a JOIN key), employee_name, employee_email, checkin_time / checkout_time (STRING — FULL datetime '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'; clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)); can be NULL on non-working days), attendance_status_text ('Present'/'Absent'/'Weekend'/'Holiday'/'On Leave'/'Missing Punch'/'Remote Work'), is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1). NO 'Late' status — closest concept is 'Missing Punch'.
   • Allocation_Data — project_id, employee_id, emp_name, allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Allocated'/'Bench'), Date, Week, Year, Month.
   • Timesheet_Data — EMPLOYEE_CODE ('E-1571' — the employee key; JOIN/filter on this digit-normalised, NOT TICKET_USER_ID which is an unrelated internal id matching no employee), TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_CODE (JOIN to Project_Master.Project_Code), TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (DATE — filter via COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))).
 
@@ -3115,6 +3139,10 @@ def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None, dept_scope
 
     # Rewrite legacy ai-vertex-mahad project refs to the live BQ_PROJECT.
     sql_stripped = normalize_bq_project(sql_stripped)
+    # Heal column-format hallucinations (timesheet key, DATE_KEY, checkin/out
+    # time parse) the same way dashboards/reports do. Format-only — never
+    # touches the joins or the dept/plant scope clauses injected above.
+    sql_stripped = _autofix_column_formats(sql_stripped)
     print(f"[CHAT-SQL] Running: {sql_stripped[:300]}")
     result = run_query(sql_stripped, max_rows=500)
     if "error" in result:
@@ -4659,7 +4687,7 @@ _DASHBOARD_SAP_SCHEMAS = """Detailed table schemas (BigQuery project `ai-vertex-
 
 WORKFORCE TABLES:
 - `Employee_Data` — employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name (STRING), EmployeePosition (STRING), EmployeeEmail (STRING), EmployeeHierarchyNode (STRING — department), EmployeeLocation (STRING — city), Employee_Status (STRING), Employee_Type (STRING — 'MTO'/'Permanent'/'Probation'/'Contract'). Active employees = Employee_Type IN ('MTO','Permanent','Probation').
-- `Attendance_Data` — daily attendance per employee. Cols: attendance_date (DATE), personal_no (STRING "E-902" — THIS is the JOIN KEY to Employee_Code, digit-normalised), employee_id (INT64 — an unrelated sequence number, NOT a join key), employee_name (STRING), checkin_time (STRING HH:MM:SS), checkout_time (STRING), attendance_status_text (STRING — 'Present'/'Absent'/'On Leave'/'Holiday'/'Weekend'/'Missing Punch'/'Remote Work'; there is NO 'Late'), is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 — 0/1).
+- `Attendance_Data` — daily attendance per employee. Cols: attendance_date (DATE), personal_no (STRING "E-902" — THIS is the JOIN KEY to Employee_Code, digit-normalised), employee_id (INT64 — an unrelated sequence number, NOT a join key), employee_name (STRING), checkin_time / checkout_time (STRING — FULL datetime '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'; clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time))), attendance_status_text (STRING — 'Present'/'Absent'/'On Leave'/'Holiday'/'Weekend'/'Missing Punch'/'Remote Work'; there is NO 'Late'), is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 — 0/1).
 - `Allocation_Data` — weekly project allocation. Cols: project_id (STRING), employee_id (STRING — "E-1234"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency (STRING), Flag (STRING — 'Actual'/'Forecast'), Forecast_Flag (STRING), Date (DATE). Allocated = MAX(pct)>=90; Partial = 1-89; Bench = 0/NULL.
 - `Timesheet_Data` — ticket/project hours. Cols: EMPLOYEE_CODE (STRING "E-1571" — THIS is the employee who logged the hours; JOIN/filter on this, digit-normalised), TICKET_USER_ID (an unrelated internal numeric id — NEVER join or filter on it; it matches no employee), TICKET_NUMBER, TICKET_PROJECT_CODE (JOIN to Project_Master.Project_Code for the project name), TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT. For DATE_KEY filters use the type-agnostic form: COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))).
 
@@ -5446,6 +5474,71 @@ def _infer_chart_keys(columns: list, rows: list, chart_cfg: dict):
     return label_key, value_keys
 
 
+def _autofix_column_formats(sql: str) -> str:
+    """Column-FORMAT corrections that are safe on EVERY query path — chat,
+    dashboard, report, drilldown, voice. These touch only how individual
+    columns are referenced/parsed; they never alter joins, scope filters, or
+    aggregation shape, so they can run on dept-scoped chat SQL without the risk
+    the full dashboard autofix carries (e.g. INNER→LEFT join rewrites).
+
+    Each fix targets a column whose real type/format in the re-fed warehouse
+    differs from what the model keeps assuming from the prompt, which silently
+    yields ZERO rows / NULL aggregates:
+
+      13. Timesheet employee key is EMPLOYEE_CODE ('E-1571'), not TICKET_USER_ID
+          (an unrelated internal id that joins to nothing).
+      14. DATE_KEY is a real DATE, so PARSE_DATE('%Y%m%d', …) → NULL every row;
+          wrap in a type-agnostic COALESCE that parses DATE and INT-YYYYMMDD.
+      15. Attendance checkin_time / checkout_time are FULL datetime strings
+          ("2026-05-25 09:49:26.772000"), NOT "HH:MM:SS". Parsing them with a
+          time-only format returns NULL for every row → "no valid check-in
+          times" (the exact failure a practice head hit). Rewrite the common
+          wrong parses to the correct full-timestamp parse.
+    """
+    if not sql:
+        return sql
+    import re as _re
+
+    # Fix 13 — TICKET_USER_ID → EMPLOYEE_CODE (digit-norm keeps any existing
+    # numeric filter value valid, e.g. norm('E-1571')='1571').
+    sql = _re.sub(r"(?<![A-Za-z0-9_])TICKET_USER_ID(?![A-Za-z0-9_])", "EMPLOYEE_CODE", sql)
+
+    # Fix 14 — DATE_KEY parse → type-agnostic COALESCE (idempotent guard).
+    if not _re.search(r"COALESCE\(\s*SAFE_CAST\(\s*CAST\(\s*DATE_KEY\s+AS\s+STRING", sql, _re.IGNORECASE):
+        sql = _re.sub(
+            r"(?:SAFE\.)?PARSE_DATE\(\s*'%Y%m%d'\s*,\s*CAST\(\s*DATE_KEY\s+AS\s+STRING\s*\)\s*\)",
+            "COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), "
+            "SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))",
+            sql, flags=_re.IGNORECASE,
+        )
+
+    # Fix 15 — checkin_time / checkout_time are full datetime strings.
+    _TS = "'%Y-%m-%d %H:%M:%E*S'"
+    _col = r"((?:[A-Za-z_][A-Za-z0-9_]*\.)?check(?:in|out)_time)"
+    _tfmt = r"'(?:%H:%M:%S|%H:%M:%E\*S|%H:%M|%T|%I:%M(?::%S)?(?:\s*%p)?)'"
+    # PARSE_TIME(<time-fmt>, <col>) → TIME(SAFE.PARSE_TIMESTAMP(<full>, <col>))
+    sql = _re.sub(
+        r"(?:SAFE\.)?PARSE_TIME\(\s*" + _tfmt + r"\s*,\s*" + _col + r"\s*\)",
+        lambda m: f"TIME(SAFE.PARSE_TIMESTAMP({_TS}, {m.group(1)}))",
+        sql, flags=_re.IGNORECASE,
+    )
+    # PARSE_DATETIME / PARSE_TIMESTAMP(<time-fmt>, <col>) → SAFE.<same>(<full>, <col>)
+    for _fn in ("PARSE_DATETIME", "PARSE_TIMESTAMP"):
+        sql = _re.sub(
+            r"(?:SAFE\.)?" + _fn + r"\(\s*" + _tfmt + r"\s*,\s*" + _col + r"\s*\)",
+            lambda m, _fn=_fn: f"SAFE.{_fn}({_TS}, {m.group(1)})",
+            sql, flags=_re.IGNORECASE,
+        )
+    # Bare CAST(<col> AS TIME) → TIME(SAFE.PARSE_TIMESTAMP(<full>, <col>))
+    sql = _re.sub(
+        r"CAST\(\s*" + _col + r"\s+AS\s+TIME\s*\)",
+        lambda m: f"TIME(SAFE.PARSE_TIMESTAMP({_TS}, {m.group(1)}))",
+        sql, flags=_re.IGNORECASE,
+    )
+
+    return sql
+
+
 def _autofix_dashboard_sql(sql: str) -> str:
     """Patch the most common AI mistakes before sending SQL to BigQuery.
 
@@ -5743,34 +5836,13 @@ def _autofix_dashboard_sql(sql: str) -> str:
             r"\1 \2 \3", sql, flags=_re.IGNORECASE,
         )
 
-    # Fix 13 — Timesheet_Data's employee identity is EMPLOYEE_CODE ('E-1571'),
-    # NOT TICKET_USER_ID. TICKET_USER_ID is an unrelated internal numeric id
-    # that does NOT join to Employee_Data and is NOT the person who logged the
-    # hours — filtering/joining on it silently returns ZERO rows (this is why a
-    # personal "Project Hours" dashboard showed 0 everything after the warehouse
-    # was re-fed). EMPLOYEE_CODE is digit-normalised the same way ('E-1571' →
-    # '1571'), so any existing `norm(TICKET_USER_ID) = '<digits>'` filter keeps
-    # working once the column is swapped. Replace the column token everywhere it
-    # appears in dashboard/report SQL — there is no legitimate dashboard use of
-    # TICKET_USER_ID. (Runs AFTER Fix 6, which deliberately leaves TICKET_USER_ID
-    # joins as digit-matches rather than name-joins, so order is correct.)
-    sql = _re.sub(r"(?<![A-Za-z0-9_])TICKET_USER_ID(?![A-Za-z0-9_])", "EMPLOYEE_CODE", sql)
-
-    # Fix 14 — DATE_KEY is now a real DATE column on the live warehouse (it used
-    # to be an INT64 in YYYYMMDD form). The AI keeps emitting
-    # `SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))`, which returns NULL
-    # for every row when DATE_KEY is a DATE (CAST gives ISO "2026-01-15", which
-    # the '%Y%m%d' format rejects) → the date filter throws out every row. Wrap
-    # it in a type-agnostic COALESCE that parses BOTH shapes. The guard makes
-    # the rewrite idempotent: if the SQL already carries the COALESCE form (ours
-    # or one the AI produced correctly) we leave it untouched so we never nest.
-    if not _re.search(r"COALESCE\(\s*SAFE_CAST\(\s*CAST\(\s*DATE_KEY\s+AS\s+STRING", sql, _re.IGNORECASE):
-        sql = _re.sub(
-            r"(?:SAFE\.)?PARSE_DATE\(\s*'%Y%m%d'\s*,\s*CAST\(\s*DATE_KEY\s+AS\s+STRING\s*\)\s*\)",
-            "COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), "
-            "SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))",
-            sql, flags=_re.IGNORECASE,
-        )
+    # Fixes 13–15 are pure COLUMN-FORMAT corrections (no join/scope semantics),
+    # so they are factored into _autofix_column_formats and shared with the chat
+    # path (_execute_chat_sql) — that way the agent self-heals the same column
+    # hallucinations that dashboards/reports do, without inheriting the dashboard
+    # join rewrites (which would, e.g., turn a dept-scoped INNER JOIN into a LEFT
+    # JOIN and leak rows).
+    sql = _autofix_column_formats(sql)
 
     return sql
 
@@ -5792,7 +5864,8 @@ _REPAIR_PROMPT = """You are a BigQuery SQL repair assistant. The query below fai
 - NEVER wrap a FLOAT64/INT64 column in REPLACE() — REPLACE only accepts STRINGs. Coverage_Ratio, Hist_Win_Rate, Open_Deals, Win_Rate_by, and is_* columns are already numeric.
 - Only STRING-typed columns need REPLACE/SAFE_CAST: Open_Pipeline, Q1_ACH, col_2026_Target, allocation_percent, TICKET_HOURS, Q1_Visits.
 - Active employees: LOWER(Employee_Type) IN ('mto','permanent','probation').
-- Joins: LEFT JOIN with UPPER(TRIM(Resource_Name)) = UPPER(TRIM(employee_name)) for Employee↔Attendance.
+- Joins: digit-normalise the employee code on both sides; NEVER join on names (Resource_Name has a code prefix). norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0'). Employee↔Attendance: norm(Employee_Code)=norm(personal_no). Employee↔Allocation: norm(Employee_Code)=norm(employee_id). Employee↔Timesheet: norm(Employee_Code)=norm(EMPLOYEE_CODE).
+- checkin_time/checkout_time are FULL datetime strings (not HH:MM:SS): clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)).
 - LIMIT 50 on chart queries.
 - KPI must SELECT exactly one row with the metric aliased AS `value`.
 - KEEP the {{where}} placeholder in the same position the failed query had it.
@@ -5806,7 +5879,7 @@ detail behind that single category so they understand WHO/WHAT makes up the numb
 
 ═══ TMC SCHEMA (use these EXACT column names) ═══
 - `{BQ_FULL}.Employee_Data` — Employee_Code (STRING "E-2141"), Resource_Name, EmployeePosition, EmployeeEmail, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Employee_Status.
-- `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), personal_no (STRING "E-902" — the JOIN KEY to Employee_Code), employee_id (INT64 — NOT a join key), employee_name, checkin_time, checkout_time, attendance_status_text. There are NO is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend columns — derive every count from attendance_status_text (values: 'Present','Absent','On Leave','Holiday','Weekend','Missing Punch','Remote Work').
+- `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), personal_no (STRING "E-902" — the JOIN KEY to Employee_Code, digit-normalised), employee_id (STRING — NOT a join key), employee_name, checkin_time / checkout_time (STRING — FULL datetime '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'; clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time))), attendance_status_text (values: 'Present','Absent','On Leave','Holiday','Weekend','Missing Punch','Remote Work'), is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend/is_missing_punch (INT64 0/1 — both COUNTIF(status) and SUM(is_*) work).
 - `{BQ_FULL}.Allocation_Data` — project_id, employee_id (STRING "E-2141"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag (values 'Allocated'/'Bench'), Date.
 - `{BQ_FULL}.Timesheet_Data` — EMPLOYEE_CODE (STRING "E-1571" — the employee key; JOIN/filter on this, NOT TICKET_USER_ID), TICKET_USER_ID (unrelated internal id — never join/filter on it), TICKET_PROJECT_CODE, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (DATE).
 - `{BQ_FULL}.Sales_AM_Scorecard` — VP, AM, Role, City, col_2026_Target (STRING), Q1_ACH (STRING), Open_Pipeline (STRING), Hist_Win_Rate (FLOAT64 — NEVER REPLACE).
@@ -8140,9 +8213,13 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "Columns: Employee_Code (STRING, e.g. 'E-2141'), Resource_Name (STRING — full name), "
             "EmployeePosition (STRING), EmployeeEmail (STRING), EmployeeHierarchyNode (STRING = department), "
             "EmployeeLocation (STRING — city), Employee_Status (STRING), Employee_Type (STRING — Permanent / MTO / Probation / Contractual Fixed term / Contractor / Freelancer / Internship), "
-            "Joining_Date, Gender.\n"
-            "JOIN with Attendance_Data on UPPER(TRIM(Resource_Name)) = UPPER(TRIM(employee_name)) — "
-            "Employee_Code does NOT match employee_id.\n"
+            "Joining_Date, Gender. Active employees = LOWER(Employee_Type) IN ('mto','permanent','probation').\n"
+            "JOINS — always digit-normalise the employee code on both sides; NEVER join on names "
+            "(Resource_Name carries a code prefix like 'E-1571 Mahad Laeeque' so name joins match almost nothing). "
+            "Let norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0'):\n"
+            "  • Attendance_Data: ON norm(Employee_Code)=norm(personal_no)   (NOT employee_id, NOT names)\n"
+            "  • Allocation_Data: ON norm(Employee_Code)=norm(employee_id)\n"
+            "  • Timesheet_Data:  ON norm(Employee_Code)=norm(EMPLOYEE_CODE)  (NOT TICKET_USER_ID)\n"
             "Department grouping: COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') AS department."
         ),
     },
@@ -8150,13 +8227,17 @@ _DEFAULT_SCHEMA_SETTINGS = [
         "table_name": "Attendance_Data",
         "sort_order": 20,
         "description": (
-            "Daily attendance per employee (~208k rows, date range Dec 2025 → Apr 2026).\n"
-            "Columns: attendance_date (DATE), employee_id (STRING), employee_name (STRING), employee_email, "
-            "checkin_time / checkout_time (STRING HH:MM:SS), attendance_status_text (STRING — values: "
+            "Daily attendance per employee (~200k+ rows, refreshed live).\n"
+            "Columns: attendance_date (DATE), personal_no (STRING 'E-902' — THIS is the JOIN KEY to Employee_Code, digit-normalised), "
+            "employee_id (INT64 — an unrelated sequence, NOT a join key), employee_name (STRING), employee_email, "
+            "checkin_time / checkout_time (STRING — FULL datetime '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'; "
+            "clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)); NULL on non-working days), "
+            "attendance_status_text (STRING — values: "
             "Present, Weekend, Absent, Missing Punch, Holiday, On Leave, Remote Work, and their 'Submitted …' variants — there is NO 'Late' status), "
             "is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1 INT), leave_type_name.\n"
-            "Attendance % = ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1).\n"
-            "JOIN with Employee_Data on UPPER(TRIM(employee_name)) = UPPER(TRIM(Resource_Name))."
+            "Attendance % = ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1). Avg check-in/out = average seconds-since-midnight of the parsed TIME, then FORMAT_TIME; restrict to LOWER(attendance_status_text) IN ('present','remote work').\n"
+            "JOIN with Employee_Data on the digit-normalised code (NOT names — Resource_Name carries a code prefix): "
+            "LTRIM(REGEXP_REPLACE(CAST(personal_no AS STRING),r'[^0-9]',''),'0') = LTRIM(REGEXP_REPLACE(CAST(Employee_Code AS STRING),r'[^0-9]',''),'0')."
         ),
     },
     {
@@ -8164,11 +8245,13 @@ _DEFAULT_SCHEMA_SETTINGS = [
         "sort_order": 30,
         "description": (
             "Weekly project allocation (~385k rows).\n"
-            "Columns: project_id (STRING), employee_id (STRING), emp_name (STRING — JOIN key to Employee_Data.Resource_Name), "
+            "Columns: project_id (STRING — JOIN to Project_Master.Project_Code), employee_id (STRING 'E-2141' — "
+            "the employee key; JOIN to Employee_Data digit-normalised), emp_name (STRING), "
             "allocation_percent (INT64 or STRING — use SAFE_CAST AS FLOAT64), emp_competency (STRING), "
             "Flag (STRING — values: 'Allocated' / 'Bench' — NOT 'Actual' / 'Forecast'), Forecast_Flag, "
             "week_id, year_id, Week, Date (DATE), Year, Month (STRING), Data_Type.\n"
-            "Bench classification: MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per employee = 0 or NULL."
+            "JOIN to Employee_Data on norm(employee_id)=norm(Employee_Code), norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0') (NOT on emp_name — names don't match).\n"
+            "Bench classification: a person is Bench if their real-project rows are all Flag='Bench' — i.e. they have NO row with Flag='Allocated' in the window. Do NOT use MAX(allocation_percent) alone: a bench person can still show 100% on a Bench-flagged row. Allocation feed includes forward-planned future weeks, so for 'current' state cap at Date <= CURRENT_DATE()."
         ),
     },
     {
@@ -8233,27 +8316,50 @@ _DEFAULT_SCHEMA_SETTINGS = [
 ]
 
 
+# Signatures that only appear in OLD, broken default schema notes. If a stored
+# row still contains any of these, it predates the join/format fixes and is
+# actively steering the model wrong (name joins that match ~0 rows, time columns
+# mislabelled HH:MM:SS, TICKET_USER_ID as the timesheet key). We overwrite those
+# rows with the current default on startup. Admin-edited rows that don't carry a
+# broken signature are left untouched.
+_STALE_SCHEMA_NOTE_MARKERS = (
+    "UPPER(TRIM(Resource_Name)) = UPPER(TRIM(employee_name))",  # Employee/Attendance name join
+    "JOIN key to Employee_Data.Resource_Name",                  # Allocation name join
+    "STRING HH:MM:SS",                                          # checkin/out mislabelled
+    "TICKET_USER_ID (INT64 — employee)",                        # timesheet wrong key
+    "joining to Employee_Data is unreliable",                   # old timesheet note
+    "date range Dec 2025 → Apr 2026",                           # stale attendance range
+    "MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per employee = 0 or NULL",  # bad bench rule
+)
+
+
 def _ensure_default_schema_settings():
     """Seed the schema_settings table with TMC defaults the first time the
     table is empty (or any specific table is missing). Idempotent — safe to
-    call on every startup. Existing user-edited rows are never overwritten."""
+    call on every startup.
+
+    Also UPGRADES rows whose stored description still contains a known-broken
+    signature (see _STALE_SCHEMA_NOTE_MARKERS) to the current default — those
+    notes shipped wrong join keys / column formats that silently return zero
+    rows. Genuinely admin-edited rows (no broken signature) are never touched."""
     try:
         db = get_db(); cur = db.cursor()
-        from database import USE_POSTGRES
         for s in _DEFAULT_SCHEMA_SETTINGS:
-            cur.execute("SELECT id FROM schema_settings WHERE table_name = ?", (s["table_name"],))
-            if cur.fetchone():
+            cur.execute("SELECT description FROM schema_settings WHERE table_name = ?", (s["table_name"],))
+            row = cur.fetchone()
+            if row:
+                existing = (row[0] if not isinstance(row, dict) else row.get("description")) or ""
+                if any(marker in existing for marker in _STALE_SCHEMA_NOTE_MARKERS):
+                    cur.execute(
+                        "UPDATE schema_settings SET description = ?, sort_order = ? WHERE table_name = ?",
+                        (s["description"], s["sort_order"], s["table_name"]),
+                    )
+                    print(f"[schema_settings] upgraded stale default for {s['table_name']}")
                 continue
-            if USE_POSTGRES:
-                cur.execute(
-                    "INSERT INTO schema_settings (table_name, description, sort_order) VALUES (?, ?, ?)",
-                    (s["table_name"], s["description"], s["sort_order"]),
-                )
-            else:
-                cur.execute(
-                    "INSERT INTO schema_settings (table_name, description, sort_order) VALUES (?, ?, ?)",
-                    (s["table_name"], s["description"], s["sort_order"]),
-                )
+            cur.execute(
+                "INSERT INTO schema_settings (table_name, description, sort_order) VALUES (?, ?, ?)",
+                (s["table_name"], s["description"], s["sort_order"]),
+            )
         db.commit(); db.close()
     except Exception as e:
         print(f"[schema_settings] default-seed error: {e}")
