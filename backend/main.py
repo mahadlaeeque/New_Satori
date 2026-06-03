@@ -4940,6 +4940,23 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
 - KPI colors: primary, accent, info, danger, success, purple, teal
 - Maximum 6 KPIs, maximum 4 charts, maximum 5 filters per dashboard.
 
+═══ FILTERS (read carefully — bad filters render as empty dropdowns) ═══
+- A filter is a DROPDOWN of distinct values. Use ONLY these low-cardinality
+  categorical `field` values (exact strings): "department", "location",
+  "position", "employee_type", "gender", "employee_name", "attendance_status_text",
+  "project_label", "ticket_status", "competency", "AM", "VP", "City", "Tier".
+- DO NOT invent other filter fields, and DO NOT create a "Date Range" / date /
+  month / year filter — the timeframe is already baked into each widget's WHERE.
+  Date filters cannot be a value dropdown and will render blank.
+- A filter only works if its column is present in EVERY KPI/chart query, because
+  the chosen value is injected at each `{where}`. So if you add an
+  "employee_name" or "department" filter, make sure every widget's SQL joins/
+  selects from a table that has that column (e.g. join Employee_Data, or query
+  Attendance_Data which has employee_name). If a column isn't available in all
+  widgets, don't offer it as a filter.
+- Prefer 0–2 filters. When unsure, omit filters entirely rather than adding one
+  that won't populate.
+
 ═══ SQL RULES (CRITICAL — SQL is executed verbatim against BigQuery) ═══
 - Fully qualify every table: `ai-vertex-mahad.Satori_Project.<table>`.
 - Use ONLY the columns documented above. Never invent column names.
@@ -6297,27 +6314,58 @@ def _repair_widget_sql(failed_sql: str, error_msg: str, widget_meta: dict) -> st
         return ""
 
 
-# Map of dashboard filter "alias" names → real column expressions. The AI is
-# instructed to use these alias names in the `filters` config; runtime maps
-# them to the actual columns so `{where}` substitution produces valid SQL.
-# Order matters: most-specific aliases first so partial matches don't shadow.
-_FILTER_FIELD_MAP = {
-    # workforce — labels users see vs columns in BQ
-    "department":         "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified')",
-    "EmployeeHierarchyNode": "EmployeeHierarchyNode",
-    "employee_type":      "LOWER(Employee_Type)",
-    "Employee_Type":      "LOWER(Employee_Type)",
-    "location":           "EmployeeLocation",
-    "EmployeeLocation":  "EmployeeLocation",
-    "position":           "EmployeePosition",
-    "EmployeePosition":  "EmployeePosition",
+# Unified dashboard-filter registry. Each entry (keyed by the lowercased filter
+# `field` alias the AI emits) carries:
+#   table      — table to probe DISTINCT values from (for the dropdown options)
+#   distinct   — the SELECT expression for those options
+#   where      — the column expression used in `{where}` substitution
+# This is the single source of truth for BOTH the dropdown-options probe and the
+# WHERE injection, so they can never drift (the old code mapped the WHERE side
+# but probed options from the wrong table → empty dropdowns).
+_FILTER_REGISTRY = {
+    "department":             ("Employee_Data", "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified')", "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified')"),
+    "employeehierarchynode":  ("Employee_Data", "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified')", "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified')"),
+    "employee_type":          ("Employee_Data", "Employee_Type", "LOWER(Employee_Type)"),
+    "location":               ("Employee_Data", "EmployeeLocation", "EmployeeLocation"),
+    "employeelocation":       ("Employee_Data", "EmployeeLocation", "EmployeeLocation"),
+    "position":               ("Employee_Data", "EmployeePosition", "EmployeePosition"),
+    "employeeposition":       ("Employee_Data", "EmployeePosition", "EmployeePosition"),
+    "gender":                 ("Employee_Data", "Gender", "Gender"),
+    # employee identity — the dropdown lists names; WHERE matches the same col.
+    "employee_name":          ("Attendance_Data", "employee_name", "employee_name"),
+    "resource_name":          ("Employee_Data", "Resource_Name", "Resource_Name"),
+    "employee":               ("Attendance_Data", "employee_name", "employee_name"),
+    # attendance
+    "attendance_status_text": ("Attendance_Data", "attendance_status_text", "LOWER(attendance_status_text)"),
+    "attendance_status":      ("Attendance_Data", "attendance_status_text", "LOWER(attendance_status_text)"),
+    "status":                 ("Attendance_Data", "attendance_status_text", "LOWER(attendance_status_text)"),
+    # timesheet
+    "project_label":          ("Timesheet_Data", "TICKET_PROJECT_LABEL", "TICKET_PROJECT_LABEL"),
+    "ticket_project_label":   ("Timesheet_Data", "TICKET_PROJECT_LABEL", "TICKET_PROJECT_LABEL"),
+    "project":                ("Timesheet_Data", "TICKET_PROJECT_LABEL", "TICKET_PROJECT_LABEL"),
+    "ticket_status":          ("Timesheet_Data", "TICKET_STATUS", "TICKET_STATUS"),
+    # allocation
+    "competency":             ("Allocation_Data", "emp_competency", "emp_competency"),
+    "emp_competency":         ("Allocation_Data", "emp_competency", "emp_competency"),
     # sales
-    "AM":  "AM",  "am":  "AM",
-    "VP":  "VP",  "vp":  "VP",
-    "City": "City", "city": "City",
-    "Tier": "Tier", "tier": "Tier",
-    "attendance_status_text": "LOWER(attendance_status_text)",
+    "am": ("Sales_AM_Scorecard", "AM", "AM"),
+    "vp": ("Sales_AM_Scorecard", "VP", "VP"),
+    "city": ("Sales_AM_Scorecard", "City", "City"),
+    "tier": ("Sales_Accounts", "Tier", "Tier"),
 }
+# Tables to try (in order) when a filter field isn't in the registry — first one
+# whose probe succeeds wins, so a model-invented field still populates if the
+# bare column name exists somewhere sensible.
+_FILTER_FALLBACK_TABLES = ("Employee_Data", "Attendance_Data", "Timesheet_Data")
+# Date-ish fields can't be a value dropdown (high cardinality / range semantics).
+# We skip option-probing them; the prompt also tells the AI not to add them.
+import re as _re_filt
+def _is_date_filter_field(field: str) -> bool:
+    return bool(_re_filt.search(r"date|range|month|year|period|day", (field or ""), _re_filt.IGNORECASE))
+
+# Backward-compatible WHERE map derived from the registry (case-insensitive
+# lookup happens in _substitute_where).
+_FILTER_FIELD_MAP = {k: v[2] for k, v in _FILTER_REGISTRY.items()}
 
 
 def _substitute_where(sql: str, user_filters: dict) -> str:
@@ -6338,7 +6386,7 @@ def _substitute_where(sql: str, user_filters: dict) -> str:
         if v is None or str(v).strip() == "":
             continue
         safe_v = str(v).replace("'", "\\'")
-        col_expr = _FILTER_FIELD_MAP.get(f, f)
+        col_expr = _FILTER_FIELD_MAP.get((f or "").lower(), _FILTER_FIELD_MAP.get(f, f))
         # If the column expression already lowercases the column, lowercase
         # the literal too so the comparison matches.
         if col_expr.startswith("LOWER("):
@@ -6487,60 +6535,55 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
 
     # ── Populate filter dropdown options ──
     # The frontend reads data.filterOptions[field] to render dropdown choices.
-    # For each filter in the config we probe distinct values from the most
-    # likely source table. Without this the filters render as empty dropdowns.
+    # We resolve each filter to (table, distinct_expr) via _FILTER_REGISTRY and
+    # probe distinct values; if the field isn't registered we try the bare
+    # column across a few candidate tables. Date-range-style fields are skipped
+    # (can't be a value dropdown). A probe that returns no usable values yields
+    # an empty list, and the frontend hides empty filters so users never see a
+    # blank dropdown.
     import re as _re
+
+    def _probe_distinct(table: str, expr: str):
+        sql = (f"SELECT DISTINCT {expr} AS v FROM {sql_table(table)} "
+               f"WHERE {expr} IS NOT NULL AND TRIM(CAST({expr} AS STRING)) != '' "
+               f"ORDER BY v LIMIT 500")
+        sql = normalize_bq_project(sql)
+        res = bq_run_query(sql, max_rows=500)
+        if "error" in res:
+            return None  # signal failure so callers can try the next candidate
+        return [row.get("v") for row in (res.get("rows") or []) if row.get("v") not in (None, "")]
+
     filter_options = {}
-    field_to_probe = {
-        "department":         "SELECT DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeeHierarchyNode IS NOT NULL ORDER BY v",
-        "EmployeeHierarchyNode": "SELECT DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeeHierarchyNode IS NOT NULL ORDER BY v",
-        "employee_type":      "SELECT DISTINCT Employee_Type AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Type IS NOT NULL ORDER BY v",
-        "Employee_Type":      "SELECT DISTINCT Employee_Type AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE Employee_Type IS NOT NULL ORDER BY v",
-        "location":           "SELECT DISTINCT EmployeeLocation AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeeLocation IS NOT NULL ORDER BY v",
-        "EmployeeLocation":  "SELECT DISTINCT EmployeeLocation AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeeLocation IS NOT NULL ORDER BY v",
-        "position":           "SELECT DISTINCT EmployeePosition AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeePosition IS NOT NULL ORDER BY v",
-        "EmployeePosition":  "SELECT DISTINCT EmployeePosition AS v FROM `ai-vertex-mahad.Satori_Project.Employee_Data` WHERE EmployeePosition IS NOT NULL ORDER BY v",
-        "AM":                 "SELECT DISTINCT AM AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE AM IS NOT NULL ORDER BY v",
-        "am":                 "SELECT DISTINCT AM AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE AM IS NOT NULL ORDER BY v",
-        "VP":                 "SELECT DISTINCT VP AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE VP IS NOT NULL ORDER BY v",
-        "vp":                 "SELECT DISTINCT VP AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE VP IS NOT NULL ORDER BY v",
-        "City":               "SELECT DISTINCT City AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE City IS NOT NULL ORDER BY v",
-        "city":               "SELECT DISTINCT City AS v FROM `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard` WHERE City IS NOT NULL ORDER BY v",
-        "Tier":               "SELECT DISTINCT Tier AS v FROM `ai-vertex-mahad.Satori_Project.Sales_Accounts` WHERE Tier IS NOT NULL ORDER BY v",
-        "tier":               "SELECT DISTINCT Tier AS v FROM `ai-vertex-mahad.Satori_Project.Sales_Accounts` WHERE Tier IS NOT NULL ORDER BY v",
-        "attendance_status_text":
-                              "SELECT DISTINCT attendance_status_text AS v FROM `ai-vertex-mahad.Satori_Project.Attendance_Data` WHERE attendance_status_text IS NOT NULL ORDER BY v",
-    }
     for f in (config.get("filters") or [])[:8]:
         field = f.get("field") if isinstance(f, dict) else None
         if not field:
             continue
-        probe_sql = field_to_probe.get(field)
-        if not probe_sql:
+        if _is_date_filter_field(field):
+            filter_options[field] = []   # date filters aren't value dropdowns
+            continue
+        vals = None
+        reg = _FILTER_REGISTRY.get(field.lower())
+        if reg:
+            table, distinct_expr, _ = reg
+            try:
+                vals = _probe_distinct(table, distinct_expr)
+            except Exception as e:
+                print(f"[dashboard] filter probe {field} ({table}) exception: {e}")
+        if vals is None:
+            # Unregistered field — try the bare column across candidate tables.
             safe_col = _re.sub(r"[^A-Za-z0-9_]", "", field)
             if safe_col:
-                probe_sql = (
-                    "SELECT DISTINCT " + safe_col + " AS v "
-                    "FROM `ai-vertex-mahad.Satori_Project.Employee_Data` "
-                    "WHERE " + safe_col + " IS NOT NULL ORDER BY v LIMIT 100"
-                )
-        if probe_sql:
-            # Filter probes also need the project autofix so dropdown options
-            # populate on the new project after migration.
-            probe_sql = normalize_bq_project(probe_sql)
-        if not probe_sql:
-            continue
-        try:
-            res = bq_run_query(probe_sql, max_rows=100)
-            if "error" not in res:
-                vals = [row.get("v") for row in (res.get("rows") or []) if row.get("v") not in (None, "")]
-                filter_options[field] = vals
-            else:
-                print(f"[dashboard] filter probe {field} error: {res['error']}")
-                filter_options[field] = []
-        except Exception as e:
-            print(f"[dashboard] filter probe {field} exception: {e}")
-            filter_options[field] = []
+                for table in _FILTER_FALLBACK_TABLES:
+                    try:
+                        got = _probe_distinct(table, safe_col)
+                    except Exception:
+                        got = None
+                    if got is not None:
+                        vals = got
+                        break
+        filter_options[field] = vals or []
+        if not filter_options[field]:
+            print(f"[dashboard] filter '{field}' produced no options (skipped/failed)")
 
     return {"kpis": kpis_out, "charts": charts_out, "filterOptions": filter_options}
 

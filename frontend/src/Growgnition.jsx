@@ -5897,20 +5897,29 @@ const DashboardRenderer = ({ spec, onBack }) => {
         </div>
       </div>
 
-      {/* Filters */}
-      {spec?.filters?.length > 0 && (
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
-          {spec.filters.map((f) => (
-            <FilterDropdown
-              key={f.field}
-              label={f.label || f.field}
-              options={(data.filterOptions && data.filterOptions[f.field]) || []}
-              value={filterValues[f.field] || null}
-              onChange={(v) => handleFilterChange(f.field, v)}
-            />
-          ))}
-        </div>
-      )}
+      {/* Filters — only render a filter once its options have loaded. An empty
+          options list means the field couldn't be resolved to real values
+          (e.g. a date-range field, or a column that doesn't exist), so we hide
+          it rather than show a useless blank dropdown. */}
+      {(() => {
+        const usable = (spec?.filters || []).filter(
+          (f) => ((data.filterOptions && data.filterOptions[f.field]) || []).length > 0
+        );
+        if (usable.length === 0) return null;
+        return (
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
+            {usable.map((f) => (
+              <FilterDropdown
+                key={f.field}
+                label={f.label || f.field}
+                options={data.filterOptions[f.field]}
+                value={filterValues[f.field] || null}
+                onChange={(v) => handleFilterChange(f.field, v)}
+              />
+            ))}
+          </div>
+        );
+      })()}
 
       {loading && (
         <div style={{ textAlign: "center", padding: 40, color: COLORS.textSecondary }}>
