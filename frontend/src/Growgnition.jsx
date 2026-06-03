@@ -6879,6 +6879,41 @@ const DashboardsPage = () => {
     return () => document.removeEventListener("mousedown", h);
   }, []);
 
+  // ── Full-screen + download (PDF) for the dashboard viewer ──
+  const dashViewRef = useRef(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, []);
+  const toggleFullscreen = useCallback(() => {
+    const el = dashViewRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen?.();
+    } else {
+      try { el.requestFullscreen?.(); } catch { /* fullscreen blocked — no-op */ }
+    }
+  }, []);
+  // Download = isolate the dashboard card and open the browser's print dialog
+  // (user picks "Save as PDF"). No extra deps; preserves theme + chart SVGs.
+  const downloadDashboard = useCallback(() => {
+    const el = dashViewRef.current;
+    if (!el) return;
+    setMenuOpen(false);
+    if (document.fullscreenElement) document.exitFullscreen?.();
+    el.setAttribute("data-print-root", "true");
+    document.body.classList.add("satori-printing");
+    const cleanup = () => {
+      document.body.classList.remove("satori-printing");
+      el.removeAttribute("data-print-root");
+      window.removeEventListener("afterprint", cleanup);
+    };
+    window.addEventListener("afterprint", cleanup);
+    setTimeout(() => { try { window.print(); } catch { cleanup(); } }, 80);
+  }, []);
+
   const fetchDashboards = useCallback(async () => {
     setLoading(true);
     const token = localStorage.getItem("token");
@@ -7211,6 +7246,20 @@ const DashboardsPage = () => {
                 <Sparkles size={14} /> Edit with AI
               </button>
             )}
+            <button onClick={downloadDashboard} title="Download as PDF" style={{
+              background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
+              padding: "8px 10px", cursor: "pointer", color: COLORS.textSecondary,
+              display: "flex", alignItems: "center"
+            }}>
+              <Download size={15} />
+            </button>
+            <button onClick={toggleFullscreen} title={isFullscreen ? "Exit full screen" : "View full screen"} style={{
+              background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
+              padding: "8px 10px", cursor: "pointer", color: COLORS.textSecondary,
+              display: "flex", alignItems: "center"
+            }}>
+              {isFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+            </button>
             <div ref={menuRef} style={{ position: "relative" }}>
               <button onClick={() => setMenuOpen((v) => !v)} title="More" style={{
                 background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
@@ -7239,7 +7288,7 @@ const DashboardsPage = () => {
           </div>
         </div>
         <div style={{ flex: 1, display: "flex", gap: 16, minHeight: 0 }}>
-          <div style={{
+          <div ref={dashViewRef} style={{
             flex: chatOpen ? "1 1 60%" : "1 1 100%",
             background: COLORS.surface, borderRadius: 16, border: `1px solid ${COLORS.border}`,
             padding: 20, overflowY: "auto", minWidth: 0, transition: "flex 0.2s ease"
