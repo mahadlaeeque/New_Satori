@@ -6730,6 +6730,9 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
     emp_id_ts    = _norm_emp_id("TICKET_USER_ID")
     return f"""
         WITH active_emp AS (
+          -- One row per employee. Employee_Data can contain duplicate rows for
+          -- the same code (the feed has a few), so dedup on the normalised id to
+          -- avoid duplicate cards.
           SELECT {emp_id_emp} AS emp_id,
                  Employee_Code AS code,
                  Resource_Name AS name,
@@ -6739,6 +6742,7 @@ def _avail_employees_sql(limit: int = 500, dept_scope: list | None = None) -> st
           FROM {_bq_avail('Employee_Data')}
           WHERE LOWER(COALESCE(employee_status, '')) = 'active'
                 {_dept_scope_clause(dept_scope)}
+          QUALIFY ROW_NUMBER() OVER (PARTITION BY {emp_id_emp} ORDER BY Employee_Code) = 1
         ),
         alloc AS (
           -- Actuals only (Forecast_Flag=0), last 90 days anchored on the latest
