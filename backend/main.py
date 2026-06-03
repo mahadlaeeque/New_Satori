@@ -4852,8 +4852,14 @@ TICKETING (Timesheet_Data) — it carries the full ticket dataset:
 - FLAG = 'Assigned' / 'Un-Assigned' (Timesheet's own flag — NOT Allocation's
   Allocated/Bench). When asked about assigned vs unassigned tickets, run them as
   SEPARATE segregated queries (filter FLAG). TICKET_TYPE = 'Task' / 'Ticket'
-  (NULL on Un-Assigned). Also: TICKET_STATUS, TICKET_CLOSED_STATUS,
-  TICKET_PRIORITY, TICKET_PLANNED_HOURS, TICKET_HOURS (FLOAT64).
+  (NULL on Un-Assigned).
+- OPEN vs CLOSED → TICKET_CLOSED_STATUS ('1' = closed, '0' = open, NULL = n/a).
+  Count DISTINCT tickets, decided per ticket: closed_tickets =
+  COUNT(DISTINCT IF(TICKET_CLOSED_STATUS='1', TICKET_NUMBER, NULL)); open =
+  tickets with no closed='1' row. "How many open/closed" = distinct TICKET_NUMBER,
+  not rows.
+- TICKET_STATUS = 'Approved' / 'Submitted' is the APPROVAL state (not open/closed).
+- Also: TICKET_PRIORITY, TICKET_PLANNED_HOURS, TICKET_HOURS (FLOAT64).
 
 WHEN TO ASK vs. WHEN TO ACT:
 - ASK only when the answer materially depends on a choice you can't infer:
@@ -8559,11 +8565,15 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "TICKET_TYPE (STRING — 'Task' / 'Ticket'; NULL on Un-Assigned rows), "
             "TICKET_ID (STRING), TICKET_NUMBER (STRING), TICKET_SUBJECT, TICKET_DESCRIPTION, TICKET_REASON, "
             "TICKET_PROJECT_CODE (STRING — JOIN to Project_Master.Project_Code for the project name), TICKET_PROJECT_LABEL (STRING), "
-            "TICKET_STATUS (STRING), TICKET_CLOSED_STATUS (STRING), TICKET_CLOSED_DATE, TICKET_PRIORITY (STRING), "
+            "TICKET_STATUS (STRING — APPROVAL state: 'Approved' / 'Submitted'; this is NOT open/closed), "
+            "TICKET_CLOSED_STATUS (STRING — OPEN vs CLOSED: '1' = CLOSED, '0' = OPEN/not-closed, NULL = n/a), TICKET_CLOSED_DATE, TICKET_PRIORITY (STRING), "
             "TICKET_PLANNED_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_WP_ID, TICKET_WEEK_NO, LOG_SCORE, LOG_DATE, "
             "TICKET_HOURS (FLOAT64 — sum directly), DATE_KEY (DATE — filter via "
             "COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))).\n"
-            "TICKETING use cases: counts/hours by TICKET_TYPE, by TICKET_STATUS / TICKET_CLOSED_STATUS, by TICKET_PRIORITY, "
+            "OPEN vs CLOSED tickets: closed = TICKET_CLOSED_STATUS='1', open = '0'. Because a ticket spans many log rows, count DISTINCT tickets and decide per ticket — e.g. "
+            "closed_tickets = COUNT(DISTINCT IF(TICKET_CLOSED_STATUS='1', TICKET_NUMBER, NULL)); a ticket is Open if it has NO closed='1' row "
+            "(per-ticket: GROUP BY TICKET_NUMBER, closed = MAX(SAFE_CAST(TICKET_CLOSED_STATUS AS INT64))=1). 'How many open/closed' = COUNT(DISTINCT TICKET_NUMBER), not row counts.\n"
+            "TICKETING use cases: open vs closed (TICKET_CLOSED_STATUS), approved vs submitted (TICKET_STATUS), counts/hours by TICKET_TYPE / TICKET_PRIORITY, "
             "and ALWAYS segregate Assigned vs Un-Assigned via FLAG when asked about assigned/unassigned tickets.\n"
             "To attribute hours/tickets to a person/department, JOIN Employee_Data on "
             "norm(EMPLOYEE_CODE)=norm(Employee_Code) where norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0')."
@@ -8632,6 +8642,7 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "there is NO 'Late' value",                                 # pre permitted-location note
     "it matches no employee",                                   # pre TICKET_TYPE/FLAG timesheet note
     "Do NOT use MAX(allocation_percent) alone",                 # pre per-project allocation note
+    "by TICKET_STATUS / TICKET_CLOSED_STATUS, by TICKET_PRIORITY",  # pre open/closed ticket note
 )
 
 
