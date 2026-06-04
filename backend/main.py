@@ -5259,10 +5259,17 @@ def voice_session(user: dict = Depends(get_current_user)):
     cache = getattr(voice_session, "_model_cache", {"model": None})
     model = os.environ.get("GEMINI_MODEL_VOICE", "").strip() or cache.get("model")
     if not model:
+        # Preferred Live (BidiGenerateContent) models, newest-known first. The
+        # old gemini-2.0-flash-live-001 was RETIRED (WS 1008 "not found"); its
+        # half-cascade successor is gemini-3.1-flash-live-preview (same client
+        # contract: audio in, audio out + TTS voice). Native-audio models are a
+        # fallback. The probe below also accepts ANY bidiGenerateContent model
+        # the API lists, so this self-heals as model names change again.
         preferred = [
-            "models/gemini-2.0-flash-live-001",
-            "models/gemini-2.5-flash-live-preview",
-            "models/gemini-2.5-flash-preview-native-audio-dialog",
+            "models/gemini-3.1-flash-live-preview",
+            "models/gemini-2.5-flash-native-audio-latest",
+            "models/gemini-2.5-flash-native-audio-preview-12-2025",
+            "models/gemini-2.5-flash-native-audio-preview-09-2025",
         ]
         try:
             import urllib.request
@@ -5285,7 +5292,9 @@ def voice_session(user: dict = Depends(get_current_user)):
         except Exception as e:
             print(f"[voice/session] model probe failed: {e}")
         if not model:
-            model = "models/gemini-2.0-flash-live-001"
+            # Probe failed/empty — use the current half-cascade Live model, NOT
+            # the retired gemini-2.0-flash-live-001.
+            model = "models/gemini-3.1-flash-live-preview"
         cache["model"] = model
         voice_session._model_cache = cache  # type: ignore[attr-defined]
         print(f"[voice/session] using model {model}")
