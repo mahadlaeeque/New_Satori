@@ -7283,6 +7283,29 @@ def availability_departments(user: dict = Depends(get_current_user)):
     return {"departments": [row.get("department") for row in (r.get("rows") or []) if row.get("department")]}
 
 
+def _avail_locations_sql(dept_scope: list | None = None) -> str:
+    """Distinct employee-location list for the Create-Task modal location filter."""
+    return f"""
+        SELECT DISTINCT COALESCE(NULLIF(TRIM(EmployeeLocation), ''), 'Unspecified') AS location
+        FROM {_bq_avail('Employee_Data')}
+        WHERE LOWER(COALESCE(employee_status, '')) = 'active'
+              {_dept_scope_clause(dept_scope)}
+        ORDER BY location
+    """
+
+
+@app.get("/api/availability/locations")
+def availability_locations(user: dict = Depends(get_current_user)):
+    """Distinct employee locations (scope-aware) for the Find-Best-Fit location filter."""
+    dept_scope = _get_user_dept_scope(int(user["sub"]))
+    sql = normalize_bq_project(_autofix_dashboard_sql(_avail_locations_sql(dept_scope=dept_scope)))
+    r = bq_run_query(sql, max_rows=500)
+    if "error" in r:
+        print(f"[/api/availability/locations] BQ error: {r['error']}")
+        raise HTTPException(status_code=500, detail=r["error"])
+    return {"locations": [row.get("location") for row in (r.get("rows") or []) if row.get("location")]}
+
+
 @app.get("/api/availability/employees")
 def availability_employees(
     status: Optional[str] = None,
@@ -7702,7 +7725,7 @@ _FIND_BEST_FIT_PROMPT = """You are Satori AI, a senior staffing analyst at TMC. 
 
 You will receive:
   - The project: name, target department, description, and skills/keywords needed.
-  - A pre-filtered candidate pool of available employees in the chosen department (or adjacent departments if the department was 'Unspecified'). Each candidate row tells you their name, position, latest competency, current MAX allocation % over the last 90 days, project count, timesheet hours in the last 90 days, location, and `assigned_skills` (skills the practice head explicitly tagged on this person).
+  - A pre-filtered candidate pool of available employees the requester may see — by default ACROSS ALL departments (a department-scoped practice head is automatically limited to their own department; admins see everyone). The project's `department` may be "(any …)" — that's fine, rank purely on fit. If a `location` was specified, the pool is already restricted to that location. Each candidate row tells you their name, position, latest competency, current MAX allocation % over the last 90 days, project count, timesheet hours in the last 90 days, location, and `assigned_skills` (skills the practice head explicitly tagged on this person).
 
 Rank the candidates against the project using these signals, weighted in this order:
 
@@ -7752,35 +7775,40 @@ def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user
     }
     """
     name = (body.get("name") or "").strip()
-    department = (body.get("department") or "").strip()
+    department = (body.get("department") or "").strip()  # OPTIONAL — blank = search all departments the user may see
+    location = (body.get("location") or "").strip()      # OPTIONAL — restrict candidates to this office/location
     description = (body.get("description") or "").strip()
     skills_keywords = (body.get("skills_keywords") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Project name is required.")
-    if not department:
-        raise HTTPException(status_code=400, detail="Department is required.")
     max_to_rank = max(5, min(int(body.get("max_candidates_to_rank") or 25), 50))
 
-    # Honour department scope: a practice-head user can only Find Best Fit
-    # for projects in their own practice. Block at the door rather than
-    # silently returning an empty pool.
+    # Scope: a department-scoped practice head is AUTOMATICALLY restricted to
+    # their own department(s) by the candidate-pool SQL below (dept_scope) — so
+    # Qlik's head only ever sees Qlik people, no department picker needed. If a
+    # department WAS explicitly passed, it must still fall within their scope.
     dept_scope = _get_user_dept_scope(int(user["sub"]))
-    if dept_scope and department not in dept_scope:
+    if department and dept_scope and department not in dept_scope:
         raise HTTPException(
             status_code=403,
             detail=f"You're scoped to {', '.join(dept_scope)} — can't create tasks for {department!r}.",
         )
 
-    # 1) Pull the candidate pool — active employees in this department, sorted
-    #    by availability (Bench first) then by light skill-match heuristic.
+    # 1) Pull the candidate pool — active employees the user may see (dept_scope
+    #    applied in SQL: scoped users get only their department(s); admins get
+    #    everyone, across ALL departments), sorted by availability + skill match.
     sql = normalize_bq_project(_autofix_dashboard_sql(_avail_employees_sql(limit=2000, dept_scope=dept_scope)))
     r = bq_run_query(sql, max_rows=2000)
     if "error" in r:
         raise HTTPException(status_code=500, detail=r["error"])
     all_rows = r.get("rows") or []
-    pool = [row for row in all_rows if (row.get("department") or "").lower() == department.lower()]
+    pool = all_rows
+    if department:  # optional explicit department filter
+        pool = [row for row in pool if (row.get("department") or "").lower() == department.lower()]
+    if location:    # optional location filter
+        pool = [row for row in pool if (row.get("location") or "").strip().lower() == location.lower()]
     if not pool:
-        # Department had no active employees — surface a friendly empty result.
+        # No matching active employees — surface a friendly empty result.
         return {"candidates_considered": 0, "recommendations": []}
 
     # Attach practice-head-assigned skills to each candidate (used by both the
@@ -7831,7 +7859,8 @@ def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user
 
     project_payload = {
         "name": name,
-        "department": department,
+        "department": department or "(any — rank across all available departments)",
+        "location": location or "(any location)",
         "description": description,
         "skills_keywords": skills_keywords,
     }

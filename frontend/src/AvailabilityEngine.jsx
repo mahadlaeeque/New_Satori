@@ -243,20 +243,20 @@ const SkillDropdown = ({ skills, active, onChange }) => (
 );
 
 // ─── Create Task Modal ───
-const CreateTaskModal = ({ open, onClose, onSubmit, departments, loading, error }) => {
+const CreateTaskModal = ({ open, onClose, onSubmit, locations, loading, error }) => {
   const [name, setName] = useState("");
-  const [department, setDepartment] = useState("");
+  const [location, setLocation] = useState("");
   const [description, setDescription] = useState("");
   const [skills, setSkills] = useState("");
 
   useEffect(() => {
     if (!open) {
-      setName(""); setDepartment(""); setDescription(""); setSkills("");
+      setName(""); setLocation(""); setDescription(""); setSkills("");
     }
   }, [open]);
 
   if (!open) return null;
-  const canSubmit = name.trim() && department.trim() && !loading;
+  const canSubmit = name.trim() && !loading;
 
   return (
     <div style={{
@@ -273,7 +273,7 @@ const CreateTaskModal = ({ open, onClose, onSubmit, departments, loading, error 
               <Sparkles size={20} color={C.accent} /> Create Task / Project
             </h2>
             <p style={{ margin: "6px 0 0", fontSize: 13, color: C.textSecondary, lineHeight: 1.5 }}>
-              Describe your project. Satori will scan the chosen department and recommend the best-fit employees based on availability, skills, and recent engagement.
+              Describe your project. Satori recommends the best-fit employees across everyone you can see — based on availability, skills, and recent engagement. Optionally narrow by location.
             </p>
           </div>
           <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.textMuted, padding: 4 }}><X size={20} /></button>
@@ -289,14 +289,14 @@ const CreateTaskModal = ({ open, onClose, onSubmit, departments, loading, error 
             }} />
           </div>
           <div>
-            <label style={{ fontSize: 11, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.6px" }}>Department *</label>
-            <select value={department} onChange={e => setDepartment(e.target.value)} style={{
+            <label style={{ fontSize: 11, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.6px" }}>Location</label>
+            <select value={location} onChange={e => setLocation(e.target.value)} style={{
               width: "100%", marginTop: 6, padding: "10px 12px",
               border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 14,
               background: C.surface, color: C.textPrimary, boxSizing: "border-box",
             }}>
-              <option value="">Choose department...</option>
-              {(departments || []).map(d => <option key={d} value={d}>{d}</option>)}
+              <option value="">Any location</option>
+              {(locations || []).map(l => <option key={l} value={l}>{l}</option>)}
             </select>
           </div>
           <div style={{ gridColumn: "1 / -1" }}>
@@ -331,7 +331,7 @@ const CreateTaskModal = ({ open, onClose, onSubmit, departments, loading, error 
           }}>Cancel</button>
           <button
             disabled={!canSubmit}
-            onClick={() => onSubmit({ name: name.trim(), department, description: description.trim(), skills_keywords: skills.trim() })}
+            onClick={() => onSubmit({ name: name.trim(), location, description: description.trim(), skills_keywords: skills.trim() })}
             style={{
               padding: "10px 20px", borderRadius: 8, border: "none",
               background: canSubmit ? `linear-gradient(135deg, ${C.accent}, ${C.accentDark})` : "#E5E7EB",
@@ -377,7 +377,7 @@ const BestFitResultsModal = ({ open, onClose, project, recommendations, onSaveTa
               <Sparkles size={20} color={C.accent} /> Best-Fit Recommendations
             </h2>
             <p style={{ margin: "6px 0 0", fontSize: 13, color: C.textSecondary }}>
-              For <strong style={{ color: C.textPrimary }}>{project?.name}</strong> in <strong style={{ color: C.textPrimary }}>{project?.department}</strong>. Ranked by availability, skill match, and recent engagement.
+              For <strong style={{ color: C.textPrimary }}>{project?.name}</strong>{project?.location ? <> · <strong style={{ color: C.textPrimary }}>{project.location}</strong></> : null}. Ranked by availability, skill match, and recent engagement.
             </p>
           </div>
           <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.textMuted, padding: 4 }}><X size={20} /></button>
@@ -387,7 +387,7 @@ const BestFitResultsModal = ({ open, onClose, project, recommendations, onSaveTa
           {(!recommendations || recommendations.length === 0) ? (
             <div style={{ padding: 40, textAlign: "center", color: C.textMuted }}>
               <AlertCircle size={32} style={{ opacity: 0.5 }} />
-              <div style={{ marginTop: 12, fontSize: 14 }}>No candidates found in this department.</div>
+              <div style={{ marginTop: 12, fontSize: 14 }}>No matching candidates found.</div>
             </div>
           ) : recommendations.map(rec => {
             const e = rec.employee || {};
@@ -1111,6 +1111,7 @@ const AvailabilityEnginePage = () => {
   const [employees, setEmployees] = useState([]);
   const [skills, setSkills] = useState([]);
   const [departments, setDepartments] = useState([]);
+  const [locations, setLocations] = useState([]);
   const [tasks, setTasks] = useState([]);
 
   // Filters
@@ -1143,16 +1144,18 @@ const AvailabilityEnginePage = () => {
   useEffect(() => {
     (async () => {
       try {
-        const [k, s, d, t] = await Promise.all([
+        const [k, s, d, t, loc] = await Promise.all([
           fetchJson("/api/availability/kpis"),
           fetchJson("/api/availability/skills"),
           fetchJson("/api/availability/departments"),
           fetchJson("/api/availability/tasks"),
+          fetchJson("/api/availability/locations"),
         ]);
         setKpis(k);
         setSkills(s.skills || []);
         setDepartments(d.departments || []);
         setTasks(t.tasks || []);
+        setLocations(loc.locations || []);
       } catch (e) {
         console.error("[AvailabilityEngine] init error:", e);
       }
@@ -1377,7 +1380,7 @@ const AvailabilityEnginePage = () => {
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onSubmit={handleFindBestFit}
-        departments={departments}
+        locations={locations}
         loading={bestFitLoading}
         error={bestFitError}
       />
