@@ -7651,6 +7651,55 @@ def _get_skills_for_codes(codes: list[str]) -> dict:
         return {}
 
 
+def _norm_code_py(code) -> str:
+    """Python mirror of the SQL norm(): strip non-digits + leading zeros."""
+    import re as _re
+    return _re.sub(r"[^0-9]", "", str(code or "")).lstrip("0")
+
+
+def _current_projects_for_codes(codes: list[str]) -> dict:
+    """{normalized_employee_id: ["1104 - FF Rise… (50%)", …]} — each employee's
+    CURRENT active project allocations (latest weekly snapshot at/before today,
+    pct>0), so find-best-fit can say WHICH projects an allocated candidate is on."""
+    norm_codes = sorted({_norm_code_py(c) for c in (codes or []) if _norm_code_py(c)})
+    if not norm_codes:
+        return {}
+    in_list = ",".join(f"'{d}'" for d in norm_codes)
+    nrm = "LTRIM(REGEXP_REPLACE(CAST(a.employee_id AS STRING), r'[^0-9]', ''), '0')"
+    sql = normalize_bq_project(f"""
+        WITH c AS (
+          SELECT {nrm} AS eid, a.project_id, a.allocation_percent, a.Date
+          FROM {_bq_avail('Allocation_Data')} a
+          WHERE {nrm} IN ({in_list})
+        ),
+        mx AS (SELECT eid, MAX(Date) AS d FROM c WHERE Date <= CURRENT_DATE() GROUP BY eid)
+        SELECT c.eid AS eid,
+               COALESCE(NULLIF(TRIM(p.Project_Name), ''), CAST(c.project_id AS STRING)) AS project,
+               MAX(c.allocation_percent) AS pct
+        FROM c JOIN mx ON c.eid = mx.eid AND c.Date = mx.d
+        LEFT JOIN {_bq_avail('Project_Master')} p ON CAST(c.project_id AS STRING) = CAST(p.Project_Code AS STRING)
+        GROUP BY eid, project
+        HAVING pct > 0
+        ORDER BY eid, pct DESC
+    """)
+    try:
+        r = bq_run_query(sql, max_rows=3000)
+        if "error" in r:
+            print(f"[best-fit] current-projects probe error: {r['error']}")
+            return {}
+        out: dict = {}
+        for row in (r.get("rows") or []):
+            eid = row.get("eid"); proj = row.get("project"); pct = row.get("pct")
+            if eid and proj:
+                try: pct_i = int(float(pct))
+                except Exception: pct_i = pct
+                out.setdefault(eid, []).append(f"{proj} ({pct_i}%)")
+        return out
+    except Exception as e:
+        print(f"[best-fit] current-projects exception: {e}")
+        return {}
+
+
 def _employee_department(emp_code: str):
     """The warehouse department (EmployeeHierarchyNode) for one Employee_Code, or None."""
     safe = (emp_code or "").replace("'", "''")
@@ -7741,14 +7790,17 @@ _FIND_BEST_FIT_PROMPT = """You are Satori AI, a senior staffing analyst at TMC. 
 
 You will receive:
   - The project: name, target department, description, and skills/keywords needed.
-  - A pre-filtered candidate pool of available employees the requester may see — by default ACROSS ALL departments (a department-scoped practice head is automatically limited to their own department; admins see everyone). The project's `department` may be "(any …)" — that's fine, rank purely on fit. If a `location` was specified, the pool is already restricted to that location. Each candidate row tells you their name, position, latest competency, current MAX allocation % over the last 90 days, project count, timesheet hours in the last 90 days, location, and `assigned_skills` (skills the practice head explicitly tagged on this person).
+  - A pre-filtered candidate pool of available employees the requester may see — by default ACROSS ALL departments (a department-scoped practice head is automatically limited to their own department; admins see everyone). The project's `department` may be "(any …)" — that's fine, rank purely on fit. If a `location` was specified, the pool is already restricted to that location. Each candidate row tells you their name, position, latest competency, current allocation %, status (Bench/Partial/Allocated), project count, timesheet hours in the last 90 days, location, `assigned_skills` (skills the practice head explicitly tagged on this person), and `current_projects` (the projects they are currently allocated to, with %).
 
 Rank the candidates against the project using these signals, weighted in this order:
 
-  1. **Availability** — prefer Bench (max alloc% = 0) first, then Partial (>0 and <100). Avoid Allocated (>=100) unless the skill match is so strong that pulling them off something matters.
-  2. **Skill match** — STRONGEST signal is `assigned_skills` (the curated, practice-head-tagged skills) matching the requested skills/keywords; then competency/position substring matches. A candidate whose assigned_skills directly match the needed skills should rank highly even over a slightly more available person. Cite the matched assigned skill in your reasoning.
-  3. **Recent engagement** — prefer recent timesheet hours > 0 (they're actively working, not dormant) but not absurdly high (avoid >300 hrs/90d unless skill is a near-perfect match).
-  4. **Tie-breakers** — same location as project owner's department if known; otherwise prefer fewer concurrent projects.
+  1. **BEST FIT (primary)** — who matches the project's needs best? Weigh `assigned_skills` (the curated, practice-head-tagged skills) FIRST, then position/competency, then how well they align with the project DESCRIPTION. The person whose skills + role best fit the work is the #1 recommendation — EVEN IF they are currently Allocated. Do NOT demote a strong fit just because they're busy. (e.g. for an "AI workflow automation with N8N/Claude" project, an allocated "AI Business Partner" with assigned skills Claude/n8n is a far better fit than a free but unrelated "Domain Expert" — rank the AI Business Partner #1.)
+  2. **Availability (secondary)** — only a tie-breaker between candidates of similar fit: Bench > Partial > Allocated. It changes the ORDER among similar-fit people; it never knocks the best fit out of the list.
+  3. **Recent engagement** — minor: prefer some recent timesheet activity over fully dormant, all else equal.
+
+ALWAYS, for EVERY recommendation, write a 1-2 sentence reasoning that:
+  (a) says WHY they fit — name the specific matched skill(s)/keyword(s) and how they align with the project description; AND
+  (b) states their availability honestly — if `status` is Allocated or `current_projects` is non-empty, say they are "currently allocated to <name the projects from current_projects>" so the requester knows they'd need to be freed up. If Bench, say "available now".
 
 Return EXACTLY this JSON shape (no markdown, no commentary outside the JSON):
 
@@ -7767,8 +7819,8 @@ Return EXACTLY this JSON shape (no markdown, no commentary outside the JSON):
 Hard rules:
   - If fewer than 5 candidates are provided, return as many as you got (don't fabricate).
   - Use the exact `code` value from the input (don't guess Employee_Code strings).
-  - `match_score` is an integer 0-100. A pure-bench, perfect-skill-match candidate should be ~90-95. Reserve 100 for "exactly this person and they're free now". Skill mismatch + Allocated = below 30.
-  - Reasoning must be SPECIFIC (cite the matched skill keyword and the allocation state). Generic praise like "strong candidate" is not acceptable.
+  - `match_score` is an integer 0-100 driven mainly by FIT. A perfect skill/role fit scores ~90-100 even if they're Allocated (the score reflects how well they fit the work, not how free they are — availability is conveyed in the reasoning instead). A free Bench person with a weak/unrelated fit should score LOW (e.g. 20-40), not high. Reserve the very top for a strong fit who is also available.
+  - Reasoning must be SPECIFIC (cite the matched skill/keyword + how they fit the description, and name current_projects if allocated). Generic praise like "strong candidate" is not acceptable.
 """
 
 
@@ -7851,10 +7903,21 @@ def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user
     for emp in pool:
         emp["_hits"] = _hit_count(emp)
 
-    bench = sorted([e for e in pool if (e.get("status") or "") == "Bench"], key=lambda e: (-e["_hits"], -(float(e.get("hrs_90d") or 0))))
-    partial = sorted([e for e in pool if (e.get("status") or "") == "Partial"], key=lambda e: (-e["_hits"], -(float(e.get("hrs_90d") or 0))))
-    allocated = sorted([e for e in pool if (e.get("status") or "") == "Allocated"], key=lambda e: (-e["_hits"], -(float(e.get("hrs_90d") or 0))))
-    ranked_pool = (bench + partial + allocated)[:max_to_rank]
+    # PRIMARY sort = SKILL/keyword fit (most hits first); availability is only a
+    # tie-breaker. This keeps the genuinely best-fit person at the top even when
+    # they're currently Allocated — the old code put ALL bench people ahead of
+    # ANY allocated person, so a weakly-matched bench resource beat the obvious
+    # expert (e.g. an AI project surfaced a bench Domain Expert over the
+    # allocated "AI Business Partner"). Gemini then re-ranks fit-first too.
+    _avail_rank = {"Bench": 0, "Partial": 1, "Allocated": 2}
+    ranked_pool = sorted(
+        pool,
+        key=lambda e: (-e["_hits"], _avail_rank.get(e.get("status") or "", 3), -(float(e.get("hrs_90d") or 0))),
+    )[:max_to_rank]
+
+    # Each candidate's CURRENT projects (latest-week snapshot) so the model can
+    # name what an allocated best-fit is currently on.
+    cur_proj_map = _current_projects_for_codes([e.get("code") for e in ranked_pool])
 
     # 2) Build the compact candidate payload for Gemini.
     compact = [
@@ -7869,6 +7932,7 @@ def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user
             "hrs_90d":       float(e.get("hrs_90d") or 0),
             "location":      e.get("location") or "",
             "assigned_skills": e.get("_skills") or [],
+            "current_projects": cur_proj_map.get(_norm_code_py(e.get("code")), []),
         }
         for e in ranked_pool
     ]
