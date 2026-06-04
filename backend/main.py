@@ -2643,7 +2643,7 @@ CRITICAL: If you are not sure which exact column to use, STILL CALL run_sql with
 WORKFORCE
   • Employee_Data — Employee_Code, Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Joining_Date, Gender. Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation','contractual fixed term').
   • Attendance_Data — attendance_date (DATE), personal_no (STRING 'E-902' — JOIN to Employee_Data on this), employee_id (INT64 sequence, not a JOIN key), employee_name, employee_email, checkin_time / checkout_time (STRING — FULL datetime '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'; clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)); can be NULL on non-working days), attendance_status_text ('Present'/'Absent'/'Weekend'/'Holiday'/'On Leave'/'Missing Punch'/'Remote Work'), is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1), checkin_is_permitted_location / checkout_is_permitted_location (STRING '1'/'0' — approved-location punch: IF(SAFE_CAST(checkin_is_permitted_location AS INT64)=1,'Permitted','Not Permitted')). No 'Late' value — late arrival = check-in after 09:30: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00' (present/remote days).
-  • Allocation_Data — project_id (STRING), employee_id (STRING 'E-2141'), emp_name, allocation_percent (INT64 — compare directly, e.g. >0), emp_competency, Flag ('Allocated'/'Bench'), Forecast_Flag (INT64 0/1), Date (DATE), Year (INT64), Month (INT64 1-12), Week (INT64). NO year_id/week_id/Data_Type. Filter Year/Month with integers (Year=2026, Month=5), never strings or PARSE_DATE. For month-on-month: WHERE Year=2026 AND Flag='Allocated' AND allocation_percent>0 GROUP BY Month, project_id.
+  • Allocation_Data — project_id (STRING), employee_id (STRING 'E-2141'), emp_name, allocation_percent (INT64 — compare directly, e.g. >0), emp_competency, Flag ('Allocated'/'Bench'), Forecast_Flag (INT64 0/1), Date (DATE), Year (INT64), Month (INT64 1-12), Week (INT64). NO year_id/week_id/Data_Type. Filter Year/Month with integers (Year=2026, Month=5), never strings/PARSE_DATE. CURRENT allocation = the LATEST week at/before today (WITH cur AS (SELECT MAX(Date) d ... WHERE Date<=CURRENT_DATE()), read a.Date=cur.d, pct>0) — NOT MAX across all weeks (that shows stale projects). Per month → that month's latest week.
   • Timesheet_Data — EMPLOYEE_CODE ('E-1571' — the employee key; JOIN/filter on this digit-normalised, NOT TICKET_USER_ID which is an unrelated internal id matching no employee), TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_CODE (JOIN to Project_Master.Project_Code), TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (DATE — filter via COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))).
 
 SALES
@@ -4856,14 +4856,17 @@ DASHBOARD-LEVEL COMMON SENSE:
   so that wrongly marks bench people as fully allocated.
 
 ALLOCATION DATA — read before writing any allocation query:
-- Allocation_Data rows are WEEKLY snapshots: many rows per employee/project/month
-  plus Bench rows. To list someone's project allocations, GROUP BY project_id and
-  take MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per project (join
-  Project_Master on CAST(project_id AS STRING)=Project_Code for the name), keep
-  Flag, ORDER BY allocation DESC. NEVER group by Month and pick one project —
-  that collapses to "Qlik Bench 100%" for every month (a known wrong answer).
-- "Billable/real allocation %" = MAX over Flag='Allocated' rows. The Bench
-  project shows 100% but means UNALLOCATED.
+- Allocation_Data is WEEKLY snapshots (many rows per employee/project; Year/Month/
+  Week/allocation_percent are INT64; NO year_id/week_id). For someone's CURRENT
+  allocation, use the LATEST WEEK at or before today — NOT a MAX across all weeks
+  (MAX surfaces stale projects from old weeks and won't match the planning tool):
+  WITH cur AS (SELECT MAX(Date) d FROM Allocation_Data WHERE norm(employee_id)='<digits>' AND Date<=CURRENT_DATE())
+  then read that week's rows (a.Date=cur.d), GROUP BY project, MAX(allocation_percent),
+  HAVING pct>0, join Project_Master for names. These can sum to >100% (overallocated).
+  For a given month, use that month's latest week. NEVER group-by-month-pick-one
+  ("Qlik Bench 100%"). Resolve the exact Employee_Code by name first; state it.
+- "Billable/real allocation %" = over Flag='Allocated' rows. The Bench project
+  shows 100% but means UNALLOCATED.
 - DEFAULT TO ACTIVE ALLOCATIONS ONLY: when listing someone's allocations, show
   only Flag='Allocated' AND allocation_percent > 0. Do NOT list 0% rows or the
   '00Q - Qlik Bench' project unless the user explicitly asks for bench / the
@@ -7495,7 +7498,19 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
     # filter (Allocation_Data.Date type unreliable on prod, see _avail_kpis_sql).
     # Current (actual) project allocations, joined to Project_Master so we show
     # the real project NAME / client / type — not just the bare project code.
+    # CURRENT allocation = the LATEST weekly snapshot at or before today, not a
+    # MAX across all history. The allocation feed is weekly; taking MAX over all
+    # weeks surfaced stale projects from months ago (e.g. for E-218 it showed
+    # 1112/1072/982 from old weeks instead of this week's real plan). The source
+    # planning tool shows the current week — so we mirror it: pick MAX(Date) <=
+    # today, then show that week's rows. Only active rows (allocation_percent>0)
+    # — those are the projects the person is actually on right now.
     alloc_sql = f"""
+        WITH cur AS (
+          SELECT MAX(Date) AS d
+          FROM {_bq_avail('Allocation_Data')}
+          WHERE {_norm_emp_id('employee_id')} = {norm_target} AND Date <= CURRENT_DATE()
+        )
         SELECT
           COALESCE(NULLIF(TRIM(CAST(a.project_id AS STRING)), ''), 'Unspecified') AS project_id,
           COALESCE(NULLIF(TRIM(p.Project_Name), ''), CAST(a.project_id AS STRING)) AS project_name,
@@ -7507,11 +7522,12 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
           MAX(IF(a.Flag = 'Allocated', SAFE_CAST(a.allocation_percent AS FLOAT64), 0)) AS real_pct,
           COUNT(*) AS records
         FROM {_bq_avail('Allocation_Data')} a
+        JOIN cur ON a.Date = cur.d
         LEFT JOIN {_bq_avail('Project_Master')} p
           ON CAST(a.project_id AS STRING) = CAST(p.Project_Code AS STRING)
         WHERE {_norm_emp_id('a.employee_id')} = {norm_target}
-          AND a.Forecast_Flag = 0
         GROUP BY project_id, project_name, client_name, project_type, project_status, competency
+        HAVING allocation_pct > 0
         ORDER BY allocation_pct DESC, records DESC
         LIMIT 50
     """
@@ -8761,11 +8777,20 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "Flag (STRING — values: 'Allocated' / 'Bench' — NOT 'Actual' / 'Forecast'), Forecast_Flag (INT64 0/1), "
             "Date (DATE), Year (INT64), Month (INT64 1-12), Week (INT64). "
             "⚠️ There is NO year_id / week_id / WeekYear_KEY / Data_Type column. Year/Month/Week are INT64 — filter with integers (Year = 2026, Month = 5), NEVER strings ('2026') and NEVER PARSE_DATE on them (that causes 'No matching signature' / 'INT64 = STRING' errors). The data runs into future years (forward plan, out to ~2028), so a 'for 2026' question MUST filter Year = 2026.\n"
-            "MONTH-ON-MONTH (e.g. E-210 for 2026): SELECT a.Month, COALESCE(NULLIF(TRIM(p.Project_Name),''),CAST(a.project_id AS STRING)) AS project, MAX(a.allocation_percent) AS pct FROM Allocation_Data a LEFT JOIN Project_Master p ON CAST(a.project_id AS STRING)=p.Project_Code WHERE norm(a.employee_id)='210' AND a.Year=2026 AND a.Flag='Allocated' AND a.allocation_percent>0 GROUP BY a.Month, project ORDER BY a.Month, pct DESC.\n"
+            "MONTH-ON-MONTH (per month = that month's LATEST week's snapshot, so it matches the planning tool): "
+            "WITH wk AS (SELECT Year, Month, MAX(Date) AS d FROM Allocation_Data WHERE norm(employee_id)='<digits>' AND Year=2026 GROUP BY Year, Month) "
+            "SELECT a.Month, COALESCE(NULLIF(TRIM(p.Project_Name),''),CAST(a.project_id AS STRING)) AS project, MAX(a.allocation_percent) AS pct "
+            "FROM Allocation_Data a JOIN wk ON a.Year=wk.Year AND a.Month=wk.Month AND a.Date=wk.d LEFT JOIN Project_Master p ON CAST(a.project_id AS STRING)=p.Project_Code "
+            "WHERE norm(a.employee_id)='<digits>' GROUP BY a.Month, project HAVING pct>0 ORDER BY a.Month, pct DESC.\n"
             "JOIN to Employee_Data on norm(employee_id)=norm(Employee_Code), norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0') (NOT on emp_name — names don't match).\n"
             "⚠️ ROWS ARE WEEKLY SNAPSHOTS — there are MANY rows per employee per project per month, and one or more 'Bench' rows. NEVER list raw rows or group by Month and pick one project: the Bench project '00Q - Qlik Bench' (Flag='Bench') sits at allocation_percent=100, so a per-month MAX collapses to 'Qlik Bench (100%)' for almost everyone (this is a known wrong answer).\n"
-            "TO SHOW AN EMPLOYEE'S PROJECT ALLOCATIONS (mirror the Availability Engine): GROUP BY project_id, take MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per project, JOIN Project_Master ON CAST(project_id AS STRING)=Project_Code for the name (some project_ids aren't in Project_Master — fall back to the code), keep the Flag, ORDER BY allocation DESC. DEFAULT TO ACTIVE ALLOCATIONS ONLY: show only Flag='Allocated' AND allocation_percent>0 — omit 0% rows and the '00Q - Qlik Bench' project unless the user explicitly asks for bench / the full breakdown. Never collapse to one project per month.\n"
-            "REAL/BILLABLE allocation % = MAX over Flag='Allocated' rows only; don't take MAX(allocation_percent) blindly (the Bench row is 100%).\n"
+            "TO SHOW AN EMPLOYEE'S CURRENT PROJECT ALLOCATIONS — use the LATEST WEEKLY SNAPSHOT (the most recent Date at or before today), NOT a MAX across all weeks. The feed is weekly; MAX-over-all-weeks surfaces STALE projects from old weeks and gives a wrong answer that does NOT match the source planning tool. Recipe (this exactly reproduces the planning tool, e.g. E-218 = 1104 50% / 1245 20% / 1073,1194,1191,500 10% = 110% overallocated): "
+            "WITH cur AS (SELECT MAX(Date) d FROM Allocation_Data WHERE norm(employee_id)='<digits>' AND Date<=CURRENT_DATE()) "
+            "SELECT COALESCE(NULLIF(TRIM(p.Project_Name),''),CAST(a.project_id AS STRING)) AS project, MAX(a.allocation_percent) AS pct "
+            "FROM Allocation_Data a JOIN cur ON a.Date=cur.d LEFT JOIN Project_Master p ON CAST(a.project_id AS STRING)=p.Project_Code "
+            "WHERE norm(a.employee_id)='<digits>' GROUP BY project HAVING pct>0 ORDER BY pct DESC. "
+            "Show ONLY active rows (pct>0); these can sum to >100% (overallocated). Omit 0% rows and the Bench project unless asked. For a SPECIFIC MONTH use that month's latest week (MAX(Date) WHERE Year=Y AND Month=M). NEVER use MAX(allocation_percent) across all history, and never group-by-month-pick-one (that yields 'Qlik Bench 100%').\n"
+            "IDENTITY: resolve the exact Employee_Code by name FIRST — SELECT Employee_Code, Resource_Name FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%<name>%'; there is usually exactly ONE match (e.g. 'Adnan Raza' = E-218). Use THAT code, state it, and never guess a code.\n"
             "⚠️ ALLOCATION IS A PLANNED / FORWARD allocation (it carries upcoming weeks and can lag or differ from what a person is actually doing) — it is NOT proof of current work, and an allocation 'Bench' does NOT mean someone is idle. GROUND TRUTH for what someone is ACTUALLY working on now = recent Timesheet_Data hours by project (last ~90 days, TICKET_PROJECT_LABEL/TICKET_PROJECT_CODE). If a person is logging substantial hours on a project they ARE allocated/working on it — e.g. Sufyan Baig reads 'Bench' in allocation but is actually on Packages Qlik SLA per his timesheet. So: for 'what is X working on / X's current project(s) / is X really on bench', answer from their top recent timesheet projects, and NEVER call someone with recent logged hours bench/idle. Use Allocation_Data for the forward plan (filter Date <= CURRENT_DATE() for the 'now' snapshot), Timesheet_Data for actuals."
         ),
     },
@@ -8867,6 +8892,7 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "are usually reported as SEPARATE segregated queries: filter FLAG",  # pre tasks-vs-tickets two-dimension note
     "Show every project (real + the Bench one), not one-per-month.",  # pre active-allocation-default note
     "week_id, year_id, Week, Date (DATE), Year, Month (STRING), Data_Type.",  # pre real-Allocation-schema (INT64 Year/Month, no year_id) note
+    "take MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per project",  # pre latest-weekly-snapshot allocation note
 )
 
 
