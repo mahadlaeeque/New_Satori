@@ -2295,7 +2295,7 @@ EXACT COLUMN NAMES IN Attendance_Data (all lowercase or special):
 - employee_name, employee_email
 - attendance_status_text (STRING — the canonical status. Values: 'Present', 'Absent', 'On Leave', 'Holiday', 'Weekend', 'Missing Punch', 'Remote Work', plus 'Submitted ...' variants). Count with COUNTIF(LOWER(attendance_status_text) = '<status>').
 - is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend, is_missing_punch (INT64 0/1) — these DO exist; SUM(is_present) is equivalent to COUNTIF(LOWER(attendance_status_text)='present'). Use either. Working-day denominator = COUNTIF(LOWER(attendance_status_text) NOT IN ('weekend','holiday')).
-- LATE: there is no 'late' status value. A late arrival = check-in after 09:30 on a worked day: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00' (checkin_time IS NOT NULL AND LOWER(attendance_status_text) IN ('present','remote work')).
+- LATE: there is no 'late' status value. A late arrival = check-in after 09:30 on a worked day: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00' (checkin_time IS NOT NULL).
 - checkin_time, checkout_time (STRING — FULL datetime like '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'. They can be NULL/blank on non-working or missing-punch days.)
   • To get the clock time, parse the whole string then take TIME:  TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time))
   • NEVER use PARSE_TIME('%H:%M:%S', checkin_time) or CONCAT a date onto it — those return NULL for every row.
@@ -2303,7 +2303,8 @@ EXACT COLUMN NAMES IN Attendance_Data (all lowercase or special):
       WITH t AS (SELECT TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) AS c FROM <att rows> WHERE checkin_time IS NOT NULL)
       SELECT FORMAT_TIME('%H:%M:%S', TIME_ADD(TIME '00:00:00', INTERVAL CAST(AVG(EXTRACT(HOUR FROM c)*3600 + EXTRACT(MINUTE FROM c)*60 + EXTRACT(SECOND FROM c)) AS INT64) SECOND)) AS avg_checkin FROM t WHERE c IS NOT NULL
   • For "worked hours" per day = TIMESTAMP_DIFF(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkout_time), SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time), MINUTE)/60.0 (only where both are non-null).
-  • Restrict time aggregates to actually-worked days: LOWER(attendance_status_text) IN ('present','remote work').
+  • Restrict check-in/out time aggregates to days with an ACTUAL PUNCH via checkin_time IS NOT NULL (or checkout_time for checkout) — this naturally includes Present, Remote Work, AND **Missing Punch** days (a Missing-Punch day still has a real check-in; the person punched in but didn't punch out). Do NOT filter by a status whitelist like LOWER(attendance_status_text) IN ('present','remote work') — that wrongly drops Missing-Punch days that DO have a check-in.
+  • For a SPECIFIC employee on a SPECIFIC day ("what time did Mahad check in on 4 June"), just SELECT checkin_time/checkout_time for that employee + attendance_date with NO status filter at all, and report it whatever the status (e.g. 'Missing Punch' with check-in 09:06 → answer 09:06). Only say "no record" if the row truly doesn't exist or checkin_time is NULL.
 
 REQUIRED JOIN PATTERN for Employee_Data <-> Attendance_Data:
   LEFT JOIN `<proj>.<ds>.Attendance_Data` a
@@ -2441,7 +2442,7 @@ When the user asks about an employee's attendance for a time window, ALWAYS incl
 - Missing-punch days (LOWER(attendance_status_text) = 'missing punch')
 - Total records (= sum of the above; this is the number of days in the window)
 
-There is NO 'late' status VALUE. A "late arrival" is a BUSINESS RULE = a worked day (present/remote) with check-in after 09:30: COUNTIF(TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00' AND LOWER(attendance_status_text) IN ('present','remote work')) AS late_arrivals. Never filter attendance_status_text='late'. Always check that present + absent + leave + holiday + weekend + missing-punch ≈ total, and call out any 'Submitted ...' variants as their own line. Don't leave the user wondering where the rest of the month went."""
+There is NO 'late' status VALUE. A "late arrival" is a BUSINESS RULE = a day with a check-in after 09:30: COUNTIF(TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00') AS late_arrivals (NULL check-ins don't count, so no status whitelist needed — Missing-Punch days with a real check-in ARE included). Never filter attendance_status_text='late'. Always check that present + absent + leave + holiday + weekend + missing-punch ≈ total, and call out any 'Submitted ...' variants as their own line. Don't leave the user wondering where the rest of the month went."""
 
 
 ATTENDANCE_BEHAVIOR_ADDON = """
@@ -2591,7 +2592,7 @@ User: "What's the Qlik department's average check-in & check-out time in May 202
        WHERE LOWER(e.EmployeeHierarchyNode)='qlik'
          AND LOWER(COALESCE(e.Employee_Type,'')) IN ('mto','permanent','probation')
          AND a.attendance_date BETWEEN DATE '2026-05-01' AND DATE '2026-05-31'
-         AND LOWER(a.attendance_status_text) IN ('present','remote work'))
+         AND a.checkin_time IS NOT NULL)   -- any day with a real punch (incl. Missing Punch); NOT a status whitelist
      SELECT
        FORMAT_TIME('%I:%M %p', TIME_ADD(TIME '00:00:00', INTERVAL CAST(AVG(EXTRACT(HOUR FROM cin)*3600+EXTRACT(MINUTE FROM cin)*60+EXTRACT(SECOND FROM cin)) AS INT64) SECOND))  AS avg_checkin,
        FORMAT_TIME('%I:%M %p', TIME_ADD(TIME '00:00:00', INTERVAL CAST(AVG(EXTRACT(HOUR FROM cout)*3600+EXTRACT(MINUTE FROM cout)*60+EXTRACT(SECOND FROM cout)) AS INT64) SECOND)) AS avg_checkout
@@ -2642,7 +2643,7 @@ CRITICAL: If you are not sure which exact column to use, STILL CALL run_sql with
 
 WORKFORCE
   • Employee_Data — Employee_Code, Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Joining_Date, Gender. Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation','contractual fixed term').
-  • Attendance_Data — attendance_date (DATE), personal_no (STRING 'E-902' — JOIN to Employee_Data on this), employee_id (INT64 sequence, not a JOIN key), employee_name, employee_email, checkin_time / checkout_time (STRING — FULL datetime '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'; clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)); can be NULL on non-working days), attendance_status_text ('Present'/'Absent'/'Weekend'/'Holiday'/'On Leave'/'Missing Punch'/'Remote Work'), is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1), checkin_is_permitted_location / checkout_is_permitted_location (STRING '1'/'0' — approved-location punch: IF(SAFE_CAST(checkin_is_permitted_location AS INT64)=1,'Permitted','Not Permitted')). No 'Late' value — late arrival = check-in after 09:30: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00' (present/remote days).
+  • Attendance_Data — attendance_date (DATE), personal_no (STRING 'E-902' — JOIN to Employee_Data on this), employee_id (INT64 sequence, not a JOIN key), employee_name, employee_email, checkin_time / checkout_time (STRING — FULL datetime '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'; clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)); can be NULL on non-working days), attendance_status_text ('Present'/'Absent'/'Weekend'/'Holiday'/'On Leave'/'Missing Punch'/'Remote Work'), is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1), checkin_is_permitted_location / checkout_is_permitted_location (STRING '1'/'0' — approved-location punch: IF(SAFE_CAST(checkin_is_permitted_location AS INT64)=1,'Permitted','Not Permitted')). No 'Late' value — late arrival = check-in after 09:30: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00' (any day with a check-in, incl. Missing Punch — filter checkin_time IS NOT NULL, NOT a status whitelist).
   • Allocation_Data — project_id (STRING), employee_id (STRING 'E-2141'), emp_name, allocation_percent (INT64 — compare directly, e.g. >0), emp_competency, Flag ('Allocated'/'Bench'), Forecast_Flag (INT64 0/1), Date (DATE), Year (INT64), Month (INT64 1-12), Week (INT64). NO year_id/week_id/Data_Type. Filter Year/Month with integers (Year=2026, Month=5), never strings/PARSE_DATE. CURRENT allocation = the LATEST week at/before today (WITH cur AS (SELECT MAX(Date) d ... WHERE Date<=CURRENT_DATE()), read a.Date=cur.d, pct>0) — NOT MAX across all weeks (that shows stale projects). Per month → that month's latest week.
   • Timesheet_Data — EMPLOYEE_CODE ('E-1571' — the employee key; JOIN/filter on this digit-normalised, NOT TICKET_USER_ID which is an unrelated internal id matching no employee), TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_CODE (JOIN to Project_Master.Project_Code), TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (DATE — filter via COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))).
 
@@ -4818,10 +4819,12 @@ DEFAULT FILTERS — apply automatically without asking:
    The denominator of an attendance rate must NEVER include weekends/holidays —
    that's what produces nonsense rates like 39.7%.
    LATE ARRIVALS — there is NO 'late' attendance_status_text value. BUSINESS
-   RULE: a "late" arrival = a worked day (present/remote) whose check-in is
-   AFTER 09:30. Compute it from checkin_time, never a status filter:
+   RULE: a "late" arrival = any day with a check-in AFTER 09:30. Compute it from
+   checkin_time, never a status filter:
      TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00'
-   (with checkin_time IS NOT NULL AND LOWER(attendance_status_text) IN ('present','remote work')).
+   (with checkin_time IS NOT NULL — this includes Present, Remote Work AND
+   Missing-Punch days, all of which have a real check-in; do NOT restrict to a
+   present/remote status whitelist, which drops Missing-Punch days).
    "On time" = the same parsed check-in <= TIME '09:30:00'. NEVER use
    attendance_status_text='late' / 'missing punch' to mean late.
 3. Headcount / "total employees" → COUNT(DISTINCT Employee_Code) on Employee_Data
@@ -4920,9 +4923,10 @@ BIGQUERY (GoogleSQL) DIALECT — this warehouse is BigQuery, NOT MySQL/T-SQL:
         EXTRACT(MINUTE FROM TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)))*60 +
         EXTRACT(SECOND FROM TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)))
       ) AS INT64))))
-  (filter to checkin_time IS NOT NULL and LOWER(attendance_status_text) IN
-  ('present','remote work')). Worked-hours/day = TIMESTAMP_DIFF(parse(checkout),
-  parse(checkin), MINUTE)/60.0 where both are non-null.
+  (filter to checkin_time IS NOT NULL — that already includes Present, Remote
+  Work AND Missing-Punch days; do NOT add a present/remote status whitelist, it
+  drops Missing-Punch days that have a real check-in). Worked-hours/day =
+  TIMESTAMP_DIFF(parse(checkout), parse(checkin), MINUTE)/60.0 where both non-null.
 
 SANITY CHECK YOUR OWN NUMBERS BEFORE EMITTING SQL:
 - TMC has roughly 1,190 active employees. A "Total Employees" KPI in the
@@ -5037,7 +5041,7 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
 - Active employees filter (use EXACTLY this): LOWER(e.Employee_Type) IN ('mto','permanent','probation').
 - LATE arrivals: there is NO 'late' status value. A late arrival = a worked day whose check-in is after 09:30. Use EXACTLY:
     TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', a.checkin_time)) > TIME '09:30:00'
-  (with a.checkin_time IS NOT NULL AND LOWER(a.attendance_status_text) IN ('present','remote work')). NEVER filter attendance_status_text = 'late'.
+  (with a.checkin_time IS NOT NULL — includes Present, Remote Work AND Missing-Punch days; no status whitelist). NEVER filter attendance_status_text = 'late'.
 - Attendance %: ROUND(100.0 * SUM(is_present) / NULLIF(COUNT(*),0), 1).
 - Bench classify on MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per Employee_Code.
 - Win rate display: multiply Hist_Win_Rate by 100.
@@ -6161,7 +6165,7 @@ NEVER join Attendance on employee_id, and NEVER join on Resource_Name = employee
 
 ═══ HARD RULES ═══
 - Active employees only: LOWER(Employee_Type) IN ('mto','permanent','probation').
-- Attendance counts come from attendance_status_text, e.g. present_days = COUNTIF(LOWER(attendance_status_text)='present'); the working-day denominator = COUNTIF(LOWER(attendance_status_text) NOT IN ('weekend','holiday')). There is NO 'late' status value — a late arrival = check-in after 09:30 on a worked day: COUNTIF(TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00' AND LOWER(attendance_status_text) IN ('present','remote work')).
+- Attendance counts come from attendance_status_text, e.g. present_days = COUNTIF(LOWER(attendance_status_text)='present'); the working-day denominator = COUNTIF(LOWER(attendance_status_text) NOT IN ('weekend','holiday')). There is NO 'late' status value — a late arrival = a check-in after 09:30: COUNTIF(TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00') (NULL check-ins don't count; includes Missing-Punch days that have a real check-in — no status whitelist).
 - Reuse the parent SQL's date range when it has one.
 - Match the clicked category CASE-INSENSITIVELY: LOWER(col) = LOWER('value').
 - NEVER wrap numeric columns (Coverage_Ratio/Hist_Win_Rate/Open_Deals/Win_Rate_by) in REPLACE().
@@ -8218,7 +8222,7 @@ WORKFORCE TABLES:
     is_present, is_absent, is_on_leave, is_remote  (each 0/1 INTEGER),
     checkin_is_permitted_location / checkout_is_permitted_location (STRING '1'/'0' — approved-location punch: IF(SAFE_CAST(checkin_is_permitted_location AS INT64)=1,'Permitted','Not Permitted')).
     Attendance rate = ROUND(100.0 * SUM(is_present) / NULLIF(COUNT(*),0), 1).
-    LATE arrival = check-in after 09:30 on a worked day: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00' (present/remote). Never filter status='late'.
+    LATE arrival = check-in after 09:30: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00' (any day with a check-in incl. Missing Punch; filter checkin_time IS NOT NULL, not a status whitelist). Never filter status='late'.
     `employee_id` here = `Employee_Code` in Employee_Data.
 
 - `ai-vertex-mahad.Satori_Project.Allocation_Data`
@@ -8825,7 +8829,7 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "Present, Weekend, Absent, Missing Punch, Holiday, On Leave, Remote Work, and their 'Submitted …' variants — no 'Late' status value; "
             "a LATE arrival = check-in after 09:30 on a worked day: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00'), "
             "is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1 INT), leave_type_name.\n"
-            "Attendance % = ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1). Avg check-in/out = average seconds-since-midnight of the parsed TIME, then FORMAT_TIME; restrict to LOWER(attendance_status_text) IN ('present','remote work').\n"
+            "Attendance % = ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1). Avg/specific check-in/out time = parse the TIME; filter on checkin_time IS NOT NULL (includes Present, Remote Work AND Missing-Punch days — a Missing-Punch day still has a real check-in; do NOT use a present/remote status whitelist). For a specific person on a specific day, return checkin_time with NO status filter.\n"
             "JOIN with Employee_Data on the digit-normalised code (NOT names — Resource_Name carries a code prefix): "
             "LTRIM(REGEXP_REPLACE(CAST(personal_no AS STRING),r'[^0-9]',''),'0') = LTRIM(REGEXP_REPLACE(CAST(Employee_Code AS STRING),r'[^0-9]',''),'0')."
         ),
@@ -8957,6 +8961,7 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "Show every project (real + the Bench one), not one-per-month.",  # pre active-allocation-default note
     "week_id, year_id, Week, Date (DATE), Year, Month (STRING), Data_Type.",  # pre real-Allocation-schema (INT64 Year/Month, no year_id) note
     "take MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per project",  # pre latest-weekly-snapshot allocation note
+    "restrict to LOWER(attendance_status_text) IN ('present','remote work')",  # pre checkin=NOT NULL (Missing-Punch has a real check-in) note
 )
 
 
