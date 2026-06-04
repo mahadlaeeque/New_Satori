@@ -34,3 +34,9 @@ Thumbs.db
 
 # Cloud-side artefacts
 gcloud-*.log
+
+# Local data artifacts (warehouse is BigQuery; these are source-only, too large for git)
+data/
+qvd/
+*.xlsx
+*.qvd

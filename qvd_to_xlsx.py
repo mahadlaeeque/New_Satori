@@ -29,8 +29,8 @@ Then:
 
 Notes:
     - XLSX caps at 1,048,576 rows per sheet. If your QVD is larger,
-      the script will tell you and you'll have to either split it or
-      go through CSV instead.
+      the script automatically splits the data across multiple sheets
+      ("<name>_1", "<name>_2", …) within the same workbook.
     - Big QVDs (>500k rows) can take a minute or two to convert —
       openpyxl is slow on writes. Be patient.
     - QVD reading uses pyqvd (pure Python). If you have very large
@@ -104,6 +104,7 @@ def _write_xlsx(df, out_path: Path) -> tuple[int, int]:
     """Write a DataFrame to XLSX. Returns (rows, columns) written."""
     try:
         import openpyxl  # noqa: F401
+        import pandas as pd
     except ImportError as e:
         raise SystemExit(
             f"Missing dependency: openpyxl ({e})\n"
@@ -111,20 +112,33 @@ def _write_xlsx(df, out_path: Path) -> tuple[int, int]:
         )
 
     n_rows, n_cols = df.shape
-    if n_rows > XLSX_MAX_ROWS:
-        raise SystemExit(
-            f"QVD has {n_rows:,} rows — exceeds Excel's {XLSX_MAX_ROWS:,} "
-            f"row limit per sheet.\n"
-            f"Options:\n"
-            f"  - Split the QVD into chunks and convert each separately, or\n"
-            f"  - Export to CSV instead (drive_sync.py handles CSV directly)."
-        )
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Each sheet must hold the header row plus data, so usable data rows per
+    # sheet is one less than Excel's hard limit.
+    rows_per_sheet = XLSX_MAX_ROWS - 1
+    base = (out_path.stem or "Sheet1")
+
     # Pandas handles type preservation: dates stay dates, nulls stay nulls,
-    # numbers stay numeric.  Single sheet named after the file.
-    sheet_name = (out_path.stem or "Sheet1")[:31]  # XLSX sheet name max 31
-    df.to_excel(out_path, index=False, sheet_name=sheet_name, engine="openpyxl")
+    # numbers stay numeric.
+    if n_rows <= rows_per_sheet:
+        # Single sheet named after the file.
+        sheet_name = base[:31]  # XLSX sheet name max 31 chars
+        df.to_excel(out_path, index=False, sheet_name=sheet_name, engine="openpyxl")
+        return n_rows, n_cols
+
+    # Too many rows for one sheet — split across as many sheets as needed,
+    # each named "<stem>_1", "<stem>_2", … (truncated to Excel's 31-char cap).
+    n_sheets = (n_rows + rows_per_sheet - 1) // rows_per_sheet
+    print(f"             {n_rows:,} rows exceeds the {XLSX_MAX_ROWS:,}-row "
+          f"per-sheet limit — splitting across {n_sheets} sheets")
+    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+        for i in range(n_sheets):
+            start = i * rows_per_sheet
+            chunk = df.iloc[start:start + rows_per_sheet]
+            suffix = f"_{i + 1}"
+            sheet_name = base[:31 - len(suffix)] + suffix
+            chunk.to_excel(writer, index=False, sheet_name=sheet_name)
     return n_rows, n_cols
 
 

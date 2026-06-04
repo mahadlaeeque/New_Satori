@@ -805,6 +805,7 @@ const VoiceModal = ({ open, onClose }) => {
   const activeSourcesRef = useRef([]);
   const turnEndedRef = useRef(false);
   const pendingHangupRef = useRef(false);
+  const hangupWatchdogRef = useRef(null);
 
   useEffect(() => {
     if (!open) return;
@@ -939,6 +940,33 @@ const VoiceModal = ({ open, onClose }) => {
           // Flag for hang-up after current audio finishes.
           pendingHangupRef.current = true;
           setStatusText("Goodbye\u2026");
+          // ROBUST HANG-UP: the model is instructed to SPEAK its farewell
+          // first and only THEN call end_call, so by the time this tool call
+          // arrives the goodbye audio has usually already drained \u2014 meaning
+          // src.onended won't fire again to trigger the close. Rather than
+          // depend on onended/turnComplete ordering, run a watchdog that
+          // hangs up once audio drains (with a short grace so the farewell
+          // finishes), or after a hard max wait regardless.
+          if (hangupWatchdogRef.current) clearInterval(hangupWatchdogRef.current);
+          const hangupStartedAt = Date.now();
+          hangupWatchdogRef.current = setInterval(() => {
+            if (closingRef.current) {
+              clearInterval(hangupWatchdogRef.current);
+              hangupWatchdogRef.current = null;
+              return;
+            }
+            const drained = activeSourcesRef.current.length === 0;
+            const elapsed = Date.now() - hangupStartedAt;
+            if ((drained && elapsed > 600) || elapsed > 10000) {
+              clearInterval(hangupWatchdogRef.current);
+              hangupWatchdogRef.current = null;
+              if (pendingHangupRef.current) {
+                pendingHangupRef.current = false;
+                setStatusText("Goodbye");
+                try { stop(); } catch {}
+              }
+            }
+          }, 300);
         } else {
           setStatusText("Working on your answer\u2026");
         }
@@ -1108,6 +1136,8 @@ const VoiceModal = ({ open, onClose }) => {
     processorRef.current = null; sourceRef.current = null; streamRef.current = null;
     captureCtxRef.current = null; playCtxRef.current = null; wsRef.current = null;
     nextPlayTimeRef.current = 0;
+    pendingHangupRef.current = false;
+    if (hangupWatchdogRef.current) { clearInterval(hangupWatchdogRef.current); hangupWatchdogRef.current = null; }
     if (setupTimeoutRef.current) clearTimeout(setupTimeoutRef.current);
     onClose?.();
   };

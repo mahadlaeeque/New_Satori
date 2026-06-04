@@ -1,0 +1,16 @@
+﻿.git/
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/
+qvd/
+*.xlsx
+*.csv
+*.log
+*.zip
+*.tgz
+frontend/dist/
+frontend/node_modules/
+backend/__pycache__/
