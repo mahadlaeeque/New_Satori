@@ -7567,19 +7567,147 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
             "total_hrs_90d": round(total_hrs_90d, 1),
             "by_project":    timesheet_by_project,
         },
+        "skills": _get_employee_skills(emp_code),
+        "can_edit_skills": _can_edit_employee_skills(user, emp_code),
     }
+
+
+# ─── Employee skills (practice-head assigned, used by find-best-fit) ────────
+def _get_employee_skills(emp_code: str) -> list[str]:
+    """Skills assigned to one employee (by warehouse Employee_Code), sorted."""
+    if not emp_code:
+        return []
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT skill FROM employee_skills WHERE employee_code = ? ORDER BY LOWER(skill)", (emp_code,))
+        rows = cur.fetchall(); db.close()
+        out = []
+        for r in rows:
+            out.append(r[0] if not isinstance(r, dict) else r.get("skill"))
+        return [s for s in out if s]
+    except Exception as e:
+        print(f"[skills] load error for {emp_code}: {e}")
+        return []
+
+
+def _get_skills_for_codes(codes: list[str]) -> dict:
+    """Bulk: {employee_code: [skills]} for a list of codes (find-best-fit)."""
+    codes = [c for c in {(c or "").strip() for c in (codes or [])} if c]
+    if not codes:
+        return {}
+    try:
+        db = get_db(); cur = db.cursor()
+        placeholders = ",".join(["?"] * len(codes))
+        cur.execute(f"SELECT employee_code, skill FROM employee_skills WHERE employee_code IN ({placeholders})", tuple(codes))
+        rows = cur.fetchall(); db.close()
+        out: dict = {}
+        for r in rows:
+            code = r[0] if not isinstance(r, dict) else r.get("employee_code")
+            skill = r[1] if not isinstance(r, dict) else r.get("skill")
+            if code and skill:
+                out.setdefault(code, []).append(skill)
+        return out
+    except Exception as e:
+        print(f"[skills] bulk load error: {e}")
+        return {}
+
+
+def _employee_department(emp_code: str):
+    """The warehouse department (EmployeeHierarchyNode) for one Employee_Code, or None."""
+    safe = (emp_code or "").replace("'", "''")
+    if not safe:
+        return None
+    sql = normalize_bq_project(
+        f"SELECT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') AS dept "
+        f"FROM {_bq_avail('Employee_Data')} WHERE CAST(Employee_Code AS STRING) = '{safe}' LIMIT 1"
+    )
+    r = bq_run_query(sql, max_rows=1)
+    if "error" in r:
+        return None
+    rows = r.get("rows") or []
+    return (rows[0].get("dept") or "").strip() if rows else None
+
+
+def _can_edit_employee_skills(user: dict, emp_code: str) -> bool:
+    """Admins/unrestricted users can edit anyone; a department-scoped practice
+    head can edit only employees in their own department(s)."""
+    if (user.get("role") or "").lower() == "admin":
+        return True
+    scope = _get_user_dept_scope(int(user["sub"]))
+    if scope is None:        # unrestricted non-admin
+        return True
+    if not scope:            # no scope assigned → can't edit
+        return False
+    dept = _employee_department(emp_code)
+    return bool(dept) and dept in scope
+
+
+@app.get("/api/availability/employees/{code}/skills")
+def get_employee_skills(code: str, user: dict = Depends(get_current_user)):
+    emp_code = (code or "").strip()
+    return {
+        "code": emp_code,
+        "skills": _get_employee_skills(emp_code),
+        "can_edit": _can_edit_employee_skills(user, emp_code),
+    }
+
+
+@app.post("/api/availability/employees/{code}/skills")
+def add_employee_skill(code: str, body: dict, user: dict = Depends(get_current_user)):
+    emp_code = (code or "").strip()
+    skill = (body.get("skill") or "").strip()
+    if not emp_code or not skill:
+        raise HTTPException(status_code=400, detail="Employee code and a non-empty skill are required.")
+    if len(skill) > 80:
+        skill = skill[:80]
+    if not _can_edit_employee_skills(user, emp_code):
+        raise HTTPException(status_code=403, detail="You can only manage skills for employees in your department.")
+    try:
+        db = get_db(); cur = db.cursor()
+        # Case-insensitive dedupe so 'SAP' and 'sap' don't both land.
+        cur.execute("SELECT skill FROM employee_skills WHERE employee_code = ? AND LOWER(skill) = LOWER(?)", (emp_code, skill))
+        if not cur.fetchone():
+            cur.execute(
+                "INSERT INTO employee_skills (employee_code, skill, added_by) VALUES (?, ?, ?)",
+                (emp_code, skill, int(user["sub"])),
+            )
+            db.commit()
+        db.close()
+    except Exception as e:
+        print(f"[skills] add error for {emp_code}: {e}")
+        raise HTTPException(status_code=500, detail="Could not save the skill.")
+    return {"code": emp_code, "skills": _get_employee_skills(emp_code), "can_edit": True}
+
+
+@app.delete("/api/availability/employees/{code}/skills")
+def delete_employee_skill(code: str, skill: str, user: dict = Depends(get_current_user)):
+    emp_code = (code or "").strip()
+    skill = (skill or "").strip()
+    if not emp_code or not skill:
+        raise HTTPException(status_code=400, detail="Employee code and skill are required.")
+    if not _can_edit_employee_skills(user, emp_code):
+        raise HTTPException(status_code=403, detail="You can only manage skills for employees in your department.")
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("DELETE FROM employee_skills WHERE employee_code = ? AND LOWER(skill) = LOWER(?)", (emp_code, skill))
+        db.commit(); db.close()
+    except Exception as e:
+        print(f"[skills] delete error for {emp_code}: {e}")
+        raise HTTPException(status_code=500, detail="Could not remove the skill.")
+    return {"code": emp_code, "skills": _get_employee_skills(emp_code), "can_edit": True}
+
 
 
 _FIND_BEST_FIT_PROMPT = """You are Satori AI, a senior staffing analyst at TMC. A project owner is creating a new task / project and you have to recommend the BEST 5 employees for it, ranked.
 
 You will receive:
   - The project: name, target department, description, and skills/keywords needed.
-  - A pre-filtered candidate pool of available employees in the chosen department (or adjacent departments if the department was 'Unspecified'). Each candidate row tells you their name, position, latest competency, current MAX allocation % over the last 90 days, project count, timesheet hours in the last 90 days, and location.
+  - A pre-filtered candidate pool of available employees in the chosen department (or adjacent departments if the department was 'Unspecified'). Each candidate row tells you their name, position, latest competency, current MAX allocation % over the last 90 days, project count, timesheet hours in the last 90 days, location, and `assigned_skills` (skills the practice head explicitly tagged on this person).
 
 Rank the candidates against the project using these signals, weighted in this order:
 
   1. **Availability** — prefer Bench (max alloc% = 0) first, then Partial (>0 and <100). Avoid Allocated (>=100) unless the skill match is so strong that pulling them off something matters.
-  2. **Skill match** — does competency or position contain the requested skills/keywords (case-insensitive substring)? More matches = better.
+  2. **Skill match** — STRONGEST signal is `assigned_skills` (the curated, practice-head-tagged skills) matching the requested skills/keywords; then competency/position substring matches. A candidate whose assigned_skills directly match the needed skills should rank highly even over a slightly more available person. Cite the matched assigned skill in your reasoning.
   3. **Recent engagement** — prefer recent timesheet hours > 0 (they're actively working, not dormant) but not absurdly high (avoid >300 hrs/90d unless skill is a near-perfect match).
   4. **Tie-breakers** — same location as project owner's department if known; otherwise prefer fewer concurrent projects.
 
@@ -7655,9 +7783,16 @@ def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user
         # Department had no active employees — surface a friendly empty result.
         return {"candidates_considered": 0, "recommendations": []}
 
+    # Attach practice-head-assigned skills to each candidate (used by both the
+    # pre-filter heuristic and the Gemini ranking).
+    skills_map = _get_skills_for_codes([e.get("code") for e in pool])
+    for emp in pool:
+        emp["_skills"] = skills_map.get((emp.get("code") or "").strip(), [])
+
     # Light pre-filter — keep Bench + Partial preferentially, then top up with
     # Allocated if we don't have enough. Within each band sort by skill-match
-    # count (substring hits) then by hrs_90d descending.
+    # count (substring hits) then by hrs_90d descending. Assigned skills count
+    # double — they're the explicit, curated signal.
     keywords = [k.strip().lower() for k in re.split(r"[,\n]+", skills_keywords) if k.strip()]
     def _hit_count(emp):
         haystack = (
@@ -7665,7 +7800,10 @@ def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user
             (emp.get("position") or "") + " " +
             (emp.get("location") or "")
         ).lower()
-        return sum(1 for k in keywords if k in haystack)
+        base = sum(1 for k in keywords if k in haystack)
+        skills_blob = " ".join(emp.get("_skills") or []).lower()
+        skill_hits = sum(1 for k in keywords if k in skills_blob)
+        return base + 2 * skill_hits
     for emp in pool:
         emp["_hits"] = _hit_count(emp)
 
@@ -7686,6 +7824,7 @@ def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user
             "project_count": int(e.get("project_count") or 0),
             "hrs_90d":       float(e.get("hrs_90d") or 0),
             "location":      e.get("location") or "",
+            "assigned_skills": e.get("_skills") or [],
         }
         for e in ranked_pool
     ]

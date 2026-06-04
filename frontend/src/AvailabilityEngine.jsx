@@ -565,6 +565,38 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
     return () => { cancelled = true; };
   }, [emp]);
 
+  // ── Skills (practice-head assigned) ──
+  const [skills, setSkills] = useState([]);
+  const [canEditSkills, setCanEditSkills] = useState(false);
+  const [newSkill, setNewSkill] = useState("");
+  const [skillBusy, setSkillBusy] = useState(false);
+  const [skillErr, setSkillErr] = useState(null);
+  useEffect(() => {
+    setSkills((detail && detail.skills) || []);
+    setCanEditSkills(!!(detail && detail.can_edit_skills));
+  }, [detail]);
+  const addSkill = async () => {
+    const s = newSkill.trim();
+    if (!s || skillBusy || !emp) return;
+    setSkillBusy(true); setSkillErr(null);
+    try {
+      const r = await fetchJson(`/api/availability/employees/${encodeURIComponent(emp.code)}/skills`,
+        { method: "POST", body: JSON.stringify({ skill: s }) });
+      setSkills(r.skills || []); setNewSkill("");
+    } catch (e) { setSkillErr(String(e.message || e)); }
+    finally { setSkillBusy(false); }
+  };
+  const removeSkill = async (s) => {
+    if (skillBusy || !emp) return;
+    setSkillBusy(true); setSkillErr(null);
+    try {
+      const r = await fetchJson(`/api/availability/employees/${encodeURIComponent(emp.code)}/skills?skill=${encodeURIComponent(s)}`,
+        { method: "DELETE" });
+      setSkills(r.skills || []);
+    } catch (e) { setSkillErr(String(e.message || e)); }
+    finally { setSkillBusy(false); }
+  };
+
   if (!emp) return null;
   const status = emp.status || "Bench";
   const c = STATUS_COLOR[status] || STATUS_COLOR.Bench;
@@ -643,6 +675,58 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
               <AlertCircle size={16} /> {error}
             </div>
           )}
+
+          {/* Skills (practice-head assigned; feed the find-best-fit ranker) */}
+          <div style={{ marginBottom: 20 }}>
+            <h3 style={{ margin: "0 0 10px", fontSize: 13, fontWeight: 700, color: C.textPrimary, textTransform: "uppercase", letterSpacing: "0.5px", display: "flex", alignItems: "center", gap: 6 }}>
+              <Star size={14} /> Skills
+            </h3>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+              {skills.length === 0 && (
+                <span style={{ fontSize: 13, color: C.textMuted }}>
+                  {canEditSkills ? "No skills assigned yet — add some below." : "No skills assigned yet."}
+                </span>
+              )}
+              {skills.map((s) => (
+                <span key={s} style={{
+                  display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px",
+                  borderRadius: 999, fontSize: 12.5, fontWeight: 600,
+                  background: C.accent + "18", color: C.accent, border: `1px solid ${C.accent}40`,
+                }}>
+                  {s}
+                  {canEditSkills && (
+                    <button onClick={() => removeSkill(s)} disabled={skillBusy} title="Remove skill"
+                      style={{ display: "inline-flex", background: "none", border: "none", cursor: "pointer", color: C.accent, padding: 0, opacity: skillBusy ? 0.5 : 0.8 }}>
+                      <X size={12} />
+                    </button>
+                  )}
+                </span>
+              ))}
+            </div>
+            {canEditSkills && (
+              <div style={{ marginTop: 10, display: "flex", gap: 8, maxWidth: 460 }}>
+                <input
+                  value={newSkill}
+                  onChange={(e) => setNewSkill(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addSkill(); } }}
+                  placeholder="Add a skill (e.g. SAP FICO, Qlik Sense, ABAP)…"
+                  maxLength={80}
+                  style={{
+                    flex: 1, padding: "8px 12px", borderRadius: 8, border: `1px solid ${C.border}`,
+                    background: C.surface, color: C.textPrimary, fontSize: 13, outline: "none",
+                  }}
+                />
+                <button onClick={addSkill} disabled={skillBusy || !newSkill.trim()} style={{
+                  padding: "8px 14px", borderRadius: 8, border: "none", cursor: (skillBusy || !newSkill.trim()) ? "default" : "pointer",
+                  background: C.accent, color: "#fff", fontWeight: 600, fontSize: 13,
+                  display: "inline-flex", alignItems: "center", gap: 6, opacity: (skillBusy || !newSkill.trim()) ? 0.6 : 1,
+                }}>
+                  <Plus size={14} /> Add
+                </button>
+              </div>
+            )}
+            {skillErr && <div style={{ fontSize: 12, color: "#991B1B", marginTop: 6 }}>{skillErr}</div>}
+          </div>
 
           {/* Projects */}
           <div style={{ marginBottom: 20 }}>

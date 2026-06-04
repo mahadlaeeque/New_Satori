@@ -507,6 +507,18 @@ def _init_sqlite():
             PRIMARY KEY (report_id, user_id)
         )
     """)
+    # Practice-head-assigned skills per employee (keyed by warehouse Employee_Code
+    # like 'E-210', NOT a users.id). Composite PK prevents duplicate skills per
+    # employee. Used by the Availability Engine "find best fit" ranking.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS employee_skills (
+            employee_code  TEXT NOT NULL,
+            skill          TEXT NOT NULL,
+            added_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (employee_code, skill)
+        )
+    """)
     # Audit log of every data-touching action: dashboard view, report preview,
     # SQL query, file download, AI prompt. Surfaced to admins in
     # /api/admin/audit. Retained for 1 year (see _retention_sweep).
@@ -758,6 +770,18 @@ def _init_postgres():
             shared_by      INTEGER NOT NULL REFERENCES users(id),
             created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (report_id, user_id)
+        )
+    """)
+    # Practice-head-assigned skills per employee (keyed by warehouse Employee_Code
+    # like 'E-210', NOT a users.id). Composite PK prevents duplicate skills per
+    # employee. Used by the Availability Engine "find best fit" ranking.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS employee_skills (
+            employee_code  TEXT NOT NULL,
+            skill          TEXT NOT NULL,
+            added_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (employee_code, skill)
         )
     """)
     # Data-access audit log (Postgres mirror of the SQLite definition above).
