@@ -537,6 +537,44 @@ const SavedTasksPanel = ({ tasks, onDelete, onToggleStatus, onOpen }) => {
 };
 
 // ─── Employee Detail Modal ───
+// Suggested skills shown as quick-add chips when assigning skills. Keyed by a
+// substring of the employee's department/competency so suggestions are
+// function-specific; GENERAL is always appended. The practice head can still
+// type any skill they want — these are just starting points.
+const SKILL_SUGGESTIONS = {
+  qlik:      ["Qlik Sense", "QlikView", "NPrinting", "Qlik Cloud", "Data Modeling"],
+  "sap":     ["SAP FICO", "SAP MM", "SAP SD", "SAP ABAP", "SAP BASIS", "SAP S/4HANA", "SAP HCM", "SAP SuccessFactors"],
+  abap:      ["SAP ABAP", "SAP Fiori", "SAPUI5", "OData", "CDS Views"],
+  fiori:     ["SAP Fiori", "SAPUI5", "ABAP", "OData"],
+  basis:     ["SAP BASIS", "HANA Admin", "System Migration", "OS/DB Migration"],
+  finance:   ["SAP FICO", "SAP Controlling", "Financial Reporting", "Excel"],
+  hcm:       ["SAP HCM", "SAP SuccessFactors", "Payroll", "SLCM"],
+  digital:   ["Python", "N8N", "Claude", "LangChain", "React", "Node.js", "SQL", "Power BI"],
+  dt:        ["Python", "N8N", "Claude", "Automation", "React", "SQL", "AI/ML"],
+  analytics: ["Power BI", "Tableau", "SQL", "Python", "Data Modeling", "Qlik Sense"],
+  cloud:     ["AWS", "Azure", "GCP", "Kubernetes", "Terraform", "CI/CD"],
+  sales:     ["CRM", "Pipeline Management", "Account Management", "Negotiation", "Presales"],
+  pmo:       ["Project Management", "Agile/Scrum", "JIRA", "Stakeholder Management", "MS Project"],
+};
+const GENERAL_SKILLS = ["Python", "SQL", "Power BI", "Claude", "N8N", "Project Management", "Communication", "Data Analysis"];
+const suggestionsFor = (department, competency, already) => {
+  const key = `${department || ""} ${competency || ""}`.toLowerCase();
+  const picked = [];
+  for (const [k, list] of Object.entries(SKILL_SUGGESTIONS)) {
+    if (key.includes(k)) picked.push(...list);
+  }
+  const taken = new Set((already || []).map((s) => s.toLowerCase()));
+  const seen = new Set();
+  const out = [];
+  for (const s of [...picked, ...GENERAL_SKILLS]) {
+    const low = s.toLowerCase();
+    if (taken.has(low) || seen.has(low)) continue;
+    seen.add(low); out.push(s);
+    if (out.length >= 10) break;
+  }
+  return out;
+};
+
 // Drill-down for one employee. Fetches /api/availability/employees/{code}/detail
 // when an employee is selected, then renders their projects (Allocation_data)
 // and 90-day timesheet activity. The card-level fields (name, position,
@@ -575,8 +613,8 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
     setSkills((detail && detail.skills) || []);
     setCanEditSkills(!!(detail && detail.can_edit_skills));
   }, [detail]);
-  const addSkill = async () => {
-    const s = newSkill.trim();
+  const addSkill = async (explicit) => {
+    const s = (explicit != null ? explicit : newSkill).trim();
     if (!s || skillBusy || !emp) return;
     setSkillBusy(true); setSkillErr(null);
     try {
@@ -703,28 +741,52 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
                 </span>
               ))}
             </div>
-            {canEditSkills && (
-              <div style={{ marginTop: 10, display: "flex", gap: 8, maxWidth: 460 }}>
-                <input
-                  value={newSkill}
-                  onChange={(e) => setNewSkill(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addSkill(); } }}
-                  placeholder="Add a skill (e.g. SAP FICO, Qlik Sense, ABAP)…"
-                  maxLength={80}
-                  style={{
-                    flex: 1, padding: "8px 12px", borderRadius: 8, border: `1px solid ${C.border}`,
-                    background: C.surface, color: C.textPrimary, fontSize: 13, outline: "none",
-                  }}
-                />
-                <button onClick={addSkill} disabled={skillBusy || !newSkill.trim()} style={{
-                  padding: "8px 14px", borderRadius: 8, border: "none", cursor: (skillBusy || !newSkill.trim()) ? "default" : "pointer",
-                  background: C.accent, color: "#fff", fontWeight: 600, fontSize: 13,
-                  display: "inline-flex", alignItems: "center", gap: 6, opacity: (skillBusy || !newSkill.trim()) ? 0.6 : 1,
-                }}>
-                  <Plus size={14} /> Add
-                </button>
-              </div>
-            )}
+            {canEditSkills && (() => {
+              const suggestions = suggestionsFor(emp.department, detail && detail.projects && detail.projects[0] && detail.projects[0].competency, skills);
+              return (
+                <>
+                  <div style={{ marginTop: 10, display: "flex", gap: 8, maxWidth: 460 }}>
+                    <input
+                      list="skill-suggestions"
+                      value={newSkill}
+                      onChange={(e) => setNewSkill(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addSkill(); } }}
+                      placeholder="Add a skill (e.g. SAP FICO, Qlik Sense, Python)…"
+                      maxLength={80}
+                      style={{
+                        flex: 1, padding: "8px 12px", borderRadius: 8, border: `1px solid ${C.border}`,
+                        background: C.surface, color: C.textPrimary, fontSize: 13, outline: "none",
+                      }}
+                    />
+                    <datalist id="skill-suggestions">
+                      {suggestions.map((s) => <option key={s} value={s} />)}
+                    </datalist>
+                    <button onClick={() => addSkill()} disabled={skillBusy || !newSkill.trim()} style={{
+                      padding: "8px 14px", borderRadius: 8, border: "none", cursor: (skillBusy || !newSkill.trim()) ? "default" : "pointer",
+                      background: C.accent, color: "#fff", fontWeight: 600, fontSize: 13,
+                      display: "inline-flex", alignItems: "center", gap: 6, opacity: (skillBusy || !newSkill.trim()) ? 0.6 : 1,
+                    }}>
+                      <Plus size={14} /> Add
+                    </button>
+                  </div>
+                  {suggestions.length > 0 && (
+                    <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                      <span style={{ fontSize: 11, color: C.textMuted, fontWeight: 600 }}>Suggested:</span>
+                      {suggestions.slice(0, 8).map((s) => (
+                        <button key={s} onClick={() => addSkill(s)} disabled={skillBusy} title={`Add ${s}`}
+                          style={{
+                            display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 9px",
+                            borderRadius: 999, fontSize: 12, fontWeight: 600, cursor: skillBusy ? "default" : "pointer",
+                            background: C.surfaceAlt, color: C.textSecondary, border: `1px solid ${C.border}`,
+                          }}>
+                          <Plus size={11} /> {s}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
             {skillErr && <div style={{ fontSize: 12, color: "#991B1B", marginTop: 6 }}>{skillErr}</div>}
           </div>
 
