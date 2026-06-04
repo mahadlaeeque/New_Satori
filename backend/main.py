@@ -2269,6 +2269,10 @@ Every numeric figure (counts, dates, percentages, hours, names of employees, dep
 ### END RULE #0 ###
 ### END RULE #0 ###
 
+### CONVERSATION CONTEXT — CARRY THE FILTER FORWARD ###
+This is a multi-turn conversation. Whenever the user has established a SUBJECT or FILTER — a specific employee (e.g. "E-210"), a department (e.g. "Qlik"), a project, or a time period — that filter STAYS IN EFFECT for every follow-up turn until the user clearly changes it. Short follow-ups like "make it month-on-month", "now show timesheet", "what about May", "and their attendance" inherit the SAME employee/department/period as the previous turn. NEVER silently widen the scope to all employees or all departments on a follow-up. Concretely: if the prior turns were about employee E-210 and the user then asks "share timesheet for May 2026", you MUST return E-210's timesheet for May 2026 (WHERE the employee = E-210), NOT a company-wide total. If you are ever unsure whether the filter still applies, keep it and say which subject you're answering for. Re-apply the same WHERE clause in your run_sql every turn.
+### END CONVERSATION CONTEXT ###
+
 ### EXACT COLUMN NAMES IN Employee_Data (case-insensitive, BUT UNDERSCORE-SENSITIVE - copy verbatim) ###
 LOWERCASE-WITH-UNDERSCORE columns (these DO have underscores):
 - employee_code          (e.g. 'E-902')
@@ -3273,14 +3277,26 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
 
     # Fetch relevant BigQuery data unless the user opted out of AI data flow.
     # When opted out, prompts go to Gemini with no business data attached.
+    #
+    # ONLY on the FIRST turn (no history). find_relevant_data() is a keyword
+    # shortcut that injects COMPANY-WIDE, UNSCOPED QUERY_MAP aggregates based on
+    # the current message alone — it can't see the conversation. On a follow-up
+    # (e.g. discussing employee E-210, then "share timesheet for May") it would
+    # inject the all-employees timesheet and the model would parrot it, silently
+    # dropping the E-210 / department filter. So on follow-ups we skip the
+    # injection entirely and let run_sql answer WITH the conversation context
+    # (the model sees full history). Fixes the "Satori forgets the filter and
+    # switches to all departments/employees" memory bug.
     bq_context = ""
-    if not body.voice_mode and not opted_out and chat_dept_scope is None:
+    if not body.voice_mode and not opted_out and chat_dept_scope is None and not body.history:
         try:
             bq_context = find_relevant_data(body.message)
             if bq_context:
                 print(f"[BQ] Found relevant data for: {body.message[:50]}...")
         except Exception as e:
             print(f"[BQ] Error fetching data: {e}")
+    elif body.history:
+        print("[BQ] Follow-up turn — skipping keyword aggregate injection; run_sql keeps conversation context.")
     elif chat_dept_scope is not None:
         print(f"[BQ] Skipping pre-injected context for dept-scoped user (scope={chat_dept_scope}); run_sql is enforced.")
 
@@ -3306,6 +3322,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
         user_message = (
             f"{safe_message}\n\n{bq_context}\n\n"
             f"CRITICAL INSTRUCTIONS FOR YOUR RESPONSE:\n"
+            f"0. The injected summary above is GENERAL, COMPANY-WIDE, UNSCOPED reference data — it is NOT filtered to any specific employee, department, or period. If the user's question is about a specific employee / department / project / month, DO NOT report these general numbers as the answer — call run_sql with that exact filter instead. Only use the injected summary directly when the question is itself a company-wide aggregate.\n"
             f"1. YOU HAVE FULL BIGQUERY ACCESS via the run_sql tool. Any question about the SAP ERP mirror CAN be answered.\n"
             f"2. FORBIDDEN RESPONSES: 'I don't have that data', 'I cannot provide', 'I do not have a breakdown', 'the data is not available', 'not in the current data'. These are ALL WRONG — if the injected summary doesn't have it, YOU CAN STILL GET IT by calling run_sql.\n"
             f"3. Decision flow:\n"
@@ -4847,6 +4864,11 @@ ALLOCATION DATA — read before writing any allocation query:
   that collapses to "Qlik Bench 100%" for every month (a known wrong answer).
 - "Billable/real allocation %" = MAX over Flag='Allocated' rows. The Bench
   project shows 100% but means UNALLOCATED.
+- DEFAULT TO ACTIVE ALLOCATIONS ONLY: when listing someone's allocations, show
+  only Flag='Allocated' AND allocation_percent > 0. Do NOT list 0% rows or the
+  '00Q - Qlik Bench' project unless the user explicitly asks for bench / the
+  full breakdown. (e.g. for E-210, show the 80/50/30/20% projects, not the long
+  tail of 0% projects.)
 - Allocation is a PLANNED / FORWARD allocation (upcoming weeks; can lag reality)
   — NOT proof of current work. What someone is ACTUALLY working on now = their
   recent Timesheet hours by project (last ~90 days). Someone can read 'Bench' in
@@ -8572,7 +8594,7 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "week_id, year_id, Week, Date (DATE), Year, Month (STRING), Data_Type.\n"
             "JOIN to Employee_Data on norm(employee_id)=norm(Employee_Code), norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0') (NOT on emp_name — names don't match).\n"
             "⚠️ ROWS ARE WEEKLY SNAPSHOTS — there are MANY rows per employee per project per month, and one or more 'Bench' rows. NEVER list raw rows or group by Month and pick one project: the Bench project '00Q - Qlik Bench' (Flag='Bench') sits at allocation_percent=100, so a per-month MAX collapses to 'Qlik Bench (100%)' for almost everyone (this is a known wrong answer).\n"
-            "TO SHOW AN EMPLOYEE'S PROJECT ALLOCATIONS (mirror the Availability Engine): GROUP BY project_id, take MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per project, JOIN Project_Master ON CAST(project_id AS STRING)=Project_Code for the name (some project_ids aren't in Project_Master — fall back to the code), keep the Flag, ORDER BY allocation DESC. Show every project (real + the Bench one), not one-per-month.\n"
+            "TO SHOW AN EMPLOYEE'S PROJECT ALLOCATIONS (mirror the Availability Engine): GROUP BY project_id, take MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per project, JOIN Project_Master ON CAST(project_id AS STRING)=Project_Code for the name (some project_ids aren't in Project_Master — fall back to the code), keep the Flag, ORDER BY allocation DESC. DEFAULT TO ACTIVE ALLOCATIONS ONLY: show only Flag='Allocated' AND allocation_percent>0 — omit 0% rows and the '00Q - Qlik Bench' project unless the user explicitly asks for bench / the full breakdown. Never collapse to one project per month.\n"
             "REAL/BILLABLE allocation % = MAX over Flag='Allocated' rows only; don't take MAX(allocation_percent) blindly (the Bench row is 100%).\n"
             "⚠️ ALLOCATION IS A PLANNED / FORWARD allocation (it carries upcoming weeks and can lag or differ from what a person is actually doing) — it is NOT proof of current work, and an allocation 'Bench' does NOT mean someone is idle. GROUND TRUTH for what someone is ACTUALLY working on now = recent Timesheet_Data hours by project (last ~90 days, TICKET_PROJECT_LABEL/TICKET_PROJECT_CODE). If a person is logging substantial hours on a project they ARE allocated/working on it — e.g. Sufyan Baig reads 'Bench' in allocation but is actually on Packages Qlik SLA per his timesheet. So: for 'what is X working on / X's current project(s) / is X really on bench', answer from their top recent timesheet projects, and NEVER call someone with recent logged hours bench/idle. Use Allocation_Data for the forward plan (filter Date <= CURRENT_DATE() for the 'now' snapshot), Timesheet_Data for actuals."
         ),
@@ -8673,6 +8695,7 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "by TICKET_STATUS / TICKET_CLOSED_STATUS, by TICKET_PRIORITY",  # pre open/closed ticket note
     "surfaces planned future allocations too.",                 # pre allocation-is-forward / timesheet-is-actual note
     "are usually reported as SEPARATE segregated queries: filter FLAG",  # pre tasks-vs-tickets two-dimension note
+    "Show every project (real + the Bench one), not one-per-month.",  # pre active-allocation-default note
 )
 
 
