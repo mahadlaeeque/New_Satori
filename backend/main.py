@@ -5021,7 +5021,7 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
   month / year filter — the timeframe is already baked into each widget's WHERE.
   Date filters cannot be a value dropdown and will render blank.
 - A filter only works if its column is present in EVERY KPI/chart query, because
-  the chosen value is injected at each `{where}`. So if you add an
+  the chosen value is injected at each `{{where}}`. So if you add an
   "employee_name" or "department" filter, make sure every widget's SQL joins/
   selects from a table that has that column (e.g. join Employee_Data, or query
   Attendance_Data which has employee_name). If a column isn't available in all
