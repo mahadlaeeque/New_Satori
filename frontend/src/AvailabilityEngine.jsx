@@ -27,7 +27,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Users, Search, Plus, X, Sparkles, MapPin, Briefcase, Clock,
   Activity, Filter, AlertCircle, CheckCircle, Loader2, Trash2,
-  ArrowRight, TrendingUp, ChevronRight, FileText, Star
+  ArrowRight, TrendingUp, ChevronRight, FileText, Star, Calendar
 } from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
@@ -594,10 +594,75 @@ const suggestionsFor = (department, competency, already) => {
 // and 90-day timesheet activity. The card-level fields (name, position,
 // status, allocation bar) come from the card prop directly so the header
 // renders instantly while the detail fetch is in flight.
+
+// ─── Week-by-week allocation timeline ───
+// Renders the per-week allocated% for an employee across recent + FUTURE weeks
+// (Allocation_Data is a weekly feed running into 2028). Each bar = one week,
+// coloured by status; future/planned weeks are dashed + faded; the first future
+// week carries a dashed "now" divider. The headline shows weeks-on-bench (the
+// number a flat "on bench" list hides — 1 week vs 75 weeks are very different).
+const WK_STATUS_COLOR = { allocated: STATUS_COLOR.Allocated, partial: STATUS_COLOR.Partial, bench: STATUS_COLOR.Bench };
+const WeeklyTimeline = ({ data, loading }) => {
+  if (loading && !data) return <div style={{ padding: 12, color: C.textMuted, fontSize: 13 }}>Loading weekly allocation…</div>;
+  const weeks = (data && data.weeks) || [];
+  if (!weeks.length) return <div style={{ padding: 12, color: C.textMuted, fontSize: 13 }}>No weekly allocation data.</div>;
+  const wob = data.weeks_on_bench || 0;
+  const cur = Math.round(data.current_pct || 0);
+  const MAXH = 60, CAP = 150;
+  let firstFutureSeen = false;
+  return (
+    <div>
+      <div style={{ marginBottom: 8 }}>
+        {wob > 0
+          ? <span style={{ fontSize: 12, fontWeight: 700, color: STATUS_COLOR.Bench.fg }}>On bench {wob} week{wob > 1 ? "s" : ""} (and counting)</span>
+          : <span style={{ fontSize: 12, fontWeight: 700, color: cur >= 100 ? STATUS_COLOR.Allocated.fg : STATUS_COLOR.Partial.fg }}>{cur}% allocated this week</span>}
+      </div>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 3, overflowX: "auto", paddingBottom: 6 }}>
+        {weeks.map((w, i) => {
+          const col = WK_STATUS_COLOR[w.status] || STATUS_COLOR.Bench;
+          const h = Math.max(3, Math.round(Math.min(w.allocated_pct, CAP) / CAP * MAXH));
+          const showNow = w.is_future && !firstFutureSeen;
+          if (w.is_future) firstFutureSeen = true;
+          return (
+            <div key={i}
+              title={`${w.week_date} · ${Math.round(w.allocated_pct)}% · ${w.project_count} project${w.project_count === 1 ? "" : "s"}${w.is_future ? " (planned)" : ""}`}
+              style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, minWidth: 22, borderLeft: showNow ? `2px dashed ${C.accent}` : "none", paddingLeft: showNow ? 4 : 0 }}>
+              <div style={{ height: MAXH, display: "flex", alignItems: "flex-end" }}>
+                <div style={{ width: 13, height: h, borderRadius: "3px 3px 0 0", background: col.fg, opacity: w.is_future ? 0.4 : 1, border: w.is_future ? `1px dashed ${col.fg}` : "none" }} />
+              </div>
+              <div style={{ fontSize: 9, color: C.textMuted }}>{w.week_no}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2 }}>
+        <span style={{ fontSize: 10, color: C.textMuted }}>← past · week #</span>
+        <span style={{ fontSize: 10, color: C.accent, fontWeight: 600 }}>now (dashed) · planned →</span>
+      </div>
+    </div>
+  );
+};
+
 const EmployeeDetailModal = ({ emp, onClose }) => {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [weekly, setWeekly] = useState(null);
+  const [weeklyLoading, setWeeklyLoading] = useState(false);
+
+  useEffect(() => {
+    if (!emp) { setWeekly(null); return; }
+    let cancelled = false;
+    (async () => {
+      setWeeklyLoading(true);
+      try {
+        const w = await fetchJson(`/api/availability/employees/${encodeURIComponent(emp.code)}/weekly`);
+        if (!cancelled) setWeekly(w);
+      } catch { if (!cancelled) setWeekly(null); }
+      finally { if (!cancelled) setWeeklyLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [emp]);
 
   useEffect(() => {
     if (!emp) { setDetail(null); setError(null); return; }
@@ -802,6 +867,14 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
               );
             })()}
             {skillErr && <div style={{ fontSize: 12, color: "#991B1B", marginTop: 6 }}>{skillErr}</div>}
+          </div>
+
+          {/* Weekly allocation timeline (past → planned) */}
+          <div style={{ marginBottom: 20 }}>
+            <h3 style={{ margin: "0 0 10px", fontSize: 13, fontWeight: 700, color: C.textPrimary, textTransform: "uppercase", letterSpacing: "0.5px", display: "flex", alignItems: "center", gap: 6 }}>
+              <Calendar size={14} /> Weekly allocation
+            </h3>
+            <WeeklyTimeline data={weekly} loading={weeklyLoading} />
           </div>
 
           {/* Projects */}

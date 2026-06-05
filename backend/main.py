@@ -7761,6 +7761,106 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
     }
 
 
+@app.get("/api/availability/employees/{code}/weekly")
+def availability_employee_weekly(code: str, weeks_back: int = 8, weeks_fwd: int = 8,
+                                 user: dict = Depends(get_current_user)):
+    """Week-by-week allocation timeline for one employee, PAST and FUTURE.
+
+    Allocation_Data is a weekly feed running ~2024→2028, so we can show how
+    much a person is allocated each week and which weeks they sit on the bench
+    (allocated% = 0). Returns:
+      weeks          — [{week_date, year, week_no, allocated_pct, project_count,
+                         status('allocated'|'partial'|'bench'), is_future}]
+      weeks_on_bench — consecutive most-recent past/current weeks at 0% allocated
+                       (0 if they're allocated this week). This is the number the
+                       flat "on bench" list hides — e.g. one Qlik person has been
+                       benched 1 week, another 75.
+      current_pct    — this (latest) week's allocated %.
+    """
+    emp_code = (code or "").strip()
+    if not emp_code:
+        raise HTTPException(status_code=400, detail="Employee code is required.")
+    safe_code = emp_code.replace("'", "''")
+    norm_target = _norm_emp_id(f"'{safe_code}'")
+    wb = max(0, min(int(weeks_back), 52))
+    wf = max(0, min(int(weeks_fwd), 52))
+
+    # Window is anchored on the latest snapshot (<= today) so the grid aligns to
+    # the weekly cadence; alias is week_date (NOT `week` — collides with `Week`).
+    weekly_sql = f"""
+        WITH cur AS (
+          SELECT MAX(Date) AS d FROM {_bq_avail('Allocation_Data')}
+          WHERE Date <= CURRENT_DATE()
+        )
+        SELECT a.Date AS week_date, a.Year AS yr, a.Week AS wk,
+          ROUND(SUM(IF(a.Flag = 'Allocated', SAFE_CAST(a.allocation_percent AS FLOAT64), 0)), 0) AS allocated_pct,
+          COUNT(DISTINCT IF(a.Flag = 'Allocated' AND SAFE_CAST(a.allocation_percent AS FLOAT64) > 0, a.project_id, NULL)) AS project_count
+        FROM {_bq_avail('Allocation_Data')} a, cur
+        WHERE {_norm_emp_id('a.employee_id')} = {norm_target}
+          AND a.Date BETWEEN DATE_SUB(cur.d, INTERVAL {wb * 7} DAY)
+                         AND DATE_ADD(cur.d, INTERVAL {wf * 7} DAY)
+        GROUP BY week_date, yr, wk
+        ORDER BY week_date
+    """
+    weekly_sql = normalize_bq_project(_autofix_dashboard_sql(weekly_sql))
+    rw = bq_run_query(weekly_sql, max_rows=200)
+    if "error" in rw:
+        print(f"[/api/availability/employees/weekly] BQ error: {rw['error']}")
+        raise HTTPException(status_code=500, detail=rw["error"])
+
+    from datetime import date as _date
+    today = _date.today()
+    weeks = []
+    for row in (rw.get("rows") or []):
+        wd = row.get("week_date")
+        pct = float(row.get("allocated_pct") or 0)
+        status = "allocated" if pct >= 100 else ("partial" if pct > 0 else "bench")
+        is_future = False
+        try:
+            is_future = (_date.fromisoformat(str(wd)) > today) if wd else False
+        except Exception:
+            is_future = False
+        weeks.append({
+            "week_date":     str(wd) if wd else None,
+            "year":          int(row.get("yr") or 0),
+            "week_no":       int(row.get("wk") or 0),
+            "allocated_pct": pct,
+            "project_count": int(row.get("project_count") or 0),
+            "status":        status,
+            "is_future":     is_future,
+        })
+
+    # Consecutive bench streak ending at the latest PAST/current week.
+    streak_sql = f"""
+        WITH wk AS (
+          SELECT a.Date AS d,
+                 SUM(IF(a.Flag = 'Allocated', SAFE_CAST(a.allocation_percent AS FLOAT64), 0)) AS alloc
+          FROM {_bq_avail('Allocation_Data')} a
+          WHERE {_norm_emp_id('a.employee_id')} = {norm_target} AND a.Date <= CURRENT_DATE()
+          GROUP BY d
+        ),
+        ranked AS (SELECT d, alloc, ROW_NUMBER() OVER (ORDER BY d DESC) AS rn FROM wk)
+        SELECT
+          (SELECT alloc FROM ranked WHERE rn = 1) AS current_alloc,
+          COUNTIF(alloc = 0 AND rn <= (SELECT MIN(IF(alloc > 0, rn, 999999)) FROM ranked) - 1) AS weeks_on_bench
+        FROM ranked
+    """
+    streak_sql = normalize_bq_project(_autofix_dashboard_sql(streak_sql))
+    rs = bq_run_query(streak_sql, max_rows=1)
+    weeks_on_bench, current_pct = 0, 0.0
+    if "error" not in rs and (rs.get("rows") or []):
+        srow = rs["rows"][0]
+        weeks_on_bench = int(srow.get("weeks_on_bench") or 0)
+        current_pct = float(srow.get("current_alloc") or 0)
+
+    return {
+        "code": emp_code,
+        "weeks": weeks,
+        "weeks_on_bench": weeks_on_bench,
+        "current_pct": current_pct,
+    }
+
+
 # ─── Employee skills (practice-head assigned, used by find-best-fit) ────────
 def _get_employee_skills(emp_code: str) -> list[str]:
     """Skills assigned to one employee (by warehouse Employee_Code), sorted."""
@@ -8984,7 +9084,7 @@ _DEFAULT_SCHEMA_SETTINGS = [
         "table_name": "Allocation_Data",
         "sort_order": 30,
         "description": (
-            "Weekly project allocation (~385k rows).\n"
+            "Weekly project allocation feed — one row per employee × project × week (~385k rows; weekly snapshots run 2024 → 2028, so PAST and FUTURE weeks both exist).\n"
             "Columns (EXACT — do not invent others): project_id (STRING — JOIN to Project_Master.Project_Code), employee_id (STRING 'E-2141' — "
             "the employee key; JOIN to Employee_Data digit-normalised), emp_name (STRING), "
             "allocation_percent (INT64 — already numeric, compare/aggregate directly e.g. allocation_percent > 0; SAFE_CAST is a harmless no-op), emp_competency (STRING), "
@@ -9005,6 +9105,9 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "WHERE norm(a.employee_id)='<digits>' GROUP BY project HAVING pct>0 ORDER BY pct DESC. "
             "Show ONLY active rows (pct>0); these can sum to >100% (overallocated). Omit 0% rows and the Bench project unless asked. For a SPECIFIC MONTH use that month's latest week (MAX(Date) WHERE Year=Y AND Month=M). NEVER use MAX(allocation_percent) across all history, and never group-by-month-pick-one (that yields 'Qlik Bench 100%').\n"
             "IDENTITY: resolve the exact Employee_Code by name FIRST — SELECT Employee_Code, Resource_Name FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%<name>%'; there is usually exactly ONE match (e.g. 'Adnan Raza' = E-218). Use THAT code, state it, and never guess a code.\n"
+            "⚠️ BENCH IS PER-WEEK, NOT 'EVER' — the #1 mistake. 'On the bench' / 'zero allocation' means on bench in a SPECIFIC week (default = the CURRENT/latest week), NEVER 'has ever had one 0% week'. Someone allocated this week but benched months ago is NOT on the bench. CURRENT bench population recipe: WITH cur AS (SELECT MAX(Date) d FROM Allocation_Data WHERE Date<=CURRENT_DATE()) SELECT e.Resource_Name FROM Employee_Data e WHERE <active + dept filter> AND NOT EXISTS (SELECT 1 FROM Allocation_Data a, cur WHERE norm(a.employee_id)=norm(e.Employee_Code) AND a.Date=cur.d AND a.Flag='Allocated' AND SAFE_CAST(a.allocation_percent AS FLOAT64)>0).\n"
+            "WHEN LISTING WHO IS ON BENCH, do NOT return a flat name list — report each person's WEEKS-ON-BENCH (how many consecutive recent weeks at 0% allocated), because a flat list hides that one person is benched 1 week and another 75. weeks-on-bench recipe: WITH wk AS (SELECT a.Date d, SUM(IF(a.Flag='Allocated',SAFE_CAST(a.allocation_percent AS FLOAT64),0)) alloc FROM Allocation_Data a WHERE norm(a.employee_id)=norm('<code>') AND a.Date<=CURRENT_DATE() GROUP BY d), ranked AS (SELECT d,alloc,ROW_NUMBER() OVER(ORDER BY d DESC) rn FROM wk) SELECT COUNTIF(alloc=0 AND rn <= (SELECT MIN(IF(alloc>0,rn,999999)) FROM ranked)-1) AS weeks_on_bench.\n"
+            "WEEK-BY-WEEK allocation for a person (incl. FUTURE weeks): SELECT a.Date AS week_date, ROUND(SUM(IF(a.Flag='Allocated',SAFE_CAST(a.allocation_percent AS FLOAT64),0)),0) AS allocated_pct FROM Allocation_Data a WHERE norm(a.employee_id)=norm('<code>') GROUP BY week_date ORDER BY week_date (alias the date column week_date, NOT 'week' — it collides with the Week column). For 'allocation per week / for which week / upcoming weeks' show this series, not a single snapshot.\n"
             "⚠️ ALLOCATION IS A PLANNED / FORWARD allocation (it carries upcoming weeks and can lag or differ from what a person is actually doing) — it is NOT proof of current work, and an allocation 'Bench' does NOT mean someone is idle. GROUND TRUTH for what someone is ACTUALLY working on now = recent Timesheet_Data hours by project (last ~90 days, TICKET_PROJECT_LABEL/TICKET_PROJECT_CODE). If a person is logging substantial hours on a project they ARE allocated/working on it — e.g. Sufyan Baig reads 'Bench' in allocation but is actually on Packages Qlik SLA per his timesheet. So: for 'what is X working on / X's current project(s) / is X really on bench', answer from their top recent timesheet projects, and NEVER call someone with recent logged hours bench/idle. Use Allocation_Data for the forward plan (filter Date <= CURRENT_DATE() for the 'now' snapshot), Timesheet_Data for actuals."
         ),
     },
@@ -9012,7 +9115,7 @@ _DEFAULT_SCHEMA_SETTINGS = [
         "table_name": "Timesheet_Data",
         "sort_order": 40,
         "description": (
-            "Ticket / project + logged-hours data — this is the full TICKETING dataset too (~188k rows).\n"
+            "Ticket / project + logged-hours data — this is the full TICKETING + WORK-PACKAGE + SLA dataset too (~189k rows).\n"
             "Columns: EMPLOYEE_CODE (STRING 'E-1571' — the employee who logged the hours; the employee key, "
             "JOIN/filter on it digit-normalised), TICKET_USER_ID (STRING — an unrelated internal id, do NOT join/filter on it), "
             "FLAG (STRING — 'Assigned' / 'Un-Assigned', note the hyphen) and TICKET_TYPE (STRING — 'Task' / 'Ticket') are TWO SEPARATE, "
@@ -9034,6 +9137,8 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "(per-ticket: GROUP BY TICKET_NUMBER, closed = MAX(SAFE_CAST(TICKET_CLOSED_STATUS AS INT64))=1). 'How many open/closed' = COUNT(DISTINCT TICKET_NUMBER), not row counts.\n"
             "TICKETING use cases: open vs closed (TICKET_CLOSED_STATUS), approved vs submitted (TICKET_STATUS), counts/hours by TICKET_TYPE / TICKET_PRIORITY, "
             "and ALWAYS segregate Assigned vs Un-Assigned via FLAG when asked about assigned/unassigned tickets.\n"
+            "WORK PACKAGES (WP): TICKET_WP_ID is the Work-Package id (populated only on Assigned 'Task' rows; ~3,040 distinct WPs; blank/NULL = no WP). For WP questions GROUP BY TICKET_WP_ID — hours per WP = SUM(TICKET_HOURS), tasks/tickets per WP = COUNT(DISTINCT TICKET_NUMBER), people per WP = COUNT(DISTINCT EMPLOYEE_CODE). 'work package' / 'WP' ALWAYS means TICKET_WP_ID.\n"
+            "SLA PROJECTS / SUPPORT: an SLA (support) project is one whose TICKET_PROJECT_LABEL contains 'SLA' (case-insensitive) — e.g. '931 - OGDCL SAP SLA', '743 - CGA SLA', '1250 - Packages Qlik Support SLA', '839 - SAP Support SLA Internal'. Filter SLA work with WHERE UPPER(TICKET_PROJECT_LABEL) LIKE '%SLA%'; segregate SLA (support) vs non-SLA (implementation/project) work this way. SLA hours = SUM(TICKET_HOURS) on matching labels; per-SLA-project = GROUP BY TICKET_PROJECT_LABEL; who works on SLAs = GROUP BY EMPLOYEE_CODE. 'SLA projects' / 'support SLAs' / 'on SLA' = these.\n"
             "To attribute hours/tickets to a person/department, JOIN Employee_Data on "
             "norm(EMPLOYEE_CODE)=norm(Employee_Code) where norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0')."
         ),
@@ -9111,6 +9216,8 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "Hist_Win_Rate (decimal 0-1 — multiply by 100 for %)",      # pre Hist_Win_Rate-is-STRING note
     "Open_Deals, Win_Rate_by (decimal 0-1).",                   # pre Win_Rate_by-is-STRING note
     "CRM_Pipeline, Coverage_Ratio, Status, Action.",            # pre Coverage_Ratio-is-STRING note
+    "this is the full TICKETING dataset too (~188k rows)",      # pre WP + SLA timesheet note
+    "Weekly project allocation (~385k rows).",                  # pre per-week-bench / weeks-on-bench allocation note
 )
 
 
