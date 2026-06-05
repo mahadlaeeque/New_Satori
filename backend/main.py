@@ -2349,7 +2349,7 @@ WORKFORCE TABLES
 SALES TABLES
 5. `Sales_Accounts` (~359 rows) — Customer accounts. Cols: VP, AM, Location, Account, Tier ('A'/'B'/'C'), Dormant ('Yes'/'No'), Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits, Zero_Visit ('Yes'/'No').
 6. `Sales_AM_Scorecard` — AM performance + account coverage. Cols: VP, AM, Role, City, A, B, C (counts of tier-A/B/C accounts), Active_Book, Dormant (dormant-account count), Q1_Visits, Zero_Visit (count of accounts with zero Q1 visits), col_2026_Target, Q1_ACH, Open_Pipeline (all STRING USD — SAFE_CAST AS FLOAT64), Hist_Win_Rate (STRING decimal 0-1 or 'n/a' — SAFE_CAST, ×100 for %). For "zero-visit accounts" use the Zero_Visit column; for account tiers use A/B/C.
-7. `Sales_Plan_vs_Pipeline` — Revenue plan vs actual. Cols: AM, Role, col_2026_Target, Q1_Target, Q1_ACH, Q1_pct_Plan, Remaining_2026, CRM_Pipeline, Coverage_Ratio (FLOAT-like, already a ratio), Status, Action.
+7. `Sales_Plan_vs_Pipeline` — Revenue plan vs actual. Cols: AM, Role, col_2026_Target, Q1_Target, Q1_ACH, Q1_pct_Plan, Remaining_2026, CRM_Pipeline, Coverage_Ratio (STRING decimal — SAFE_CAST AS FLOAT64 before AVG/SUM/×100), Status, Action.
 8. `Sales_Pipeline_Health` — All salespeople. Cols: Salesperson, Open_Pipeline (USD), Open_Deals, Win_Rate_by (decimal 0-1).
 9. `Sales_Hunting_Gap` — New-business quotas + gaps per AM.
 10. `Sales_KPI_Scorecard` — KPI definitions (reference only).
@@ -2389,6 +2389,13 @@ WRITING CUSTOM run_sql QUERIES:
 - For attendance windows: attendance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL N DAY).
 - For allocation status: classify on MAX(allocation_percent) per employee.
 - Never sum allocation_percent across rows (double-counts forecast vs actual).
+- ZERO ALLOCATIONS ARE NOT ALLOCATIONS — by DEFAULT exclude them: every
+  allocation query gets `AND SAFE_CAST(allocation_percent AS FLOAT64) > 0`
+  (and counts/averages of "allocated" people must require a Flag='Allocated'
+  row with pct>0). A 0% / NULL row means the person is NOT on that project.
+  ONLY include 0% rows when the user explicitly asks about bench / unallocated
+  / zero-allocation people. Including zeros is the #1 cause of wrong allocation
+  numbers (it drags averages down and lists phantom projects).
 - SAFE_CAST all string-typed USD/visit fields before SUM/AVG.
 
 NEVER WRITE SQL IN CHAT. The `run_sql` tool is the ONLY way to execute a query. Forbidden chat content: triple-backtick `sql` fences, `SELECT ...`, `WITH ... AS (...)`, "Calling SQL tool", "Here is the SQL", "let me query". When you need data not in the injected block, your turn must be EXACTLY ONE function call to `run_sql` with a single complete SELECT/WITH query in the `sql` argument — and zero text content. Only after the tool returns do you write user-facing prose with the numbers.
@@ -3184,6 +3191,18 @@ def _execute_chat_sql(sql: str, plant_scope: list[str] | None = None, dept_scope
     sql_stripped = _autofix_column_formats(sql_stripped)
     print(f"[CHAT-SQL] Running: {sql_stripped[:300]}")
     result = run_query(sql_stripped, max_rows=500)
+    if "error" in result:
+        # Deterministic self-heal (no LLM): rewrite well-understood error
+        # classes (e.g. STRING fed to a numeric aggregate) and retry once
+        # silently, so the model gets data instead of an error to apologise for.
+        _det = _deterministic_sql_repair(sql_stripped, result.get("error", ""))
+        if _det:
+            _det = _autofix_column_formats(normalize_bq_project(_det))
+            print(f"[CHAT-SQL] self-heal retry: {_det[:200]}")
+            _r2 = run_query(_det, max_rows=500)
+            if "error" not in _r2:
+                print(f"[CHAT-SQL] self-heal OK rows={len(_r2.get('rows') or [])}")
+                sql_stripped, result = _det, _r2
     if "error" in result:
         print(f"[CHAT-SQL] BQ ERROR: {result.get('error')}")
         # Also persist to data_access_log for /api/admin/chat-errors. We
@@ -4763,23 +4782,24 @@ DATA QUALITY (READ TWICE — these are the column-type rules that break queries)
     Sales_Pipeline_Health.Open_Pipeline
     Sales_Accounts: Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits
     Sales_Hunting_Gap: Hunting_Target, Hunting_Achieved, Hunting_Gap
+    Sales_Plan_vs_Pipeline.Coverage_Ratio (STRING like '0.85' / '1.2x' — SAFE_CAST AS FLOAT64)
+    Sales_AM_Scorecard.Hist_Win_Rate (STRING decimal 0-1 or 'n/a' — SAFE_CAST, ×100 for %)
+    Sales_Pipeline_Health.Win_Rate_by (STRING decimal — SAFE_CAST, ×100 for %)
     Allocation_Data.allocation_percent
     Timesheet_Data.TICKET_HOURS
 - 🟢 ALREADY-NUMERIC columns (FLOAT64 or INT64 — NEVER wrap in REPLACE or SAFE_CAST AS STRING):
-    Sales_Plan_vs_Pipeline.Coverage_Ratio (FLOAT64 — already a ratio, NEVER REPLACE)
-    Sales_AM_Scorecard.Hist_Win_Rate (FLOAT64 decimal 0-1 — multiply by 100 for display)
-    Sales_Pipeline_Health.Open_Deals (INT64), Sales_Pipeline_Health.Win_Rate_by (FLOAT64)
+    Sales_Pipeline_Health.Open_Deals (INT64)
     Attendance_Data.is_present / is_absent / is_on_leave / is_remote / is_holiday / is_weekend (INT64 0/1)
     Attendance_Data.attendance_date (DATE)
     Attendance_Data.employee_id (INT64, sequence number) | personal_no (STRING 'E-902' - JOIN key to Employee_Data.employee_code)
-- ❌ NEVER do: REPLACE(Coverage_Ratio, ',', ''), REPLACE(Hist_Win_Rate, '%', ''), SAFE_CAST(is_present AS STRING).
-  These columns are ALREADY numeric. REPLACE only takes STRING args and BQ will throw "No matching signature for function REPLACE Argument types: FLOAT64, STRING, STRING".
-- ✅ DO instead: ROUND(Coverage_Ratio * 100, 1), ROUND(Hist_Win_Rate * 100, 1), SUM(is_present).
-- Win-rate columns are decimals (0.32 = 32%); multiply by 100 for display.
+- ⚠️ Coverage_Ratio, Hist_Win_Rate and Win_Rate_by are STRINGS (not FLOAT64) — a bare AVG()/SUM() or `* 100` on them throws "No matching signature … Argument types: STRING". ALWAYS SAFE_CAST first.
+- ❌ NEVER do: AVG(Coverage_Ratio), ROUND(Hist_Win_Rate * 100, 1), SAFE_CAST(is_present AS STRING).
+- ✅ DO instead: ROUND(AVG(SAFE_CAST(Coverage_Ratio AS FLOAT64)) * 100, 1), ROUND(SAFE_CAST(Hist_Win_Rate AS FLOAT64) * 100, 1), SUM(is_present).
+- Win-rate / ratio columns are decimals (0.32 = 32%); SAFE_CAST then multiply by 100 for display.
 - For Headcount/Total Employees: ALWAYS use COUNT(DISTINCT employee_id) — never COUNT(*) on Attendance_Data (that counts attendance rows, ~30× too high).
 - Use COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''), 'Unspecified') for clean department grouping.
 - attendance_date is DATE — compare directly with DATE_SUB / CURRENT_DATE.
-- DATE_KEY (Timesheet) is INT64 in YYYYMMDD form — use SAFE.PARSE_DATE('%Y-%m-%d', CAST(DATE_KEY AS STRING)).
+- DATE_KEY (Timesheet) is a real DATE — filter via COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))), NOT PARSE_DATE('%Y-%m-%d', …).
 
 CANONICAL ATTENDANCE PATTERNS (copy these — they are tested):
 - Attendance rate (last 30 days, working days only):
@@ -4790,8 +4810,8 @@ CANONICAL ATTENDANCE PATTERNS (copy these — they are tested):
     SELECT COUNT(DISTINCT Employee_Code) AS value
     FROM `ai-vertex-mahad.Satori_Project.Employee_Data`
     WHERE LOWER(Employee_Type) IN ('mto','permanent','probation')
-- Pipeline coverage by AM (Coverage_Ratio is FLOAT64 — no REPLACE):
-    SELECT AM, ROUND(Coverage_Ratio * 100, 1) AS coverage_pct
+- Pipeline coverage by AM (Coverage_Ratio is STRING — SAFE_CAST):
+    SELECT AM, ROUND(SAFE_CAST(Coverage_Ratio AS FLOAT64) * 100, 1) AS coverage_pct
     FROM `ai-vertex-mahad.Satori_Project.Sales_Plan_vs_Pipeline`
     ORDER BY coverage_pct DESC LIMIT 50
 """
@@ -4839,7 +4859,8 @@ DEFAULT FILTERS — apply automatically without asking:
 6. Department, location, position, AM, VP, city, tier — these are STRINGs.
    Always TRIM and COALESCE empties to 'Unspecified' when grouping.
 7. Sales currency — USD values are STRING; SAFE_CAST AS FLOAT64 before sums.
-   Coverage_Ratio is already a decimal — multiply by 100 only when DISPLAYING.
+   Coverage_Ratio, Hist_Win_Rate and Win_Rate_by are ALSO STRING (decimals) —
+   SAFE_CAST AS FLOAT64 before any AVG/SUM or `* 100`; never aggregate them raw.
 8. EmployeeEmail is internal TMC work data (e.g. name@tmcltd.com) and a normal
    queryable column. When asked for employees' emails, show the FULL address —
    never mask, redact, anonymize, or replace it with a placeholder.
@@ -4933,8 +4954,8 @@ SANITY CHECK YOUR OWN NUMBERS BEFORE EMITTING SQL:
   tens of thousands means you counted attendance rows, not people — fix the SQL.
 - Attendance rates under 70% almost always mean weekends/holidays slipped into
   the denominator — fix the filter.
-- Pipeline coverage of 0% or NULL across every AM means Coverage_Ratio got
-  wrapped in REPLACE() — remove the wrapper.
+- Pipeline coverage of 0% or NULL across every AM means SAFE_CAST(Coverage_Ratio
+  AS FLOAT64) failed on a non-numeric value — strip stray chars, don't drop the cast.
 - Any "average time" KPI must use the seconds-since-midnight recipe above —
   AVG(TIME(...)) and TIME_TO_SEC do not exist / do not work in BigQuery.
 """
@@ -4947,8 +4968,8 @@ ANALYST_COMMON_SENSE_COMPACT = """ANALYST COMMON SENSE (apply silently):
 - Headcount → COUNT(DISTINCT Employee_Code) on Employee_Data (never COUNT(*) on Attendance_Data).
 - Today is May 2026. "this month"=May 2026; "last month"=April 2026; "Q1"=Jan-Mar 2026.
 - Name searches → fuzzy: LOWER(employee_name) LIKE '%mahad%'.
-- STRING numerics (need SAFE_CAST): allocation_percent, TICKET_HOURS, Open_Pipeline, Q1_ACH, col_2026_Target, Q1_Visits.
-- Already FLOAT64/INT64 (NEVER REPLACE): Coverage_Ratio, Hist_Win_Rate, Open_Deals, Win_Rate_by, is_*.
+- STRING numerics (need SAFE_CAST AS FLOAT64 before AVG/SUM/`* 100`): allocation_percent, TICKET_HOURS, Open_Pipeline, Q1_ACH, col_2026_Target, Q1_Visits, Coverage_Ratio, Hist_Win_Rate, Win_Rate_by.
+- Genuinely numeric (NEVER cast/REPLACE): Open_Deals (INT64), is_* (INT64 0/1).
 - Timesheet_Data.DATE_KEY: type varies — DATE on capability-agent-prod, INT64 YYYYMMDD elsewhere. ALWAYS filter with `COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))) >= <cutoff>`. Plain `PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))` errors when DATE_KEY is DATE (CAST gives ISO "2025-07-01" which `%Y%m%d` rejects).
 - Allocation_Data.Date: type unreliable across environments — DON'T filter on it. Aggregate MAX(allocation_percent) per employee across all rows; the latest peak still wins for Bench / Partial / Allocated classification.
 - "Utilization" / "hours worked" → Timesheet_Data, not Allocation_Data. SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) grouped by EMPLOYEE_CODE, joined to Employee_Data on norm(EMPLOYEE_CODE)=norm(employee_code) (NOT TICKET_USER_ID). Optional 90-day window via the COALESCE pattern above.
@@ -5723,6 +5744,78 @@ def _rewrite_avg_of_time(sql: str) -> str:
     return out
 
 
+# Aggregate functions that REQUIRE a numeric argument — they throw
+# "No matching signature for aggregate function … Argument types: STRING"
+# when handed a STRING column. (COUNT/MIN/MAX/ANY_VALUE accept STRING, so we
+# leave them alone.)
+_NUMERIC_AGG_FUNCS = r"AVG|SUM|STDDEV|STDDEV_POP|STDDEV_SAMP|VARIANCE|VAR_POP|VAR_SAMP"
+
+# Metric columns the warehouse stores as STRING even though older prompt docs
+# called some of them FLOAT64/INT64. Aggregating them with a bare AVG()/SUM()
+# is the exact failure practice heads hit on the Sales dashboards. Listed once
+# here so the always-on coercion can protect them on every query path.
+_STRING_METRIC_COLS = (
+    "Coverage_Ratio", "Hist_Win_Rate", "Win_Rate_by", "Win_Rate",
+    "Open_Pipeline", "CRM_Pipeline", "Q1_ACH", "Q1_Target", "col_2026_Target",
+    "Remaining_2026", "Q1_pct_Plan", "Q1_Visits", "Jan_Visits", "Feb_Visits",
+    "Mar_Visits", "Hunting_Target", "Hunting_Achieved", "Hunting_Gap",
+    "allocation_percent", "TICKET_HOURS",
+)
+
+
+def _num_coerce_expr(expr: str) -> str:
+    """Wrap a column reference so it survives a numeric aggregate / arithmetic
+    even when stored as a STRING like '85%', '1,234', '$2.3M' or '0.85': strip
+    every char except digits, dot and minus, then SAFE_CAST to FLOAT64 (NULL if
+    unparseable). Harmless on already-numeric columns (CAST→STRING→back)."""
+    return (f"SAFE_CAST(REGEXP_REPLACE(CAST({expr} AS STRING), r'[^0-9.\\-]', '') "
+            f"AS FLOAT64)")
+
+
+def _coerce_numeric_aggregates(sql: str, only_cols=None) -> str:
+    """Rewrite numeric aggregates over a BARE column reference so a STRING-typed
+    metric column doesn't blow up.
+
+    - only_cols given  → surgical: coerce just those known string-metric columns
+      (safe to run ALWAYS, on every path).
+    - only_cols None   → generic: coerce EVERY bare-column numeric aggregate
+      (used as an error-driven self-heal AFTER BigQuery has already rejected a
+      STRING aggregate, so blanket coercion can only help).
+
+    Idempotent: once an argument is wrapped in SAFE_CAST it is no longer a bare
+    column so it won't re-match.
+    """
+    if not sql:
+        return sql
+    import re as _re
+    if only_cols:
+        col_pat = r"(?:" + "|".join(_re.escape(c) for c in only_cols) + r")"
+    else:
+        col_pat = r"[A-Za-z_][A-Za-z0-9_]*"
+    pat = _re.compile(
+        r"\b(" + _NUMERIC_AGG_FUNCS + r")\(\s*"
+        r"((?:[A-Za-z_][A-Za-z0-9_]*\.)?(?:" + col_pat + r"))(?![A-Za-z0-9_])\s*\)",
+        _re.IGNORECASE,
+    )
+    return pat.sub(lambda m: f"{m.group(1)}({_num_coerce_expr(m.group(2))})", sql)
+
+
+def _deterministic_sql_repair(sql: str, error: str) -> str:
+    """Deterministic, no-LLM self-heal keyed on the BigQuery error text. Returns
+    a repaired SQL string (different from the input) or "" if nothing applies.
+    This is the first line of the "fix itself and learn" loop — add new
+    error→fix rules here as we encounter them so the agent recovers without a
+    redeploy or an LLM round-trip."""
+    if not sql or not error:
+        return ""
+    e = error.lower()
+    out = sql
+    # A STRING column was fed to a numeric aggregate → coerce every aggregate.
+    if "no matching signature for aggregate function" in e and "string" in e:
+        out = _coerce_numeric_aggregates(out)
+    return out if out.strip() != sql.strip() else ""
+
+
 def _autofix_column_formats(sql: str) -> str:
     """Column-FORMAT corrections that are safe on EVERY query path — chat,
     dashboard, report, drilldown, voice. These touch only how individual
@@ -5823,6 +5916,16 @@ def _autofix_column_formats(sql: str) -> str:
         r"(?<!LOWER\()(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*\.)?attendance_status_text\s*(?:=\s*'late'|IN\s*\(\s*'late'\s*\))",
         lambda m: _late_cond(m.group(1)), sql, flags=_re.IGNORECASE,
     )
+
+    # Fix 19 — Numeric aggregates over KNOWN string-metric columns. Several
+    # "numeric" columns (Coverage_Ratio, Hist_Win_Rate, Win_Rate_by, the Sales
+    # USD/visit fields, allocation_percent, TICKET_HOURS) are actually stored as
+    # STRING in the warehouse, so a bare AVG()/SUM() throws "No matching
+    # signature for aggregate function AVG Argument types: STRING". Coerce them
+    # on every path so the dashboard/report/chat heals without waiting for the
+    # error-driven repair. (Generic all-column coercion is reserved for the
+    # error-driven repair to avoid touching genuinely-numeric aggregates here.)
+    sql = _coerce_numeric_aggregates(sql, only_cols=_STRING_METRIC_COLS)
 
     return sql
 
@@ -6067,10 +6170,15 @@ def _autofix_dashboard_sql(sql: str) -> str:
     # The AI keeps wrapping SAFE_CAST(... AS FLOAT64) or already-numeric columns
     # like Coverage_Ratio / Hist_Win_Rate / win_rate_by in REPLACE(x,',','').
     # Strip the REPLACE wrapper so the inner numeric expression is used directly.
+    # ONLY genuinely numeric (INT64) columns belong here. Coverage_Ratio,
+    # Hist_Win_Rate, Win_Rate_by and the *_Visits columns are STRING in the
+    # warehouse — listing them here previously made Fix 12 strip quotes off
+    # `Coverage_Ratio > '1'` → `Coverage_Ratio > 1`, i.e. a STRING > INT64 type
+    # error. They are coerced via SAFE_CAST elsewhere (Fix 19 / prompts) instead.
     NUMERIC_NATIVE_COLUMNS = (
-        "Coverage_Ratio", "Hist_Win_Rate", "Open_Deals", "Win_Rate_by",
+        "Open_Deals",
         "is_present", "is_absent", "is_on_leave", "is_remote", "is_holiday",
-        "is_weekend", "Q1_Visits", "Jan_Visits", "Feb_Visits", "Mar_Visits",
+        "is_weekend",
     )
     # 9a) REPLACE(SAFE_CAST(<x> AS FLOAT64|INT64|NUMERIC), 'anything', 'anything') → SAFE_CAST(<x> AS …)
     sql = _re.sub(
@@ -6132,15 +6240,16 @@ _REPAIR_PROMPT = """You are a BigQuery SQL repair assistant. The query below fai
 - `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), employee_id (INT64), employee_name (STRING), checkin_time, checkout_time, attendance_status_text, is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 0/1).
 - `{BQ_FULL}.Allocation_Data` — project_id, employee_id (STRING "E-1234"), allocation_percent (STRING), emp_competency, Flag ('Allocated'/'Bench'), Date.
 - `{BQ_FULL}.Timesheet_Data` — EMPLOYEE_CODE (STRING "E-1571" — the employee key; JOIN/filter on this, NOT TICKET_USER_ID), TICKET_USER_ID (unrelated internal id — never join/filter on it), TICKET_PROJECT_CODE, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (DATE — filter via COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))).
-- `{BQ_FULL}.Sales_AM_Scorecard` — VP, AM, Role, City, col_2026_Target (STRING), Q1_ACH (STRING), Open_Pipeline (STRING), Hist_Win_Rate (FLOAT64 decimal 0-1 — NEVER REPLACE).
-- `{BQ_FULL}.Sales_Plan_vs_Pipeline` — AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio (FLOAT64 — NEVER REPLACE), Status, Action.
-- `{BQ_FULL}.Sales_Pipeline_Health` — Salesperson, Open_Pipeline (STRING), Open_Deals (INT64), Win_Rate_by (FLOAT64).
+- `{BQ_FULL}.Sales_AM_Scorecard` — VP, AM, Role, City, col_2026_Target (STRING), Q1_ACH (STRING), Open_Pipeline (STRING), Hist_Win_Rate (STRING decimal 0-1 — SAFE_CAST AS FLOAT64, ×100 for %).
+- `{BQ_FULL}.Sales_Plan_vs_Pipeline` — AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio (STRING decimal — SAFE_CAST AS FLOAT64), Status, Action.
+- `{BQ_FULL}.Sales_Pipeline_Health` — Salesperson, Open_Pipeline (STRING), Open_Deals (INT64), Win_Rate_by (STRING decimal — SAFE_CAST AS FLOAT64).
 - `{BQ_FULL}.Sales_Accounts` — VP, AM, Location, Account, Tier, Dormant, Q1_Visits (STRING).
 - `{BQ_FULL}.Sales_Hunting_Gap` — AM, City, Hunting_Target, Hunting_Achieved, Hunting_Gap.
 
 ═══ HARD RULES ═══
-- NEVER wrap a FLOAT64/INT64 column in REPLACE() — REPLACE only accepts STRINGs. Coverage_Ratio, Hist_Win_Rate, Open_Deals, Win_Rate_by, and is_* columns are already numeric.
-- Only STRING-typed columns need REPLACE/SAFE_CAST: Open_Pipeline, Q1_ACH, col_2026_Target, allocation_percent, TICKET_HOURS, Q1_Visits.
+- "No matching signature for aggregate function AVG/SUM … Argument types: STRING" means the column is a STRING — wrap it: AVG(SAFE_CAST(col AS FLOAT64)). Coverage_Ratio, Hist_Win_Rate and Win_Rate_by ARE STRINGS despite their decimal look — always SAFE_CAST before AVG/SUM/`* 100`.
+- Genuinely numeric (NEVER REPLACE/cast): Open_Deals (INT64), is_* (INT64 0/1).
+- STRING-typed numerics needing SAFE_CAST AS FLOAT64: Open_Pipeline, Q1_ACH, col_2026_Target, CRM_Pipeline, allocation_percent, TICKET_HOURS, Q1_Visits, Coverage_Ratio, Hist_Win_Rate, Win_Rate_by.
 - Active employees: LOWER(Employee_Type) IN ('mto','permanent','probation').
 - Joins: digit-normalise the employee code on both sides; NEVER join on names (Resource_Name has a code prefix). norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0'). Employee↔Attendance: norm(Employee_Code)=norm(personal_no). Employee↔Allocation: norm(Employee_Code)=norm(employee_id). Employee↔Timesheet: norm(Employee_Code)=norm(EMPLOYEE_CODE).
 - checkin_time/checkout_time are FULL datetime strings (not HH:MM:SS): clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)).
@@ -6160,9 +6269,9 @@ detail behind that single category so they understand WHO/WHAT makes up the numb
 - `{BQ_FULL}.Attendance_Data` — attendance_date (DATE), personal_no (STRING "E-902" — the JOIN KEY to Employee_Code, digit-normalised), employee_id (STRING — NOT a join key), employee_name, checkin_time / checkout_time (STRING — FULL datetime '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'; clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time))), attendance_status_text (values: 'Present','Absent','On Leave','Holiday','Weekend','Missing Punch','Remote Work'), is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend/is_missing_punch (INT64 0/1 — both COUNTIF(status) and SUM(is_*) work).
 - `{BQ_FULL}.Allocation_Data` — project_id, employee_id (STRING "E-2141"), allocation_percent (STRING — SAFE_CAST AS FLOAT64), emp_competency, Flag (values 'Allocated'/'Bench'), Date.
 - `{BQ_FULL}.Timesheet_Data` — EMPLOYEE_CODE (STRING "E-1571" — the employee key; JOIN/filter on this, NOT TICKET_USER_ID), TICKET_USER_ID (unrelated internal id — never join/filter on it), TICKET_PROJECT_CODE, TICKET_PROJECT_LABEL, TICKET_HOURS (STRING), TICKET_STATUS, DATE_KEY (DATE).
-- `{BQ_FULL}.Sales_AM_Scorecard` — VP, AM, Role, City, col_2026_Target (STRING), Q1_ACH (STRING), Open_Pipeline (STRING), Hist_Win_Rate (FLOAT64 — NEVER REPLACE).
-- `{BQ_FULL}.Sales_Plan_vs_Pipeline` — AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio (FLOAT64 — NEVER REPLACE), Status, Action.
-- `{BQ_FULL}.Sales_Pipeline_Health` — Salesperson, Open_Pipeline, Open_Deals, Win_Rate_by.
+- `{BQ_FULL}.Sales_AM_Scorecard` — VP, AM, Role, City, col_2026_Target (STRING), Q1_ACH (STRING), Open_Pipeline (STRING), Hist_Win_Rate (STRING decimal — SAFE_CAST AS FLOAT64).
+- `{BQ_FULL}.Sales_Plan_vs_Pipeline` — AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio (STRING decimal — SAFE_CAST AS FLOAT64), Status, Action.
+- `{BQ_FULL}.Sales_Pipeline_Health` — Salesperson, Open_Pipeline (STRING), Open_Deals (INT64), Win_Rate_by (STRING decimal — SAFE_CAST AS FLOAT64).
 - `{BQ_FULL}.Sales_Accounts` — VP, AM, Location, Account, Tier, Dormant, Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits.
 
 ═══ JOIN KEYS (digit-normalised — NAMES DO NOT MATCH) ═══
@@ -6177,7 +6286,7 @@ NEVER join Attendance on employee_id, and NEVER join on Resource_Name = employee
 - Attendance counts come from attendance_status_text, e.g. present_days = COUNTIF(LOWER(attendance_status_text)='present'); the working-day denominator = COUNTIF(LOWER(attendance_status_text) NOT IN ('weekend','holiday')). There is NO 'late' status value — a late arrival = a check-in after 09:30: COUNTIF(TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00') (NULL check-ins don't count; includes Missing-Punch days that have a real check-in — no status whitelist).
 - Reuse the parent SQL's date range when it has one.
 - Match the clicked category CASE-INSENSITIVELY: LOWER(col) = LOWER('value').
-- NEVER wrap numeric columns (Coverage_Ratio/Hist_Win_Rate/Open_Deals/Win_Rate_by) in REPLACE().
+- Coverage_Ratio/Hist_Win_Rate/Win_Rate_by are STRING decimals — SAFE_CAST AS FLOAT64 before any math. Open_Deals/is_* are genuinely INT64 — never cast/REPLACE those.
 - Output ONLY ONE complete SELECT statement — raw SQL, no markdown, no commentary, no trailing text. Make sure every parenthesis is balanced and the statement is finished. End with LIMIT 200.
 
 ═══ DRILL-DOWN RECIPES ═══
@@ -6332,7 +6441,19 @@ def dashboard_drill(body: dict, user: dict = Depends(get_current_user)):
         "rows":    r.get("rows") or [],
     }
     if "error" in r:
-        # One repair attempt
+        # Deterministic self-heal first (instant, no LLM), then one LLM repair.
+        det = _deterministic_sql_repair(sql, r["error"])
+        if det:
+            det = _autofix_dashboard_sql(normalize_bq_project(det))
+            rd = bq_run_query(det, max_rows=200)
+            if "error" not in rd:
+                out["sql"]       = det
+                out["columns"]   = rd.get("columns") or []
+                out["rows"]      = rd.get("rows") or []
+                out["recovered"] = True
+                return out
+            sql = det
+        # One LLM repair attempt
         repaired = _repair_widget_sql(sql, r["error"], {"kind": "drilldown", "title": drill_title})
         if repaired and repaired.strip() and repaired.strip() != sql.strip():
             repaired = normalize_bq_project(repaired)
@@ -6535,7 +6656,23 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         if "error" in r:
             err = r["error"]
             print(f"[dashboard]   {tag} ERROR: {err}")
-            # Repair attempt — ask Gemini to rewrite the failing SQL given the
+            # Self-heal step 1 — deterministic repair (no LLM, instant). Handles
+            # well-understood error classes (e.g. STRING fed to a numeric
+            # aggregate) by rewriting the SQL and retrying immediately.
+            det = _deterministic_sql_repair(sql, err)
+            if det:
+                det = _autofix_dashboard_sql(normalize_bq_project(det))
+                print(f"[dashboard]   {tag} deterministic self-heal: {det[:200]}…")
+                rd = bq_run_query(det, max_rows=200)
+                if "error" not in rd:
+                    print(f"[dashboard]   {tag} ok after self-heal — {len(rd.get('rows') or [])} rows")
+                    rd["sql"] = det
+                    rd["recovered"] = True
+                    return rd
+                # deterministic fix didn't fully work — hand the coerced SQL to
+                # the LLM repair so it builds on the partial fix.
+                sql, err = det, rd.get("error", err)
+            # Self-heal step 2 — ask Gemini to rewrite the failing SQL given the
             # BQ error message. Cheap, scoped to one widget. Returns nothing
             # if repair fails, in which case the original error is surfaced.
             repaired = _repair_widget_sql(sql, err, widget_meta or {})
@@ -8907,7 +9044,7 @@ _DEFAULT_SCHEMA_SETTINGS = [
         "description": (
             "Account Manager performance (8 AMs).\n"
             "Columns: VP, AM, Role, City, col_2026_Target (USD — STRING, SAFE_CAST), Q1_ACH (USD), "
-            "Open_Pipeline (USD), Hist_Win_Rate (decimal 0-1 — multiply by 100 for %)."
+            "Open_Pipeline (USD), Hist_Win_Rate (STRING decimal 0-1 or 'n/a' — SAFE_CAST AS FLOAT64 before AVG/SUM/×100; a bare AVG(Hist_Win_Rate) errors 'Argument types: STRING')."
         ),
     },
     {
@@ -8924,7 +9061,7 @@ _DEFAULT_SCHEMA_SETTINGS = [
         "sort_order": 70,
         "description": (
             "Salesperson pipeline (14 rows).\n"
-            "Columns: Salesperson, Open_Pipeline (USD — STRING, SAFE_CAST), Open_Deals, Win_Rate_by (decimal 0-1)."
+            "Columns: Salesperson, Open_Pipeline (USD — STRING, SAFE_CAST), Open_Deals (INT64), Win_Rate_by (STRING decimal 0-1 — SAFE_CAST AS FLOAT64 before AVG/SUM/×100)."
         ),
     },
     {
@@ -8932,7 +9069,7 @@ _DEFAULT_SCHEMA_SETTINGS = [
         "sort_order": 80,
         "description": (
             "Revenue plan vs pipeline (10 rows).\n"
-            "Columns: AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline, Coverage_Ratio, Status, Action."
+            "Columns: AM, col_2026_Target, Q1_Target, Q1_ACH, CRM_Pipeline (all STRING USD — SAFE_CAST), Coverage_Ratio (STRING decimal — SAFE_CAST AS FLOAT64 before AVG/SUM/×100; a bare AVG(Coverage_Ratio) errors 'Argument types: STRING'), Status, Action."
         ),
     },
     {
@@ -8971,6 +9108,9 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "week_id, year_id, Week, Date (DATE), Year, Month (STRING), Data_Type.",  # pre real-Allocation-schema (INT64 Year/Month, no year_id) note
     "take MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per project",  # pre latest-weekly-snapshot allocation note
     "restrict to LOWER(attendance_status_text) IN ('present','remote work')",  # pre checkin=NOT NULL (Missing-Punch has a real check-in) note
+    "Hist_Win_Rate (decimal 0-1 — multiply by 100 for %)",      # pre Hist_Win_Rate-is-STRING note
+    "Open_Deals, Win_Rate_by (decimal 0-1).",                   # pre Win_Rate_by-is-STRING note
+    "CRM_Pipeline, Coverage_Ratio, Status, Action.",            # pre Coverage_Ratio-is-STRING note
 )
 
 
