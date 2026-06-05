@@ -542,21 +542,35 @@ const SavedTasksPanel = ({ tasks, onDelete, onToggleStatus, onOpen }) => {
 // function-specific; GENERAL is always appended. The practice head can still
 // type any skill they want — these are just starting points.
 const SKILL_SUGGESTIONS = {
-  qlik:      ["Qlik Sense", "QlikView", "NPrinting", "Qlik Cloud", "Data Modeling"],
-  "sap":     ["SAP FICO", "SAP MM", "SAP SD", "SAP ABAP", "SAP BASIS", "SAP S/4HANA", "SAP HCM", "SAP SuccessFactors"],
-  abap:      ["SAP ABAP", "SAP Fiori", "SAPUI5", "OData", "CDS Views"],
-  fiori:     ["SAP Fiori", "SAPUI5", "ABAP", "OData"],
-  basis:     ["SAP BASIS", "HANA Admin", "System Migration", "OS/DB Migration"],
-  finance:   ["SAP FICO", "SAP Controlling", "Financial Reporting", "Excel"],
-  hcm:       ["SAP HCM", "SAP SuccessFactors", "Payroll", "SLCM"],
-  digital:   ["Python", "N8N", "Claude", "LangChain", "React", "Node.js", "SQL", "Power BI"],
-  dt:        ["Python", "N8N", "Claude", "Automation", "React", "SQL", "AI/ML"],
-  analytics: ["Power BI", "Tableau", "SQL", "Python", "Data Modeling", "Qlik Sense"],
-  cloud:     ["AWS", "Azure", "GCP", "Kubernetes", "Terraform", "CI/CD"],
-  sales:     ["CRM", "Pipeline Management", "Account Management", "Negotiation", "Presales"],
-  pmo:       ["Project Management", "Agile/Scrum", "JIRA", "Stakeholder Management", "MS Project"],
+  qlik:      ["Qlik Sense", "QlikView", "NPrinting", "Qlik Cloud", "Qlik Application Automation", "Data Modeling", "Set Analysis", "Section Access", "Mashups", "Qlik Replicate", "Talend", "ETL", "Data Warehousing", "Star Schema", "SQL", "Dashboard Design", "Data Visualization", "Qlik Sense Scripting"],
+  "sap":     ["SAP FICO", "SAP MM", "SAP SD", "SAP PP", "SAP QM", "SAP WM/EWM", "SAP PM", "SAP ABAP", "SAP BASIS", "SAP S/4HANA", "SAP HANA", "SAP HCM", "SAP SuccessFactors", "SAP Fiori", "SAP BTP", "SAP Ariba", "SAP MDG", "SAP Solution Manager", "Functional Configuration", "Integration (IDoc/BAPI)"],
+  abap:      ["SAP ABAP", "SAP Fiori", "SAPUI5", "OData", "CDS Views", "RAP (RESTful ABAP)", "ABAP OO", "BAPI/BADI", "Enhancements (User Exits)", "Adobe Forms", "SmartForms", "Workflow", "Gateway", "ABAP on HANA", "AMDP", "Proxy/IDoc"],
+  fiori:     ["SAP Fiori", "SAPUI5", "JavaScript", "ABAP", "OData", "CDS Views", "Fiori Elements", "BTP", "HTML5", "CSS", "Fiori Launchpad", "App Deployment"],
+  basis:     ["SAP BASIS", "HANA Admin", "System Migration", "OS/DB Migration", "SAP Security", "GRC", "Solution Manager", "Kernel Upgrades", "Transport Management", "Performance Tuning", "High Availability", "SAP on Cloud", "Patching"],
+  finance:   ["SAP FICO", "SAP Controlling", "Financial Reporting", "IFRS", "Budgeting & Forecasting", "GL/AP/AR", "Asset Accounting", "Cost Center Accounting", "Profitability Analysis (CO-PA)", "Excel", "Power BI", "Taxation", "Audit"],
+  controlling:["SAP CO", "Cost Center Accounting", "Internal Orders", "Product Costing", "CO-PA", "Profit Center Accounting", "Financial Reporting", "Variance Analysis"],
+  hcm:       ["SAP HCM", "SAP SuccessFactors", "Payroll", "SLCM", "Time Management", "Employee Central", "Org Management", "Recruitment", "Performance & Goals", "Compensation", "Workday HCM"],
+  workday:   ["Workday HCM", "Workday Integrations", "Workday Studio", "Workday Reporting", "EIB", "Calculated Fields", "Business Process Framework"],
+  digital:   ["Python", "N8N", "Claude", "LangChain", "LangGraph", "RAG", "Prompt Engineering", "OpenAI API", "React", "Node.js", "FastAPI", "SQL", "Power BI", "Vector Databases", "Docker", "REST APIs", "Automation", "AI/ML", "TypeScript"],
+  "emerging":["Python", "N8N", "Claude", "LLMs", "Agentic AI", "RAG", "LangChain", "Automation", "React", "SQL", "AI/ML", "Computer Vision", "NLP", "Generative AI", "MLOps", "Hugging Face"],
+  dt:        ["Python", "N8N", "Claude", "Automation", "React", "SQL", "AI/ML", "RPA", "Power Automate", "Process Mining", "Integration", "APIs"],
+  analytics: ["Power BI", "Tableau", "SQL", "Python", "Data Modeling", "Qlik Sense", "DAX", "Data Warehousing", "ETL", "Statistics", "R", "Looker", "Snowflake", "BigQuery", "Data Storytelling"],
+  cloud:     ["AWS", "Azure", "GCP", "Kubernetes", "Terraform", "CI/CD", "Docker", "Linux", "Networking", "Ansible", "CloudFormation", "Serverless", "DevOps", "Monitoring (Prometheus/Grafana)", "IAM/Security"],
+  sales:     ["CRM", "Pipeline Management", "Account Management", "Negotiation", "Presales", "Solution Selling", "Lead Generation", "Proposal Writing", "Stakeholder Management", "Forecasting", "Salesforce", "Client Relationship"],
+  "account": ["Account Management", "Client Relationship", "Upselling/Cross-selling", "Pipeline Management", "Negotiation", "CRM", "Stakeholder Management", "Contract Management"],
+  pmo:       ["Project Management", "Agile/Scrum", "JIRA", "Stakeholder Management", "MS Project", "PMP", "Risk Management", "Budget Management", "Resource Planning", "Kanban", "Confluence", "Program Management", "PRINCE2"],
+  "supply":  ["SAP MM", "SAP SD", "SAP WM/EWM", "SAP PP", "Logistics", "Procurement", "Inventory Management", "Demand Planning", "S&OP", "SAP IBP"],
+  professional:["Consulting", "Requirements Gathering", "Solution Design", "Stakeholder Management", "Project Management", "Business Analysis", "Documentation", "Client Workshops"],
+  kpo:       ["Data Entry", "Process Excellence", "Quality Assurance", "Reporting", "Excel", "Business Analysis", "Documentation", "Research"],
+  marketing: ["Digital Marketing", "Content Strategy", "SEO/SEM", "Social Media", "Brand Management", "Marketing Analytics", "Campaign Management", "Adobe Creative Suite"],
+  hr:        ["Recruitment", "Talent Management", "Employee Engagement", "HR Operations", "Payroll", "Performance Management", "HRIS", "Onboarding"],
+  textile:   ["Production Planning", "Quality Control", "Supply Chain", "ERP", "Lean Manufacturing", "Inventory Management"],
 };
-const GENERAL_SKILLS = ["Python", "SQL", "Power BI", "Claude", "N8N", "Project Management", "Communication", "Data Analysis"];
+const GENERAL_SKILLS = ["Python", "SQL", "Power BI", "Claude", "N8N", "Project Management", "Communication", "Data Analysis", "Excel", "Stakeholder Management", "Documentation", "Problem Solving", "Agile/Scrum", "Presentation Skills", "Requirements Gathering", "Team Leadership", "Time Management", "Business Analysis"];
+// Suggest a fresh batch each render, EXCLUDING anything the person already
+// picked. Because the pool is large, new chips keep appearing as they add
+// skills — the suggestions only run out when they've essentially picked
+// everything relevant (i.e. they've stopped because there's nothing left).
 const suggestionsFor = (department, competency, already) => {
   const key = `${department || ""} ${competency || ""}`.toLowerCase();
   const picked = [];
@@ -570,7 +584,7 @@ const suggestionsFor = (department, competency, already) => {
     const low = s.toLowerCase();
     if (taken.has(low) || seen.has(low)) continue;
     seen.add(low); out.push(s);
-    if (out.length >= 10) break;
+    if (out.length >= 40) break;
   }
   return out;
 };
@@ -1116,6 +1130,7 @@ const AvailabilityEnginePage = () => {
 
   // Filters
   const [statusFilter, setStatusFilter] = useState("");
+  const [deptFilter, setDeptFilter] = useState("");
   const [skillFilter, setSkillFilter] = useState(null);
   const [searchTerm, setSearchTerm] = useState("");
 
@@ -1193,13 +1208,19 @@ const AvailabilityEnginePage = () => {
       });
     }
     if (statusFilter) list = list.filter((e) => (e.status || "") === statusFilter);
+    if (deptFilter) list = list.filter((e) => (e.department || "") === deptFilter);
     if (skillFilter) {
       const sk = skillFilter.toLowerCase();
+      // Match competency, position OR department — so picking a practice like
+      // "Qlik" (which is a department, not just a competency value) returns the
+      // whole practice, matching what the chat agent considers "Qlik".
       list = list.filter((e) =>
-        (e.competency || "").toLowerCase().includes(sk) || (e.position || "").toLowerCase().includes(sk));
+        (e.competency || "").toLowerCase().includes(sk) ||
+        (e.position || "").toLowerCase().includes(sk) ||
+        (e.department || "").toLowerCase().includes(sk));
     }
     return list;
-  }, [employees, searchTerm, statusFilter, skillFilter]);
+  }, [employees, searchTerm, statusFilter, deptFilter, skillFilter]);
 
   // ── Create task: Find Best Fit ──
   const handleFindBestFit = async (payload) => {
@@ -1317,7 +1338,7 @@ const AvailabilityEnginePage = () => {
       <SavedTasksPanel tasks={tasks} onDelete={handleDeleteTask} onToggleStatus={handleToggleStatus} onOpen={setSelectedTask} />
 
       {/* Search + status + skill + Create Task row */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 180px 220px 180px", gap: 12, marginBottom: 20 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 150px 190px 190px 150px", gap: 12, marginBottom: 20 }}>
         <div style={{ position: "relative" }}>
           <Search size={16} style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", color: C.textMuted }} />
           <input
@@ -1339,6 +1360,13 @@ const AvailabilityEnginePage = () => {
           <option value="Bench">Bench</option>
           <option value="Partial">Partial</option>
           <option value="Allocated">Allocated</option>
+        </select>
+        <select value={deptFilter} onChange={e => setDeptFilter(e.target.value)} style={{
+          padding: "12px 14px", borderRadius: 10, border: `1px solid ${C.border}`,
+          background: C.surface, color: C.textPrimary, fontSize: 14, fontWeight: 600,
+        }}>
+          <option value="">All Departments</option>
+          {(departments || []).map(d => <option key={d} value={d}>{d}</option>)}
         </select>
         <SkillDropdown skills={skills} active={skillFilter} onChange={setSkillFilter} />
         <button onClick={() => setCreateOpen(true)} style={{
