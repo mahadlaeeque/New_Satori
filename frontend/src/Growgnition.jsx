@@ -17,6 +17,7 @@ import {
   Filter, Sun, Moon, ThumbsUp, ThumbsDown, RefreshCw, Check
 } from "lucide-react";
 import AvailabilityEnginePage from "./AvailabilityEngine.jsx";
+import SatoriAvatar from "./components/SatoriAvatar.jsx";
 
 // ─── TMC Brand Color Palette ───
 // Theme-aware tokens go through CSS custom properties so the same JSX inline
@@ -1199,25 +1200,12 @@ const VoiceModal = ({ open, onClose }) => {
     }}>
       <div onClick={(e) => e.stopPropagation()} style={{ textAlign: "center" }}>
         <div style={{ margin: "0 auto 24px", display: "inline-flex" }}>
-          {/* Neutral voice orb placeholder — avatar removed pending new assets.
-              Reacts to state + live audio amplitude. */}
-          <div style={{
-            position: "relative", width: 200, height: 200, borderRadius: "50%",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            background: state === "listening" ? `${COLORS.accent}1f`
-                      : state === "speaking" ? `${COLORS.accent}2b` : "#1f2937",
-            border: `3px solid ${(state === "connecting" || state === "closing") ? "#475569" : COLORS.accent}`,
-            boxShadow: state === "speaking"
-                ? `0 0 ${18 + audioLevel * 46}px ${Math.round(4 + audioLevel * 10)}px ${COLORS.accent}66`
-                : state === "listening" ? `0 0 22px 4px ${COLORS.accent}55` : "none",
-            transition: "box-shadow 0.12s ease, background 0.25s ease",
-          }}>
-            {(state === "connecting" || state === "closing")
-              ? <Activity size={52} color="#cbd5e1" style={{ animation: "spin 1s linear infinite" }} />
-              : (state === "speaking"
-                  ? <AudioLines size={56} color={COLORS.accent} />
-                  : <Mic size={52} color={state === "listening" ? COLORS.accent : "#cbd5e1"} />)}
-          </div>
+          <SatoriAvatar
+            state={state === "connecting" || state === "closing" ? "idle" : state}
+            audioLevel={audioLevel}
+            size={232}
+            ariaLabel="Satori voice agent"
+          />
         </div>
         <div style={{ color: "#e2e8f0", fontSize: 14, maxWidth: 420 }}>{statusText}</div>
         <button onClick={stop} style={{
