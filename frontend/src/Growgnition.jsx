@@ -1343,6 +1343,7 @@ const FabButtons = ({ pageLabel } = {}) => {
         >
           <SatoriMascot state="idle" size={56} ariaLabel="Talk to Satori (voice)" />
         </button>
+        <SatoriIntroHint />
       </div>
 
       {helpOpen && (
@@ -10211,6 +10212,10 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
       {/* Global Animation Styles */}
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes satori-intro-pulse {
+          0%, 100% { transform: scale(1); }
+          50%      { transform: scale(1.025); }
+        }
         @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); } 50% { box-shadow: 0 0 0 12px rgba(239,68,68,0); } }
         @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
         @keyframes wave { 0%, 100% { transform: scaleY(0.5); } 50% { transform: scaleY(1.5); } }
@@ -10537,6 +10542,55 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           background: rgba(0, 0, 0, 0.72) !important;
         }
       `}</style>
+    </div>
+  );
+};
+
+const SatoriIntroHint = () => {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    let seen = false;
+    try { seen = localStorage.getItem("satori_mascot_intro_seen") === "1"; } catch {}
+    if (seen) return;
+    const t1 = setTimeout(() => setVisible(true), 800);       // fade in
+    const t2 = setTimeout(() => dismiss(), 12000);             // auto-dismiss
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const dismiss = () => {
+    try { localStorage.setItem("satori_mascot_intro_seen", "1"); } catch {}
+    setVisible(false);
+  };
+  if (!visible) return null;
+  return (
+    <div
+      style={{
+        position: "fixed", bottom: 84, right: 100, zIndex: 1000,
+        background: COLORS.surface, color: COLORS.textPrimary,
+        border: `1px solid ${COLORS.accent}`,
+        borderRadius: 12, padding: "10px 14px 12px",
+        maxWidth: 260, fontSize: 12.5,
+        boxShadow: "0 8px 28px rgba(0,0,0,0.28)",
+        animation: "satori-intro-pulse 2.4s ease-in-out infinite",
+      }}
+    >
+      <div style={{ fontWeight: 700, color: COLORS.accent, marginBottom: 4, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span>Meet Satori</span>
+        <button onClick={dismiss} style={{ background: "none", border: "none", color: COLORS.textMuted, cursor: "pointer", padding: 0, lineHeight: 1 }}>
+          <X size={13} />
+        </button>
+      </div>
+      <div style={{ lineHeight: 1.4 }}>
+        Click here any time to talk to your AI assistant by voice.
+      </div>
+      {/* small arrow pointing down-right to the mascot */}
+      <div style={{
+        position: "absolute", bottom: -7, right: 28, width: 14, height: 14,
+        background: COLORS.surface,
+        borderRight: `1px solid ${COLORS.accent}`,
+        borderBottom: `1px solid ${COLORS.accent}`,
+        transform: "rotate(45deg)",
+      }} />
     </div>
   );
 };

@@ -63,6 +63,30 @@ function ensureKeyframes() {
     .satori-think-spin   { animation: satori-think-orbit 2.6s linear infinite;               transform-origin: 100px 28px; transform-box: view-box; }
     .satori-mouth-wiggle { animation: satori-mouth-wiggle 0.18s ease-in-out infinite;        transform-origin: 100px 132px; transform-box: view-box; }
 
+    /* Micro idle animations — long cycle so they fire only every 24s,
+       once per loop. Subtle head tilt and antenna sway. */
+    @keyframes satori-micro-tilt {
+      0%, 92%, 100% { transform: rotate(0deg); }
+      94%           { transform: rotate(-2.5deg); }
+      96%           { transform: rotate(2.5deg); }
+      98%           { transform: rotate(0deg); }
+    }
+    @keyframes satori-micro-sway {
+      0%, 88%, 100% { transform: rotate(0deg); }
+      91%           { transform: rotate(-6deg); }
+      94%           { transform: rotate(6deg); }
+      97%           { transform: rotate(0deg); }
+    }
+    @keyframes satori-done-nod {
+      0%, 100% { transform: translateY(0) rotate(0deg); }
+      35%      { transform: translateY(4px) rotate(2deg); }
+      70%      { transform: translateY(0) rotate(-1deg); }
+    }
+
+    .satori-micro-tilt    { animation: satori-micro-tilt 24s ease-in-out infinite;    transform-origin: 100px 110px; transform-box: view-box; }
+    .satori-micro-sway    { animation: satori-micro-sway 18s ease-in-out infinite;    transform-origin: 100px 50px;  transform-box: view-box; }
+    .satori-done-nod      { animation: satori-done-nod 0.8s ease-out 1;               transform-origin: 100px 100px; transform-box: view-box; }
+
     /* When audio amplitude is driving the mouth, the wiggle is replaced
        by a continuous inline-transform set from JS — see SatoriMascot.jsx. */
   `;
@@ -167,11 +191,17 @@ function Mouth({ state, audioLevel = 0, color = "#8AC441", innerColor = "#cdf08a
 /**
  * Antenna + listening pulse rings.
  */
-function Antenna({ state }) {
+function Antenna({ state, audioLevel = 0 }) {
   const showRings = state === "listening";
   const spin = state === "thinking";
+  const isSpeaking = state === "speaking" || state === "done";
+  // Audio-reactive glow during speech: orb radius + outer halo opacity
+  // both scale with the live amplitude (0..1).
+  const lvl = Math.max(0, Math.min(1, audioLevel));
+  const speakOrbR  = isSpeaking ? 7 + lvl * 3.5 : 7;
+  const speakHalo  = isSpeaking ? lvl * 0.85 : 0;
   return (
-    <g>
+    <g className="satori-micro-sway">
       {showRings && (
         <>
           <circle className="satori-ring-1" cx="100" cy="28" r="14" fill="none"
@@ -183,11 +213,18 @@ function Antenna({ state }) {
         </>
       )}
       <line x1="100" y1="50" x2="100" y2="30" stroke="#444" strokeWidth="2" />
+      {/* Speaking halo (transparent except when audio is loud) */}
+      {isSpeaking && (
+        <circle cx="100" cy="28" r={speakOrbR + 6}
+                fill="#cdf08a" opacity={speakHalo * 0.35} />
+      )}
       <g className={spin ? "satori-think-spin" : ""}>
         <circle className={showRings ? "satori-antenna-orb" : ""}
-                cx="100" cy="28" r={showRings ? 9 : 7}
+                cx="100" cy="28"
+                r={showRings ? 9 : speakOrbR}
                 fill="#8AC441" />
-        <circle cx="100" cy="27" r="2.8" fill="#cdf08a" />
+        <circle cx="100" cy="27" r={2.8 + (isSpeaking ? lvl * 1.5 : 0)}
+                fill="#cdf08a" />
         {spin && (
           <>
             <circle cx="112" cy="28" r="2" fill="#cdf08a" opacity="0.8" />
@@ -288,17 +325,19 @@ const SatoriMascot = ({
         aria-label={ariaLabel}
         xmlns="http://www.w3.org/2000/svg"
       >
-        <Hair />
-        <Antenna state={safeState} />
-        {/* Head shell */}
-        <rect x="42"  y="50"  width="116" height="108" rx="28"
-              fill="#2a2a28" stroke="#3b3b39" strokeWidth="1" />
-        {/* Face screen */}
-        <rect x="54"  y="64"  width="92"  height="84"  rx="20" fill="#141413" />
-        <Eyes state={safeState} />
-        <Cheeks state={safeState} />
-        <Mouth state={safeState} audioLevel={audioLevel} />
-        <Body />
+        <g className={safeState === "done" ? "satori-done-nod" : (safeState === "idle" ? "satori-micro-tilt" : "")}>
+          <Hair />
+          <Antenna state={safeState} audioLevel={audioLevel} />
+          {/* Head shell */}
+          <rect x="42"  y="50"  width="116" height="108" rx="28"
+                fill="#2a2a28" stroke="#3b3b39" strokeWidth="1" />
+          {/* Face screen */}
+          <rect x="54"  y="64"  width="92"  height="84"  rx="20" fill="#141413" />
+          <Eyes state={safeState} />
+          <Cheeks state={safeState} />
+          <Mouth state={safeState} audioLevel={audioLevel} />
+          <Body />
+        </g>
       </svg>
     </Wrapper>
   );
