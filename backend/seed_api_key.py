@@ -22,7 +22,12 @@ import hashlib
 import secrets
 import sys
 
-from database import get_db, USE_POSTGRES
+from database import get_db, init_db, USE_POSTGRES
+
+# Make sure the api_keys table (and all other tables) exist before we touch
+# them. init_db() is idempotent — every migration is CREATE TABLE IF NOT
+# EXISTS — so this is safe to call on both fresh and long-lived databases.
+init_db()
 
 
 def _sha256(s: str) -> str:
