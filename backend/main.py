@@ -1740,6 +1740,237 @@ class SupportTicketUpdate(BaseModel):
 _SUPPORT_EMAIL_TO = os.environ.get("SUPPORT_EMAIL_TO", "mahad.laeeque@tmcltd.com")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Satori Usage API — read-only machine-to-machine endpoint for the TMC
+# monitoring portal. Mirrors the contract of the existing tank-usage Cloud
+# Function so the portal can poll all internal apps with identical client code.
+#
+# Contract:
+#   GET /api/satori-usage
+#   Auth:   X-API-Key: <secret>   (verified against api_keys.key_hash)
+#   Query:  limit  (default 100, max 500)
+#           offset (default 0)
+#           user_email (optional — filter to one user)
+#   Resp:   { users: [...], total, limit, offset, hasMore }
+#           sorted by lastActiveAt desc
+#
+# Metrics are derived from existing Satori tables — no new event log table
+# needed — so historic activity is backfilled automatically:
+#   loginCount         ← login_log (success=1)
+#   chatSessionCount   ← chat_conversations
+#   voiceSessionCount  ← distinct days in data_access_log where action='ai.voice'
+#   reportCount        ← saved_reports
+#   dashboardCount     ← saved_dashboards
+#   lastActiveAt       ← MAX over all activity timestamps
+# ─────────────────────────────────────────────────────────────────────────────
+
+from fastapi import Header as _UsageHeader
+
+def _verify_usage_api_key(raw_key: str | None) -> dict:
+    """Verify X-API-Key against the api_keys table. Returns the matching row dict
+    on success; raises HTTPException(401/403) on failure. Also bumps
+    last_used_at so we can spot stale keys."""
+    if not raw_key:
+        raise HTTPException(status_code=401, detail="Missing X-API-Key header")
+    import hashlib as _hashlib
+    h = _hashlib.sha256(raw_key.strip().encode("utf-8")).hexdigest()
+    from database import get_db as _get_db, USE_POSTGRES as _USE_PG
+    db = _get_db()
+    try:
+        cur = db.cursor()
+        cur.execute(
+            "SELECT name, scope, revoked_at FROM api_keys WHERE key_hash = ?",
+            (h,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=403, detail="Invalid API key")
+        # Postgres returns dict (RealDictCursor); SQLite returns Row — normalize.
+        rev = row["revoked_at"] if isinstance(row, dict) else row[2]
+        if rev is not None:
+            raise HTTPException(status_code=403, detail="API key has been revoked")
+        # Bump last_used_at (best-effort — never block the request on this)
+        try:
+            if _USE_PG:
+                cur.execute(
+                    "UPDATE api_keys SET last_used_at = NOW() WHERE key_hash = ?",
+                    (h,),
+                )
+            else:
+                cur.execute(
+                    "UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE key_hash = ?",
+                    (h,),
+                )
+            db.commit()
+        except Exception as _e:
+            print(f"[usage-api] last_used_at bump failed: {_e}")
+        return {
+            "name":  row["name"]  if isinstance(row, dict) else row[0],
+            "scope": row["scope"] if isinstance(row, dict) else row[1],
+        }
+    finally:
+        try: db.close()
+        except Exception: pass
+
+
+def _iso(dt) -> str | None:
+    """Format a TIMESTAMP value (datetime or string) as ISO-8601 with Z, or
+    None if falsy. Tolerates SQLite's plain-string timestamps."""
+    if dt is None:
+        return None
+    if hasattr(dt, "isoformat"):
+        s = dt.isoformat()
+        return s if s.endswith("Z") or "+" in s[10:] else s + "Z"
+    s = str(dt).strip()
+    if not s:
+        return None
+    # SQLite default format: "YYYY-MM-DD HH:MM:SS"
+    if " " in s and "T" not in s:
+        s = s.replace(" ", "T", 1)
+    if not (s.endswith("Z") or "+" in s[10:]):
+        s = s + "Z"
+    return s
+
+
+@app.get("/api/satori-usage")
+def satori_usage(
+    request: Request,
+    limit: int = 100,
+    offset: int = 0,
+    user_email: str | None = None,
+    x_api_key: str | None = _UsageHeader(default=None, alias="X-API-Key"),
+):
+    """Per-user activity stats for the monitoring portal. See contract above."""
+    key = _verify_usage_api_key(x_api_key)
+    audit_log.record(
+        user=None, request=request, action="usage.api.read",
+        resource_type="api_key", resource_id=key.get("name"),
+        detail={"limit": limit, "offset": offset, "user_email_filter": bool(user_email)},
+    )
+
+    limit  = max(1, min(500, int(limit  or 100)))
+    offset = max(0, int(offset or 0))
+    from database import get_db as _get_db, USE_POSTGRES as _USE_PG
+    db = _get_db()
+    try:
+        cur = db.cursor()
+
+        # --- Total count (with optional email filter) ---
+        if user_email:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM users WHERE LOWER(email) = LOWER(?)",
+                (user_email,),
+            )
+        else:
+            cur.execute("SELECT COUNT(*) AS c FROM users WHERE is_active = 1")
+        crow = cur.fetchone()
+        total = int((crow["c"] if isinstance(crow, dict) else crow[0]) or 0)
+
+        # --- The big aggregation query ---
+        # Correlated subqueries work in both Postgres and SQLite. The outer
+        # ORDER BY sorts on the computed last_activity_at, NULLs last.
+        # `is_active` filter is applied unless a specific user_email is given
+        # (matching by email should always work even for deactivated users).
+        params: list = []
+        where_clauses: list[str] = []
+        if user_email:
+            where_clauses.append("LOWER(u.email) = LOWER(?)")
+            params.append(user_email)
+        else:
+            where_clauses.append("u.is_active = 1")
+        where_sql = " AND ".join(where_clauses)
+
+        # Postgres-vs-SQLite: use DATE() function which is supported by both.
+        # NULLS LAST is Postgres-only; the COALESCE trick works on both.
+        sql = (
+            "SELECT * FROM ("
+            "  SELECT u.id, u.email, u.full_name, u.role, u.is_active, u.created_at,"
+            "    (SELECT short_code FROM companies c WHERE c.id = u.company_id) AS company,"
+            "    (SELECT COUNT(*) FROM login_log l "
+            "       WHERE l.user_id = u.id AND l.success = 1) AS login_count,"
+            "    (SELECT COUNT(*) FROM chat_conversations c "
+            "       WHERE c.user_id = u.id) AS chat_count,"
+            "    (SELECT COUNT(DISTINCT DATE(a.created_at)) FROM data_access_log a "
+            "       WHERE a.user_id = u.id AND a.action = 'ai.voice') AS voice_count,"
+            "    (SELECT COUNT(*) FROM saved_reports r "
+            "       WHERE r.user_id = u.id) AS report_count,"
+            "    (SELECT COUNT(*) FROM saved_dashboards d "
+            "       WHERE d.user_id = u.id) AS dashboard_count,"
+            "    (SELECT MAX(l.timestamp) FROM login_log l "
+            "       WHERE l.user_id = u.id AND l.success = 1) AS last_login_at,"
+            "    (SELECT MAX(c.updated_at) FROM chat_conversations c "
+            "       WHERE c.user_id = u.id) AS last_chat_at,"
+            "    (SELECT MAX(a.created_at) FROM data_access_log a "
+            "       WHERE a.user_id = u.id AND a.action = 'ai.voice') AS last_voice_at,"
+            "    (SELECT MAX(a.created_at) FROM data_access_log a "
+            "       WHERE a.user_id = u.id) AS last_activity_at"
+            "  FROM users u"
+            "  WHERE " + where_sql +
+            ") t "
+            "ORDER BY COALESCE(last_activity_at, last_login_at, '1970-01-01') DESC, "
+            "         t.id ASC "
+            "LIMIT ? OFFSET ?"
+        )
+        params.extend([limit, offset])
+        cur.execute(sql, params)
+        rows = cur.fetchall() or []
+
+        def _g(r, key_, idx):
+            """Read a column by name (dict cursor) or position (sqlite Row/tuple)."""
+            if isinstance(r, dict):
+                return r.get(key_)
+            try:
+                return r[key_]
+            except (KeyError, IndexError, TypeError):
+                pass
+            try:
+                return r[idx]
+            except (KeyError, IndexError, TypeError):
+                return None
+
+        users = []
+        for r in rows:
+            last_login = _g(r, "last_login_at",    12)
+            last_chat  = _g(r, "last_chat_at",     13)
+            last_voice = _g(r, "last_voice_at",    14)
+            last_act   = _g(r, "last_activity_at", 15)
+            candidates = [t for t in (last_login, last_chat, last_voice, last_act) if t]
+            last_active = max(candidates) if candidates else None
+            users.append({
+                "userId":                    int(_g(r, "id", 0) or 0),
+                "email":                     _g(r, "email", 1) or "",
+                "fullName":                  _g(r, "full_name", 2) or "",
+                "role":                      _g(r, "role", 3) or "user",
+                "isActive":                  bool(int(_g(r, "is_active", 4) or 0)),
+                "company":                   _g(r, "company", 6) or "",
+                "loginCount":                int(_g(r, "login_count",     7)  or 0),
+                "chatSessionCount":          int(_g(r, "chat_count",      8)  or 0),
+                "voiceSessionCount":         int(_g(r, "voice_count",     9)  or 0),
+                "reportCount":               int(_g(r, "report_count",    10) or 0),
+                "dashboardCount":            int(_g(r, "dashboard_count", 11) or 0),
+                "totalVoiceDurationSeconds": 0,  # v1: not yet tracked server-side
+                "lastLoginAt":               _iso(last_login),
+                "lastChatAt":                _iso(last_chat),
+                "lastVoiceAt":               _iso(last_voice),
+                "lastActiveAt":              _iso(last_active),
+                "createdAt":                 _iso(_g(r, "created_at", 5)),
+            })
+
+        return {
+            "users":   users,
+            "total":   total,
+            "limit":   limit,
+            "offset":  offset,
+            "hasMore": (offset + len(users)) < total,
+            "schemaVersion": 1,
+        }
+    finally:
+        try: db.close()
+        except Exception: pass
+
+
+
+
 @app.post("/api/support/report")
 def support_report(body: SupportTicketCreate, request: Request, user: dict = Depends(get_current_user)):
     """Capture a support / issue report: store it in support_tickets AND email

@@ -97,6 +97,7 @@ def init_db():
     _migrate_rename_sfml_to_tmc()
     _migrate_reset_passwords_to_welcome()
     _migrate_finalize_tmc_superadmin()
+    _migrate_add_api_keys()
 
 
 def _migrate_rename_polypack_to_ffc():
@@ -1286,3 +1287,56 @@ def _migrate_finalize_tmc_superadmin():
         conn.close()
     except Exception as e:
         print(f"[DB] Migration error (finalize tmc superadmin, safe to ignore on fresh DB): {e}")
+
+
+def _migrate_add_api_keys():
+    """Idempotent — creates the api_keys table used by external machine-to-machine
+    consumers of the read-only usage API (e.g. the TMC monitoring portal).
+
+    Schema: one row per issued key. We store only a SHA-256 hash of the raw key
+    so a DB leak can't reveal credentials. The raw key is shared once via
+    1Password / one-time-secret link when issued.
+
+    Columns:
+      name          unique label (e.g. "monitoring-portal-prod")
+      key_hash      sha256 hex digest of the raw key string
+      scope         coarse scope tag — currently 'usage_read' only
+      created_by    operator email who issued the key
+      created_at    issue time
+      last_used_at  rolling — bumped on each successful verify
+      revoked_at    set when the key is revoked (NULL = active)
+    """
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        if USE_POSTGRES:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    name          TEXT PRIMARY KEY,
+                    key_hash      TEXT NOT NULL UNIQUE,
+                    scope         TEXT NOT NULL DEFAULT 'usage_read',
+                    created_by    TEXT,
+                    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_used_at  TIMESTAMP,
+                    revoked_at    TIMESTAMP
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)")
+        else:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    name          TEXT PRIMARY KEY,
+                    key_hash      TEXT NOT NULL UNIQUE,
+                    scope         TEXT NOT NULL DEFAULT 'usage_read',
+                    created_by    TEXT,
+                    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_used_at  TIMESTAMP,
+                    revoked_at    TIMESTAMP
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)")
+        conn.commit()
+        conn.close()
+        print("[DB] Migration: api_keys table ready")
+    except Exception as e:
+        print(f"[DB] api_keys migration error: {e}")
