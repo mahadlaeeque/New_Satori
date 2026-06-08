@@ -58,6 +58,11 @@ function ensureKeyframes() {
       0%   { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
     }
+    @keyframes satori-halo-pulse {
+      0%, 100% { opacity: 0.20; transform: scale(1); }
+      50%      { opacity: 0.34; transform: scale(1.05); }
+    }
+    .satori-halo-pulse   { animation: satori-halo-pulse 2.2s ease-in-out infinite; transform-origin: 100px 122px; transform-box: view-box; }
 
     .satori-root         { animation: satori-breath 4.6s ease-in-out infinite; transform-origin: 100px 130px; }
     .satori-eye-blink    { animation: satori-blink 6.5s infinite; transform-origin: center; transform-box: fill-box; }
@@ -90,20 +95,23 @@ function ensureKeyframes() {
   document.head.appendChild(s);
 }
 
-// Palette — refined / muted, not playful
-const SKIN        = "#ebccaa";   // neutral peach, slightly muted
-const SKIN_SHADE  = "#cda286";   // cheekbone / jaw contour
-const SKIN_DEEP   = "#a37854";   // ear inner, nose
-const HAIR        = "#1a1816";   // sleek near-black
-const HAIR_HI     = "#2e2925";   // subtle sheen
-const HAIR_DEEP  = "#0d0c0b";    // hair shadow
-const GREEN       = "#8AC441";   // TMC primary — used sparingly
+// Palette — professional, South-Asian / Pakistani complexion, TMC dressing
+const SKIN        = "#d2a172";   // warm medium South-Asian tone
+const SKIN_SHADE  = "#b07f50";   // cheekbone / jaw contour
+const SKIN_DEEP   = "#8a5c34";   // ear inner, nose
+const HAIR        = "#211a14";   // warm dark brown-black
+const HAIR_HI     = "#3a2c20";   // subtle sheen
+const HAIR_DEEP  = "#140e09";    // hair shadow
+const GREEN       = "#8AC441";   // TMC primary green — accents only
 const GREEN_BRT   = "#cdf08a";   // accent glow
-const LIP         = "#a4625e";   // natural beige-rose
-const LIP_DEEP    = "#5f3833";   // mouth shadow
-const LIP_HI      = "#b87874";   // lower lip soft
-const LINE        = "#1a1614";   // line-art (warm black)
-const BROW        = "#2a1f1c";   // brow color
+const BLAZER      = "#0A5F89";   // TMC teal — professional blazer
+const BLAZER_DK   = "#07435F";   // lapel / blazer shadow
+const SHIRT       = "#F2F5F7";   // light blouse under the blazer
+const LIP         = "#9c5b52";   // natural warm rose
+const LIP_DEEP    = "#5a322c";   // mouth shadow
+const LIP_HI      = "#b07068";   // lower lip soft
+const LINE        = "#1a1310";   // line-art (warm black)
+const BROW        = "#2a1d16";   // brow color
 const BLUSH       = "#c98a78";   // very subtle — listening only
 
 /* -------------------------------------------------------------------------- */
@@ -314,49 +322,28 @@ function Cheeks({ state }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Head accent — minimal glow dot above hair                                  */
-/*    Replaces the cartoon hair-clip. Just a small TMC-green AI energy dot    */
-/*    that pulses on listening, spins satellites on thinking, glows on speak. */
+/* Halo — soft audio-reactive aura BEHIND the head (replaces the head dot).    */
+/*    No "thing on top of the head" — just a subtle on-brand glow that pulses  */
+/*    gently while listening and brightens with the voice amplitude while      */
+/*    speaking. Drawn first so it sits behind the hair/face.                   */
 /* -------------------------------------------------------------------------- */
-function HeadAccent({ state, audioLevel = 0 }) {
-  const showRings = state === "listening";
-  const spin = state === "thinking";
-  const isSpeaking = state === "speaking" || state === "done";
+function Halo({ state, audioLevel = 0 }) {
   const lvl = Math.max(0, Math.min(1, audioLevel));
-  const speakOrbR = isSpeaking ? 3 + lvl * 2 : 3;
-  const speakHalo = isSpeaking ? lvl * 0.8 : 0;
-
-  return (
-    <g className="satori-micro-sway">
-      {showRings && (
-        <>
-          <circle className="satori-ring-1" cx={CLIP_X} cy={CLIP_Y} r="11" fill="none" stroke={GREEN} strokeWidth="1.1" />
-          <circle className="satori-ring-2" cx={CLIP_X} cy={CLIP_Y} r="11" fill="none" stroke={GREEN} strokeWidth="0.9" />
-          <circle className="satori-ring-3" cx={CLIP_X} cy={CLIP_Y} r="11" fill="none" stroke={GREEN} strokeWidth="0.7" />
-        </>
-      )}
-      {isSpeaking && (
-        <circle cx={CLIP_X} cy={CLIP_Y} r={speakOrbR + 6}
-                fill={GREEN_BRT} opacity={speakHalo * 0.4} />
-      )}
-      <g className={spin ? "satori-think-spin" : ""}>
-        {/* Soft outer glow disc */}
-        <circle cx={CLIP_X} cy={CLIP_Y} r={speakOrbR + 1.5} fill={GREEN} opacity="0.35" />
-        {/* Main accent dot */}
-        <circle className={showRings ? "satori-clip-pulse" : ""}
-                cx={CLIP_X} cy={CLIP_Y} r={speakOrbR}
-                fill={GREEN} />
-        {/* Bright center */}
-        <circle cx={CLIP_X} cy={CLIP_Y - 0.5} r={Math.max(1, speakOrbR * 0.5)} fill={GREEN_BRT} />
-        {spin && (
-          <>
-            <circle cx={CLIP_X + 9} cy={CLIP_Y} r="1.4" fill={GREEN_BRT} opacity="0.8" />
-            <circle cx={CLIP_X - 7} cy={CLIP_Y + 4} r="1.1" fill={GREEN_BRT} opacity="0.6" />
-          </>
-        )}
+  const speaking = state === "speaking" || state === "done";
+  const listening = state === "listening";
+  if (speaking) {
+    return (
+      <g>
+        <circle cx="100" cy="122" r={84 + lvl * 8} fill={GREEN} opacity={0.10 + lvl * 0.28} />
+        <circle cx="100" cy="122" r={70 + lvl * 6} fill={GREEN_BRT} opacity={0.06 + lvl * 0.18} />
       </g>
-    </g>
-  );
+    );
+  }
+  if (listening) {
+    return <circle className="satori-halo-pulse" cx="100" cy="122" r="84" fill={GREEN} opacity="0.24" />;
+  }
+  // idle / thinking — faint resting aura
+  return <circle cx="100" cy="122" r="82" fill={GREEN} opacity="0.07" />;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -365,14 +352,16 @@ function HeadAccent({ state, audioLevel = 0 }) {
 function Body() {
   return (
     <g>
-      {/* Blazer shoulders */}
-      <path d="M 38,184 Q 100,172 162,184 L 168,200 L 32,200 Z" fill="#1a1a18" />
-      {/* Inner V-neck (slightly lighter — suggests a shirt under blazer) */}
-      <path d="M 88,180 Q 100,196 112,180 L 112,200 L 88,200 Z" fill="#3a3a37" />
-      {/* Lapels (slightly darker than blazer) */}
-      <path d="M 88,180 L 80,200 L 78,200 L 86,178 Z" fill="#0e0e0d" />
-      <path d="M 112,180 L 120,200 L 122,200 L 114,178 Z" fill="#0e0e0d" />
-      {/* TMC pin on left lapel */}
+      {/* Blazer shoulders — TMC teal */}
+      <path d="M 38,184 Q 100,172 162,184 L 168,200 L 32,200 Z" fill={BLAZER} />
+      {/* Inner V-neck — light blouse under the blazer */}
+      <path d="M 88,180 Q 100,196 112,180 L 112,200 L 88,200 Z" fill={SHIRT} />
+      {/* Lapels (darker teal) */}
+      <path d="M 88,180 L 80,200 L 78,200 L 86,178 Z" fill={BLAZER_DK} />
+      <path d="M 112,180 L 120,200 L 122,200 L 114,178 Z" fill={BLAZER_DK} />
+      {/* Shoulder seam sheen */}
+      <path d="M 52,184 Q 100,176 148,184" fill="none" stroke="#1f7aa6" strokeWidth="0.8" opacity="0.5" />
+      {/* TMC green lapel pin */}
       <circle cx="92" cy="190" r="2.6" fill={GREEN} />
       <circle cx="92" cy="190" r="1" fill={GREEN_BRT} />
     </g>
@@ -425,6 +414,8 @@ const SatoriMascot = ({
         xmlns="http://www.w3.org/2000/svg"
       >
         <g className={safeState === "done" ? "satori-done-nod" : (safeState === "idle" ? "satori-micro-tilt" : "")}>
+          {/* Soft audio-reactive aura behind the head (no head dot) */}
+          <Halo state={safeState} audioLevel={audioLevel} />
           {/* Back layer: long hair, drawn behind everything */}
           <HairBack />
           {/* Face + neck + ears + earrings */}
@@ -433,8 +424,6 @@ const SatoriMascot = ({
           <Body />
           {/* Front hair / sleek bangs */}
           <HairFront />
-          {/* Minimal AI energy accent above the head */}
-          <HeadAccent state={safeState} audioLevel={audioLevel} />
           {/* Facial features */}
           <Eyes state={safeState} />
           <Cheeks state={safeState} />
