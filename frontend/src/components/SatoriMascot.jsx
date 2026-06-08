@@ -1,36 +1,35 @@
 /*
  * SatoriMascot.jsx
  * ----------------------------------------------------------------------------
- * Professional-styled SVG mascot for Satori — TMC's AI Practice avatar.
+ * Rendered-image avatar for Satori — TMC's AI Practice voice agent.
  *
- * V3 redesign (June 2026):
- *   - Slimmer adult face proportions (taller oval, narrower jaw)
- *   - Sleek long straight hair instead of bowl-cut bangs
- *   - Refined eye anatomy — smaller, almond shape, restrained catchlight
- *   - Thinner straight brows, neutral natural lips, near-invisible blush
- *   - Minimal accent: a small glowing energy dot above the hair + tiny green
- *     stud earrings (replaces the cartoony leaf hair-clip)
- *   - Blazer-style collar with TMC green pin on the lapel
+ * V4 (June 2026): replaced the procedural SVG with three rendered PNG mouth
+ * poses (closed / half / open). During the "speaking" state we crossfade
+ * between them based on the live audio amplitude (audioLevel prop, 0..1),
+ * giving real-time lip sync to the Gemini Live TTS stream.
  *
  * States the rest of the app drives:
- *   "idle"       — slow breath, soft closed eyes, faint natural smile
- *   "listening"  — alert almond eyes, accent dot pulses with rings
- *   "thinking"   — closed eyes looking up, accent dot sparkles spin
- *   "speaking"   — mouth opens with audio amplitude (audioLevel prop)
- *   "done"       — transient happy state after end-of-call
+ *   "idle"       — closed mouth, gentle breathing
+ *   "listening"  — closed mouth, accent dot pulses + concentric rings overlay
+ *   "thinking"   — closed mouth, accent dot sparkles spin overlay
+ *   "speaking"   — mouth crossfades (closed -> half -> open) by audioLevel
+ *   "done"       — closed mouth, brief nod animation
  *
- * Web Audio integration unchanged: pass audioLevel (0..1) from a Gemini Live
- * playback AnalyserNode and the mouth + accent halo scale in real time.
+ * The overlay (TMC-green accent dot above the hair) keeps the same role the
+ * SVG version played: an at-a-glance signal of what the agent is doing.
+ *
+ * Same prop interface as V1-V3 — drop-in replacement, no callsite changes.
  *
  * Author: TMC AI Practice. License: internal.
  */
 import React, { useEffect } from "react";
 
-const STYLE_ID = "satori-mascot-keyframes";
+// Vite handles the asset URLs (hashed at build time, inlined at runtime).
+import mouthClosed from "../assets/voice/satori-mouth-closed.png";
+import mouthHalf   from "../assets/voice/satori-mouth-half.png";
+import mouthOpen   from "../assets/voice/satori-mouth-open.png";
 
-// Top-of-head accent pivot — used for ring + spin + micro-sway transforms
-const CLIP_X = 100;
-const CLIP_Y = 50;
+const STYLE_ID = "satori-mascot-keyframes";
 
 function ensureKeyframes() {
   if (typeof document === "undefined") return;
@@ -40,337 +39,155 @@ function ensureKeyframes() {
   s.textContent = `
     @keyframes satori-breath {
       0%, 100% { transform: translateY(0) scale(1); }
-      50%      { transform: translateY(-1.5px) scale(1.012); }
+      50%      { transform: translateY(-2px) scale(1.012); }
     }
-    @keyframes satori-blink {
-      0%, 93%, 100% { transform: scaleY(1); }
-      97%           { transform: scaleY(0.1); }
-    }
-    @keyframes satori-clip-pulse {
+    @keyframes satori-accent-pulse {
       0%, 100% { opacity: 0.75; transform: scale(1); }
-      50%      { opacity: 1;    transform: scale(1.15); }
+      50%      { opacity: 1;    transform: scale(1.18); }
     }
     @keyframes satori-ring-expand {
-      0%   { opacity: 0.6; transform: scale(0.85); }
-      100% { opacity: 0;   transform: scale(1.8); }
+      0%   { opacity: 0.7; transform: scale(0.85); }
+      100% { opacity: 0;   transform: scale(1.9); }
     }
     @keyframes satori-think-orbit {
       0%   { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
     }
-    @keyframes satori-halo-pulse {
-      0%, 100% { opacity: 0.20; transform: scale(1); }
-      50%      { opacity: 0.34; transform: scale(1.05); }
-    }
-    .satori-halo-pulse   { animation: satori-halo-pulse 2.2s ease-in-out infinite; transform-origin: 100px 122px; transform-box: view-box; }
-
-    .satori-root         { animation: satori-breath 4.6s ease-in-out infinite; transform-origin: 100px 130px; }
-    .satori-eye-blink    { animation: satori-blink 6.5s infinite; transform-origin: center; transform-box: fill-box; }
-    .satori-clip-pulse   { animation: satori-clip-pulse 1.4s ease-in-out infinite; transform-origin: ${CLIP_X}px ${CLIP_Y}px; transform-box: view-box; }
-    .satori-ring-1       { animation: satori-ring-expand 2.0s ease-out infinite;             transform-origin: ${CLIP_X}px ${CLIP_Y}px; transform-box: view-box; }
-    .satori-ring-2       { animation: satori-ring-expand 2.0s ease-out infinite 0.5s;        transform-origin: ${CLIP_X}px ${CLIP_Y}px; transform-box: view-box; }
-    .satori-ring-3       { animation: satori-ring-expand 2.0s ease-out infinite 1.0s;        transform-origin: ${CLIP_X}px ${CLIP_Y}px; transform-box: view-box; }
-    .satori-think-spin   { animation: satori-think-orbit 3.0s linear infinite;               transform-origin: ${CLIP_X}px ${CLIP_Y}px; transform-box: view-box; }
-
-    @keyframes satori-micro-tilt {
-      0%, 94%, 100% { transform: rotate(0deg); }
-      96%           { transform: rotate(-1.5deg); }
-      98%           { transform: rotate(1.5deg); }
-    }
-    @keyframes satori-micro-sway {
-      0%, 90%, 100% { transform: rotate(0deg); }
-      93%           { transform: rotate(-3deg); }
-      96%           { transform: rotate(3deg); }
-    }
     @keyframes satori-done-nod {
       0%, 100% { transform: translateY(0) rotate(0deg); }
-      35%      { transform: translateY(2px) rotate(1.5deg); }
+      35%      { transform: translateY(3px) rotate(1.5deg); }
       70%      { transform: translateY(0) rotate(-0.8deg); }
     }
+    @keyframes satori-micro-tilt {
+      0%, 94%, 100% { transform: rotate(0deg); }
+      96%           { transform: rotate(-1.2deg); }
+      98%           { transform: rotate(1.2deg); }
+    }
 
-    .satori-micro-tilt    { animation: satori-micro-tilt 28s ease-in-out infinite;    transform-origin: 100px 130px; transform-box: view-box; }
-    .satori-micro-sway    { animation: satori-micro-sway 22s ease-in-out infinite;    transform-origin: ${CLIP_X}px ${CLIP_Y}px; transform-box: view-box; }
-    .satori-done-nod      { animation: satori-done-nod 0.8s ease-out 1;               transform-origin: 100px 115px; transform-box: view-box; }
+    .satori-root           { animation: satori-breath 4.6s ease-in-out infinite; transform-origin: center 80%; }
+    .satori-accent-pulse   { animation: satori-accent-pulse 1.4s ease-in-out infinite; transform-origin: center; transform-box: fill-box; }
+    .satori-ring-1         { animation: satori-ring-expand 2.0s ease-out infinite;        transform-origin: center; transform-box: fill-box; }
+    .satori-ring-2         { animation: satori-ring-expand 2.0s ease-out infinite 0.5s;   transform-origin: center; transform-box: fill-box; }
+    .satori-ring-3         { animation: satori-ring-expand 2.0s ease-out infinite 1.0s;   transform-origin: center; transform-box: fill-box; }
+    .satori-think-spin     { animation: satori-think-orbit 3.0s linear infinite;          transform-origin: center; transform-box: fill-box; }
+    .satori-done-nod       { animation: satori-done-nod 0.8s ease-out 1; transform-origin: center 60%; }
+    .satori-micro-tilt     { animation: satori-micro-tilt 28s ease-in-out infinite; transform-origin: center 60%; }
+
+    /* Crossfade between mouth poses — driven by inline opacity from React. */
+    .satori-mouth-layer    { position: absolute; inset: 0; transition: opacity 80ms linear; pointer-events: none; }
   `;
   document.head.appendChild(s);
 }
 
-// Palette — professional, South-Asian / Pakistani complexion, TMC dressing
-const SKIN        = "#d2a172";   // warm medium South-Asian tone
-const SKIN_SHADE  = "#b07f50";   // cheekbone / jaw contour
-const SKIN_DEEP   = "#8a5c34";   // ear inner, nose
-const HAIR        = "#211a14";   // warm dark brown-black
-const HAIR_HI     = "#3a2c20";   // subtle sheen
-const HAIR_DEEP  = "#140e09";    // hair shadow
-const GREEN       = "#8AC441";   // TMC primary green — accents only
-const GREEN_BRT   = "#cdf08a";   // accent glow
-const BLAZER      = "#0A5F89";   // TMC teal — professional blazer
-const BLAZER_DK   = "#07435F";   // lapel / blazer shadow
-const SHIRT       = "#F2F5F7";   // light blouse under the blazer
-const LIP         = "#9c5b52";   // natural warm rose
-const LIP_DEEP    = "#5a322c";   // mouth shadow
-const LIP_HI      = "#b07068";   // lower lip soft
-const LINE        = "#1a1310";   // line-art (warm black)
-const BROW        = "#2a1d16";   // brow color
-const BLUSH       = "#c98a78";   // very subtle — listening only
+// TMC palette — accents only (the image carries everything else now).
+const GREEN     = "#8AC441";
+const GREEN_BRT = "#cdf08a";
 
-/* -------------------------------------------------------------------------- */
-/* Hair — back layer: long, sleek, falls straight down                        */
-/* -------------------------------------------------------------------------- */
-function HairBack() {
-  return (
-    <g>
-      {/* Left long sleek strand */}
-      <path d="M 56,92 Q 38,128 40,178 L 62,182 L 64,150 Q 60,120 64,98 Z" fill={HAIR} />
-      {/* Right long sleek strand */}
-      <path d="M 144,92 Q 162,128 160,178 L 138,182 L 136,150 Q 140,120 136,98 Z" fill={HAIR} />
-      {/* Mid-strand highlights for hair sheen */}
-      <path d="M 44,140 L 46,170" stroke={HAIR_HI} strokeWidth="1" opacity="0.5" />
-      <path d="M 156,140 L 154,170" stroke={HAIR_HI} strokeWidth="1" opacity="0.5" />
-      {/* Hair shadow at neck */}
-      <ellipse cx="100" cy="178" rx="22" ry="4" fill={HAIR_DEEP} opacity="0.5" />
-    </g>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Face — slimmer adult oval, refined cheekbones, subtle chin                 */
-/* -------------------------------------------------------------------------- */
-function Face() {
-  return (
-    <g>
-      {/* Neck — narrower */}
-      <rect x="91" y="160" width="18" height="22" rx="3" fill={SKIN} />
-      <path d="M 91,172 Q 100,176 109,172" fill={SKIN_SHADE} opacity="0.4" />
-      {/* Ears — smaller, more refined */}
-      <ellipse cx="59" cy="120" rx="4.5" ry="7.5" fill={SKIN} />
-      <ellipse cx="59" cy="122" rx="2" ry="3.5" fill={SKIN_DEEP} opacity="0.5" />
-      <ellipse cx="141" cy="120" rx="4.5" ry="7.5" fill={SKIN} />
-      <ellipse cx="141" cy="122" rx="2" ry="3.5" fill={SKIN_DEEP} opacity="0.5" />
-      {/* Earrings — tiny TMC green stud accents */}
-      <circle cx="59" cy="127" r="1.4" fill={GREEN} />
-      <circle cx="141" cy="127" r="1.4" fill={GREEN} />
-      {/* Face oval — narrower (38), longer (54), shifted up slightly */}
-      <ellipse cx="100" cy="116" rx="38" ry="54" fill={SKIN} />
-      {/* Cheekbone shading (very subtle) */}
-      <ellipse cx="66" cy="125" rx="8" ry="22" fill={SKIN_SHADE} opacity="0.18" />
-      <ellipse cx="134" cy="125" rx="8" ry="22" fill={SKIN_SHADE} opacity="0.10" />
-      {/* Jawline soft shadow */}
-      <ellipse cx="100" cy="158" rx="18" ry="5" fill={SKIN_SHADE} opacity="0.22" />
-    </g>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Hair — front layer: sleek side-parted style                                */
-/* -------------------------------------------------------------------------- */
-function HairFront() {
-  return (
-    <g>
-      {/* Crown — smooth dome */}
-      <path d="M 62,95 Q 68,55 100,52 Q 132,55 138,95 L 140,108 L 60,108 Z" fill={HAIR} />
-      {/* Side-swept bangs over forehead (subtle, professional) */}
-      <path d="M 100,68 Q 78,73 64,98 Q 64,108 70,108 Q 92,100 116,94 Q 130,92 140,98 Q 142,80 124,72 Q 110,66 100,68 Z" fill={HAIR} />
-      {/* Hair part line / highlight */}
-      <path d="M 84,72 Q 100,62 116,72" fill="none" stroke={HAIR_HI} strokeWidth="1" opacity="0.55" />
-      {/* Side temple hair */}
-      <path d="M 62,98 Q 60,118 64,118 Q 66,108 64,100 Z" fill={HAIR} />
-      <path d="M 138,98 Q 140,118 136,118 Q 134,108 136,100 Z" fill={HAIR} />
-      {/* Subtle layered strand suggestion */}
-      <path d="M 70,108 Q 80,112 92,108" fill="none" stroke={HAIR_HI} strokeWidth="0.7" opacity="0.5" />
-    </g>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Eyes — smaller almond shape, restrained expression                         */
-/* -------------------------------------------------------------------------- */
-function Eyes({ state }) {
-  if (state === "thinking") {
-    return (
-      <g>
-        {/* Brows lifted slightly */}
-        <path d="M 73,105 Q 84,102 92,104" fill="none" stroke={BROW} strokeWidth="1.8" strokeLinecap="round" />
-        <path d="M 108,104 Q 116,102 127,105" fill="none" stroke={BROW} strokeWidth="1.8" strokeLinecap="round" />
-        {/* Closed-up almond lashes */}
-        <path d="M 74,116 Q 84,112 92,116" fill="none" stroke={LINE} strokeWidth="2" strokeLinecap="round" />
-        <path d="M 108,116 Q 116,112 126,116" fill="none" stroke={LINE} strokeWidth="2" strokeLinecap="round" />
-      </g>
-    );
+/**
+ * Compute per-mouth-pose opacities from the live audio amplitude.
+ * Three thresholds with small overlap so the crossfade reads as smooth lip
+ * motion rather than discrete frames.
+ */
+function mouthOpacities(state, audioLevel) {
+  if (state !== "speaking" && state !== "done") {
+    // All non-speaking states show closed mouth.
+    return { closed: 1, half: 0, open: 0 };
   }
-
-  if (state === "listening") {
-    return (
-      <g className="satori-eye-blink">
-        {/* Brows — thin, neutral */}
-        <path d="M 73,104 Q 84,101 92,103" fill="none" stroke={BROW} strokeWidth="1.8" strokeLinecap="round" />
-        <path d="M 108,103 Q 116,101 127,104" fill="none" stroke={BROW} strokeWidth="1.8" strokeLinecap="round" />
-        {/* Sclera — smaller almond */}
-        <path d="M 75,117 Q 83,112 91,117 Q 83,121 75,117 Z" fill="#ffffff" />
-        <path d="M 109,117 Q 117,112 125,117 Q 117,121 109,117 Z" fill="#ffffff" />
-        {/* Iris — TMC green */}
-        <circle cx="83"  cy="117" r="4.5" fill={GREEN} />
-        <circle cx="117" cy="117" r="4.5" fill={GREEN} />
-        {/* Iris darker rim */}
-        <circle cx="83"  cy="117" r="4.5" fill="none" stroke="#5a7a26" strokeWidth="0.6" />
-        <circle cx="117" cy="117" r="4.5" fill="none" stroke="#5a7a26" strokeWidth="0.6" />
-        {/* Pupil */}
-        <circle cx="83"  cy="117" r="2.2" fill="#141413" />
-        <circle cx="117" cy="117" r="2.2" fill="#141413" />
-        {/* Single tasteful catchlight */}
-        <circle cx="84.5"  cy="115.5" r="1.2" fill="#ffffff" />
-        <circle cx="118.5" cy="115.5" r="1.2" fill="#ffffff" />
-        {/* Upper lash line (defines eye shape) */}
-        <path d="M 75,117 Q 83,112 91,117" fill="none" stroke={LINE} strokeWidth="1.3" strokeLinecap="round" />
-        <path d="M 109,117 Q 117,112 125,117" fill="none" stroke={LINE} strokeWidth="1.3" strokeLinecap="round" />
-      </g>
-    );
+  const lvl = Math.max(0, Math.min(1, audioLevel || 0));
+  // Map lvl in [0,1] to a position across (closed -> half -> open) with
+  // soft transitions around the breakpoints.
+  if (lvl < 0.12) {
+    // mostly closed, a touch of half kicking in at the top end
+    const t = lvl / 0.12;
+    return { closed: 1 - t * 0.3, half: t * 0.3, open: 0 };
   }
+  if (lvl < 0.32) {
+    // closed -> half
+    const t = (lvl - 0.12) / 0.20;
+    return { closed: 1 - t, half: t, open: 0 };
+  }
+  if (lvl < 0.55) {
+    // half hold + open ramping in
+    const t = (lvl - 0.32) / 0.23;
+    return { closed: 0, half: 1 - t, open: t };
+  }
+  // fully open
+  return { closed: 0, half: 0, open: 1 };
+}
 
-  // idle / speaking / done — gentle closed almond eyes
-  const lift = state === "speaking" || state === "done" ? -0.5 : 0;
+/**
+ * Small floating accent + state overlay rendered ABOVE the avatar's head.
+ * Sized to ~28% of the avatar width, positioned just above the hairline.
+ */
+function StateOverlay({ state, audioLevel, size }) {
+  const showRings = state === "listening";
+  const spin = state === "thinking";
+  const isSpeaking = state === "speaking" || state === "done";
+  const lvl = Math.max(0, Math.min(1, audioLevel || 0));
+  const orbR = isSpeaking ? 6 + lvl * 4 : 6;
+  const halo = isSpeaking ? lvl * 0.85 : 0;
+
+  // Overlay box: sits at the top-center, sized to give the accent room.
+  const w = Math.max(40, size * 0.4);
+  const top = size * 0.04;
   return (
-    <g className="satori-eye-blink">
-      {/* Brows — soft, neutral */}
-      <path d="M 73,105 Q 84,102 92,104" fill="none" stroke={BROW} strokeWidth="1.7" strokeLinecap="round" />
-      <path d="M 108,104 Q 116,102 127,105" fill="none" stroke={BROW} strokeWidth="1.7" strokeLinecap="round" />
-      {/* Eye crescents */}
-      <path d={`M 75,${118 + lift} Q 83,${122 + lift} 91,${118 + lift}`}
-            fill="none" stroke={LINE} strokeWidth="2" strokeLinecap="round" />
-      <path d={`M 109,${118 + lift} Q 117,${122 + lift} 125,${118 + lift}`}
-            fill="none" stroke={LINE} strokeWidth="2" strokeLinecap="round" />
-      {/* Subtle outer lash hints */}
-      <path d="M 74,117 L 72,116" stroke={LINE} strokeWidth="1" strokeLinecap="round" opacity="0.7" />
-      <path d="M 126,117 L 128,116" stroke={LINE} strokeWidth="1" strokeLinecap="round" opacity="0.7" />
-    </g>
+    <div
+      style={{
+        position: "absolute",
+        left: "50%",
+        top,
+        width: w,
+        height: w,
+        transform: "translateX(-50%)",
+        pointerEvents: "none",
+      }}
+    >
+      <svg
+        viewBox="0 0 100 100"
+        width="100%"
+        height="100%"
+        xmlns="http://www.w3.org/2000/svg"
+      >
+        {/* Listening rings — radiate outward */}
+        {showRings && (
+          <>
+            <circle className="satori-ring-1" cx="50" cy="50" r="22"
+                    fill="none" stroke={GREEN} strokeWidth="1.4" />
+            <circle className="satori-ring-2" cx="50" cy="50" r="22"
+                    fill="none" stroke={GREEN} strokeWidth="1.1" />
+            <circle className="satori-ring-3" cx="50" cy="50" r="22"
+                    fill="none" stroke={GREEN} strokeWidth="0.9" />
+          </>
+        )}
+        {/* Speaking halo — opacity tied to live amplitude */}
+        {isSpeaking && (
+          <circle cx="50" cy="50" r={orbR + 8}
+                  fill={GREEN_BRT} opacity={halo * 0.35} />
+        )}
+        {/* Thinking orbit — small satellite dots spinning around the accent */}
+        <g className={spin ? "satori-think-spin" : ""}>
+          {/* Soft outer disc */}
+          <circle cx="50" cy="50" r={orbR + 2.5} fill={GREEN} opacity="0.35" />
+          {/* Main accent dot — pulses for listening */}
+          <circle className={showRings ? "satori-accent-pulse" : ""}
+                  cx="50" cy="50" r={orbR}
+                  fill={GREEN} />
+          {/* Bright center */}
+          <circle cx="50" cy="49" r={Math.max(1.5, orbR * 0.5)}
+                  fill={GREEN_BRT} />
+          {spin && (
+            <>
+              <circle cx="76" cy="50" r="2.2" fill={GREEN_BRT} opacity="0.85" />
+              <circle cx="50" cy="76" r="1.8" fill={GREEN_BRT} opacity="0.65" />
+              <circle cx="24" cy="50" r="1.4" fill={GREEN_BRT} opacity="0.5"  />
+            </>
+          )}
+        </g>
+      </svg>
+    </div>
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* Nose — minimal soft hint                                                   */
-/* -------------------------------------------------------------------------- */
-function Nose() {
-  return (
-    <g>
-      <path d="M 100,128 Q 101,133 100,135 Q 99,134 99.5,132 Z"
-            fill={SKIN_DEEP} opacity="0.45" />
-    </g>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Mouth — natural, refined; no plump cartoon lips                            */
-/* -------------------------------------------------------------------------- */
-function Mouth({ state, audioLevel = 0 }) {
-  const lvl = Math.max(0, Math.min(1, audioLevel));
-
-  if (state === "speaking" || state === "done") {
-    const rx = 4 + lvl * 5;
-    const ry = 2.5 + lvl * 3.5;
-    return (
-      <g>
-        {/* Upper lip thin line */}
-        <path d="M 92,144 Q 100,142 108,144" fill="none" stroke={LIP_DEEP} strokeWidth="1" strokeLinecap="round" />
-        {/* Mouth opening (dark inside) */}
-        <ellipse cx="100" cy="146" rx={rx} ry={ry} fill={LIP_DEEP} />
-        {/* Inner mouth hint */}
-        <ellipse cx="100" cy={146 + ry * 0.2} rx={rx * 0.6} ry={ry * 0.4} fill={LIP} />
-        {/* Lower lip — subtle */}
-        <path d={`M ${100 - rx - 1},${146 + ry - 0.2} Q 100,${149 + ry * 0.5} ${100 + rx + 1},${146 + ry - 0.2}`}
-              fill={LIP_HI} opacity="0.75" />
-      </g>
-    );
-  }
-  if (state === "listening") {
-    return (
-      <g>
-        {/* Closed natural mouth, slightly parted */}
-        <path d="M 94,144 Q 100,143 106,144" fill="none" stroke={LIP_DEEP} strokeWidth="1.3" strokeLinecap="round" />
-        <path d="M 96,146 Q 100,147 104,146" fill="none" stroke={LIP} strokeWidth="0.9" strokeLinecap="round" opacity="0.7" />
-      </g>
-    );
-  }
-  if (state === "thinking") {
-    return (
-      <g>
-        {/* Slight asymmetric pursed line */}
-        <path d="M 93,145 Q 100,143 107,145" fill="none" stroke={LIP_DEEP} strokeWidth="1.4" strokeLinecap="round" />
-      </g>
-    );
-  }
-  // idle — natural neutral expression with a very soft smile
-  return (
-    <g>
-      <path d="M 92,144 Q 100,148 108,144" fill="none" stroke={LIP_DEEP} strokeWidth="1.6" strokeLinecap="round" />
-      <path d="M 94,144 Q 100,142 106,144" fill="none" stroke={LIP} strokeWidth="1" strokeLinecap="round" opacity="0.6" />
-    </g>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Cheeks — extremely subtle, only visible when listening                     */
-/* -------------------------------------------------------------------------- */
-function Cheeks({ state }) {
-  if (state !== "listening" && state !== "speaking" && state !== "done") return null;
-  const op = state === "listening" ? 0.22 : 0.16;
-  return (
-    <g>
-      <ellipse cx="74"  cy="132" rx="5" ry="3" fill={BLUSH} opacity={op} />
-      <ellipse cx="126" cy="132" rx="5" ry="3" fill={BLUSH} opacity={op} />
-    </g>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Halo — soft audio-reactive aura BEHIND the head (replaces the head dot).    */
-/*    No "thing on top of the head" — just a subtle on-brand glow that pulses  */
-/*    gently while listening and brightens with the voice amplitude while      */
-/*    speaking. Drawn first so it sits behind the hair/face.                   */
-/* -------------------------------------------------------------------------- */
-function Halo({ state, audioLevel = 0 }) {
-  const lvl = Math.max(0, Math.min(1, audioLevel));
-  const speaking = state === "speaking" || state === "done";
-  const listening = state === "listening";
-  if (speaking) {
-    return (
-      <g>
-        <circle cx="100" cy="122" r={84 + lvl * 8} fill={GREEN} opacity={0.10 + lvl * 0.28} />
-        <circle cx="100" cy="122" r={70 + lvl * 6} fill={GREEN_BRT} opacity={0.06 + lvl * 0.18} />
-      </g>
-    );
-  }
-  if (listening) {
-    return <circle className="satori-halo-pulse" cx="100" cy="122" r="84" fill={GREEN} opacity="0.24" />;
-  }
-  // idle / thinking — faint resting aura
-  return <circle cx="100" cy="122" r="82" fill={GREEN} opacity="0.07" />;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Body — blazer with V-neck + TMC green pin on the lapel                     */
-/* -------------------------------------------------------------------------- */
-function Body() {
-  return (
-    <g>
-      {/* Blazer shoulders — TMC teal */}
-      <path d="M 38,184 Q 100,172 162,184 L 168,200 L 32,200 Z" fill={BLAZER} />
-      {/* Inner V-neck — light blouse under the blazer */}
-      <path d="M 88,180 Q 100,196 112,180 L 112,200 L 88,200 Z" fill={SHIRT} />
-      {/* Lapels (darker teal) */}
-      <path d="M 88,180 L 80,200 L 78,200 L 86,178 Z" fill={BLAZER_DK} />
-      <path d="M 112,180 L 120,200 L 122,200 L 114,178 Z" fill={BLAZER_DK} />
-      {/* Shoulder seam sheen */}
-      <path d="M 52,184 Q 100,176 148,184" fill="none" stroke="#1f7aa6" strokeWidth="0.8" opacity="0.5" />
-      {/* TMC green lapel pin */}
-      <circle cx="92" cy="190" r="2.6" fill={GREEN} />
-      <circle cx="92" cy="190" r="1" fill={GREEN_BRT} />
-    </g>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Main component                                                             */
-/* -------------------------------------------------------------------------- */
 const SatoriMascot = ({
   state = "idle",
   size = 240,
@@ -385,6 +202,8 @@ const SatoriMascot = ({
     ? state
     : "idle";
 
+  const opa = mouthOpacities(safeState, audioLevel);
+
   const Wrapper = onClick ? "button" : "div";
   const wrapperStyle = {
     background: "transparent",
@@ -392,45 +211,61 @@ const SatoriMascot = ({
     padding: 0,
     margin: 0,
     cursor: onClick ? "pointer" : "default",
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
+    display: "inline-block",
     lineHeight: 0,
     ...style,
   };
 
+  // Apply the "done nod" once + idle micro-tilt; breathing always on.
+  const innerClass = [
+    "satori-root",
+    safeState === "done" ? "satori-done-nod" : "",
+    safeState === "idle" ? "satori-micro-tilt" : "",
+  ].filter(Boolean).join(" ");
+
   return (
-    <Wrapper type={onClick ? "button" : undefined}
-             onClick={onClick || undefined}
-             aria-label={ariaLabel}
-             style={wrapperStyle}>
-      <svg
-        className="satori-root"
-        viewBox="0 0 200 200"
-        width={size}
-        height={size}
+    <Wrapper
+      type={onClick ? "button" : undefined}
+      onClick={onClick || undefined}
+      aria-label={ariaLabel}
+      style={wrapperStyle}
+    >
+      <div
+        className={innerClass}
+        style={{
+          position: "relative",
+          width: size,
+          height: size,
+          display: "inline-block",
+        }}
         role="img"
         aria-label={ariaLabel}
-        xmlns="http://www.w3.org/2000/svg"
       >
-        <g className={safeState === "done" ? "satori-done-nod" : (safeState === "idle" ? "satori-micro-tilt" : "")}>
-          {/* Soft audio-reactive aura behind the head (no head dot) */}
-          <Halo state={safeState} audioLevel={audioLevel} />
-          {/* Back layer: long hair, drawn behind everything */}
-          <HairBack />
-          {/* Face + neck + ears + earrings */}
-          <Face />
-          {/* Body — drawn before front hair so hair lays naturally over shoulders */}
-          <Body />
-          {/* Front hair / sleek bangs */}
-          <HairFront />
-          {/* Facial features */}
-          <Eyes state={safeState} />
-          <Cheeks state={safeState} />
-          <Nose />
-          <Mouth state={safeState} audioLevel={audioLevel} />
-        </g>
-      </svg>
+        {/* Three mouth poses stacked — opacity blends them per audioLevel */}
+        <img
+          src={mouthClosed}
+          alt=""
+          draggable={false}
+          className="satori-mouth-layer"
+          style={{ opacity: opa.closed, width: "100%", height: "100%", objectFit: "contain" }}
+        />
+        <img
+          src={mouthHalf}
+          alt=""
+          draggable={false}
+          className="satori-mouth-layer"
+          style={{ opacity: opa.half, width: "100%", height: "100%", objectFit: "contain" }}
+        />
+        <img
+          src={mouthOpen}
+          alt=""
+          draggable={false}
+          className="satori-mouth-layer"
+          style={{ opacity: opa.open, width: "100%", height: "100%", objectFit: "contain" }}
+        />
+        {/* State overlay — accent dot + listening rings + thinking sparkles */}
+        <StateOverlay state={safeState} audioLevel={audioLevel} size={size} />
+      </div>
     </Wrapper>
   );
 };
