@@ -17,6 +17,7 @@ import {
   Filter, Sun, Moon, ThumbsUp, ThumbsDown, RefreshCw, Check
 } from "lucide-react";
 import AvailabilityEnginePage from "./AvailabilityEngine.jsx";
+import SatoriMascot from "./components/SatoriMascot.jsx";
 
 // ─── TMC Brand Color Palette ───
 // Theme-aware tokens go through CSS custom properties so the same JSX inline
@@ -791,9 +792,12 @@ const VoiceModal = ({ open, onClose }) => {
   const [state, setState] = useState("connecting"); // connecting | listening | speaking | closing
   const [statusText, setStatusText] = useState("Connecting to Satori\u2026");
 
+  const [audioLevel, setAudioLevel] = useState(0);  // 0..1, drives mascot mouth
   const wsRef = useRef(null);
   const captureCtxRef = useRef(null);
   const playCtxRef = useRef(null);
+  const analyserRef = useRef(null);      // AnalyserNode tap on playCtx output
+  const amplitudeRafRef = useRef(null);   // requestAnimationFrame handle
   const streamRef = useRef(null);
   const processorRef = useRef(null);
   const sourceRef = useRef(null);
@@ -812,6 +816,35 @@ const VoiceModal = ({ open, onClose }) => {
     start();
     return () => stop();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Mascot mouth amplitude loop -- ~60fps RMS of TTS audio.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      const a = analyserRef.current;
+      if (a) {
+        const bins = new Uint8Array(a.frequencyBinCount);
+        a.getByteFrequencyData(bins);
+        let sum = 0; const n = Math.min(32, bins.length);
+        for (let i = 0; i < n; i++) sum += bins[i] * bins[i];
+        const rms = Math.sqrt(sum / n) / 255;
+        const level = Math.max(0, Math.min(1, Math.pow(rms, 0.6) * 1.8));
+        setAudioLevel(level);
+      } else {
+        setAudioLevel(0);
+      }
+      amplitudeRafRef.current = requestAnimationFrame(tick);
+    };
+    amplitudeRafRef.current = requestAnimationFrame(tick);
+    return () => {
+      cancelled = true;
+      if (amplitudeRafRef.current) cancelAnimationFrame(amplitudeRafRef.current);
+      amplitudeRafRef.current = null;
+      setAudioLevel(0);
+    };
   }, [open]);
 
   const start = async () => {
@@ -840,6 +873,16 @@ const VoiceModal = ({ open, onClose }) => {
       streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
       captureCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
       playCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+      try {
+        const a = playCtxRef.current.createAnalyser();
+        a.fftSize = 256;
+        a.smoothingTimeConstant = 0.6;
+        a.connect(playCtxRef.current.destination);
+        analyserRef.current = a;
+      } catch (e) {
+        console.warn("[VoiceModal] analyser setup failed", e);
+        analyserRef.current = null;
+      }
       sourceRef.current = captureCtxRef.current.createMediaStreamSource(streamRef.current);
       processorRef.current = captureCtxRef.current.createScriptProcessor(4096, 1, 1);
       sourceRef.current.connect(processorRef.current);
@@ -1075,7 +1118,11 @@ const VoiceModal = ({ open, onClose }) => {
       buf.copyToChannel(floats, 0);
       const src = ctx.createBufferSource();
       src.buffer = buf;
-      src.connect(ctx.destination);
+      if (analyserRef.current) {
+        src.connect(analyserRef.current);
+      } else {
+        src.connect(ctx.destination);
+      }
 
       // Scheduling: queue chunks back-to-back. If the playhead is behind
       // realtime (first chunk of a turn, or recovery after a stall), start
@@ -1131,6 +1178,8 @@ const VoiceModal = ({ open, onClose }) => {
     try { sourceRef.current?.disconnect(); } catch {}
     streamRef.current?.getTracks().forEach(t => t.stop());
     try { captureCtxRef.current?.close(); } catch {}
+    try { analyserRef.current?.disconnect(); } catch {}
+    analyserRef.current = null;
     try { playCtxRef.current?.close(); } catch {}
     try { if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.close(); } catch {}
     processorRef.current = null; sourceRef.current = null; streamRef.current = null;
@@ -1150,7 +1199,16 @@ const VoiceModal = ({ open, onClose }) => {
       display: "flex", alignItems: "center", justifyContent: "center",
     }}>
       <div onClick={(e) => e.stopPropagation()} style={{ textAlign: "center" }}>
-        <div style={{
+        <div style={{ margin: "0 auto 24px", display: "inline-flex" }}>
+          <SatoriMascot
+            state={state === "connecting" || state === "closing" ? "idle" : state}
+            audioLevel={audioLevel}
+            size={260}
+            ariaLabel="Satori voice agent"
+          />
+        </div>
+        {/* OLD-mic-removed-START */}
+        <div style={{ display: "none",
           position: "relative", margin: "0 auto 24px", width: 128, height: 128, borderRadius: "50%",
           display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.3s",
           background: state === "speaking"
@@ -1273,10 +1331,18 @@ const FabButtons = ({ pageLabel } = {}) => {
         <button
           onClick={() => setVoiceOpen(true)}
           title="Talk to Satori (voice)"
-          style={fabStyle}
-          onMouseEnter={e => e.currentTarget.style.transform = "scale(1.05)"}
+          style={{
+            ...fabStyle,
+            background: "transparent",
+            border: "none",
+            padding: 0,
+            overflow: "visible",
+          }}
+          onMouseEnter={e => e.currentTarget.style.transform = "scale(1.08)"}
           onMouseLeave={e => e.currentTarget.style.transform = "scale(1)"}
-        ><Mic size={24} /></button>
+        >
+          <SatoriMascot state="idle" size={56} ariaLabel="Talk to Satori (voice)" />
+        </button>
       </div>
 
       {helpOpen && (
