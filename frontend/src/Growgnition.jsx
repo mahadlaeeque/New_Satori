@@ -1207,26 +1207,6 @@ const VoiceModal = ({ open, onClose }) => {
             ariaLabel="Satori voice agent"
           />
         </div>
-        {/* OLD-mic-removed-START */}
-        <div style={{ display: "none",
-          position: "relative", margin: "0 auto 24px", width: 128, height: 128, borderRadius: "50%",
-          display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.3s",
-          background: state === "speaking"
-            ? `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.teal})`
-            : state === "listening" ? `${COLORS.accent}22` : "#1F2937",
-          border: state === "listening" ? `4px solid ${COLORS.accent}` : (state === "speaking" ? "none" : "4px solid #475569"),
-          animation: state === "speaking" ? "pulse 2s infinite" : "none",
-        }}>
-          {state === "connecting" || state === "closing"
-            ? <Activity size={48} color="#cbd5e1" style={{ animation: "spin 1s linear infinite" }} />
-            : <Mic size={48} color={state === "speaking" ? "#fff" : COLORS.accent} />}
-          {state === "listening" && (
-            <span style={{
-              position: "absolute", inset: 0, borderRadius: "50%",
-              border: `4px solid ${COLORS.accent}55`, animation: "pulse 1.6s infinite",
-            }} />
-          )}
-        </div>
         <div style={{ color: "#e2e8f0", fontSize: 14, maxWidth: 420 }}>{statusText}</div>
         <button onClick={stop} style={{
           marginTop: 24, display: "inline-flex", alignItems: "center", gap: 8,
@@ -1331,18 +1311,10 @@ const FabButtons = ({ pageLabel } = {}) => {
         <button
           onClick={() => setVoiceOpen(true)}
           title="Talk to Satori (voice)"
-          style={{
-            ...fabStyle,
-            background: "transparent",
-            border: "none",
-            padding: 0,
-            overflow: "visible",
-          }}
-          onMouseEnter={e => e.currentTarget.style.transform = "scale(1.08)"}
+          style={fabStyle}
+          onMouseEnter={e => e.currentTarget.style.transform = "scale(1.05)"}
           onMouseLeave={e => e.currentTarget.style.transform = "scale(1)"}
-        >
-          <SatoriMascot state="idle" size={56} ariaLabel="Talk to Satori (voice)" />
-        </button>
+        ><Mic size={24} /></button>
         <SatoriIntroHint />
       </div>
 
