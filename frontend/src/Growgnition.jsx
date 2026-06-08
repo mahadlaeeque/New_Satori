@@ -1204,7 +1204,7 @@ const VoiceModal = ({ open, onClose }) => {
           <SatoriAvatar
             state={state === "connecting" || state === "closing" ? "idle" : state}
             audioLevel={audioLevel}
-            size={260}
+            size={232}
             ariaLabel="Satori voice agent"
           />
         </div>
