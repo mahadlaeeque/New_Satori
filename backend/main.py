@@ -1969,6 +1969,103 @@ def satori_usage(
         except Exception: pass
 
 
+# ── API-key administration (superadmin only) ───────────────────────────────
+# Mint / list / revoke the machine-to-machine keys that authenticate the usage
+# API. We store ONLY the SHA-256 hash; the raw key is shown exactly once at
+# creation time and can never be recovered — reissue if lost.
+class _ApiKeyCreate(BaseModel):
+    name: str
+    scope: str = "usage_read"
+
+
+@app.post("/api/admin/api-keys")
+def admin_create_api_key(body: _ApiKeyCreate, request: Request,
+                         user: dict = Depends(require_superadmin)):
+    """Mint a new API key. Returns the raw key ONCE — store it now."""
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="A key name is required")
+    scope = (body.scope or "usage_read").strip() or "usage_read"
+    import secrets as _secrets, hashlib as _hashlib
+    raw = "satori_" + _secrets.token_urlsafe(32)
+    key_hash = _hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    from database import get_db as _get_db
+    db = _get_db()
+    try:
+        cur = db.cursor()
+        cur.execute("SELECT name FROM api_keys WHERE name = ?", (name,))
+        if cur.fetchone():
+            raise HTTPException(status_code=409, detail=f"An API key named '{name}' already exists")
+        cur.execute(
+            "INSERT INTO api_keys (name, key_hash, scope, created_by) VALUES (?, ?, ?, ?)",
+            (name, key_hash, scope, user.get("email")),
+        )
+        db.commit()
+    finally:
+        try: db.close()
+        except Exception: pass
+    audit_log.record(
+        user=user, request=request, action="usage.api.key.create",
+        resource_type="api_key", resource_id=name, detail={"scope": scope},
+    )
+    return {
+        "name": name,
+        "scope": scope,
+        "apiKey": raw,
+        "note": "Store this now — it is shown only once and cannot be recovered.",
+    }
+
+
+@app.get("/api/admin/api-keys")
+def admin_list_api_keys(user: dict = Depends(require_superadmin)):
+    """List API keys (metadata only — never the key or its hash)."""
+    from database import get_db as _get_db
+    db = _get_db()
+    try:
+        cur = db.cursor()
+        cur.execute(
+            "SELECT name, scope, created_by, created_at, last_used_at, revoked_at "
+            "FROM api_keys ORDER BY created_at DESC"
+        )
+        rows = cur.fetchall() or []
+    finally:
+        try: db.close()
+        except Exception: pass
+    def _g(r, k):
+        return r.get(k) if isinstance(r, dict) else r[k]
+    return {"keys": [{
+        "name":       _g(r, "name"),
+        "scope":      _g(r, "scope"),
+        "createdBy":  _g(r, "created_by"),
+        "createdAt":  _iso(_g(r, "created_at")),
+        "lastUsedAt": _iso(_g(r, "last_used_at")),
+        "revokedAt":  _iso(_g(r, "revoked_at")),
+        "active":     _g(r, "revoked_at") is None,
+    } for r in rows]}
+
+
+@app.post("/api/admin/api-keys/{name}/revoke")
+def admin_revoke_api_key(name: str, request: Request,
+                         user: dict = Depends(require_superadmin)):
+    """Revoke an API key by name (sets revoked_at; the key stops working)."""
+    from database import get_db as _get_db, USE_POSTGRES as _USE_PG
+    db = _get_db()
+    try:
+        cur = db.cursor()
+        ts = "NOW()" if _USE_PG else "CURRENT_TIMESTAMP"
+        cur.execute(
+            f"UPDATE api_keys SET revoked_at = {ts} WHERE name = ? AND revoked_at IS NULL",
+            (name,),
+        )
+        db.commit()
+    finally:
+        try: db.close()
+        except Exception: pass
+    audit_log.record(
+        user=user, request=request, action="usage.api.key.revoke",
+        resource_type="api_key", resource_id=name, detail={},
+    )
+    return {"name": name, "revoked": True}
 
 
 @app.post("/api/support/report")
