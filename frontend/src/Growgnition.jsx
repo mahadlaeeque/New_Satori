@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import AvailabilityEnginePage from "./AvailabilityEngine.jsx";
 import SatoriMascot from "./components/SatoriMascot.jsx";
+import SatoriAvatar from "./components/SatoriAvatar.jsx";
 
 // ─── TMC Brand Color Palette ───
 // Theme-aware tokens go through CSS custom properties so the same JSX inline
@@ -1200,7 +1201,7 @@ const VoiceModal = ({ open, onClose }) => {
     }}>
       <div onClick={(e) => e.stopPropagation()} style={{ textAlign: "center" }}>
         <div style={{ margin: "0 auto 24px", display: "inline-flex" }}>
-          <SatoriMascot
+          <SatoriAvatar
             state={state === "connecting" || state === "closing" ? "idle" : state}
             audioLevel={audioLevel}
             size={260}
