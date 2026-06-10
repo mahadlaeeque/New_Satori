@@ -94,6 +94,7 @@ def init_db():
     _migrate_add_chat_tables()
     _migrate_add_support_tickets()
     _migrate_add_insights()
+    _migrate_add_subscriptions()
     _migrate_add_feedback_tables()
     _migrate_rename_sfml_to_tmc()
     _migrate_reset_passwords_to_welcome()
@@ -1137,6 +1138,55 @@ def _migrate_add_insights():
         print("[DB] Migration: insights table ready")
     except Exception as e:
         print(f"[DB] insights migration error: {e}")
+
+
+def _migrate_add_subscriptions():
+    """Idempotent — item_subscriptions (scheduled email delivery of saved
+    dashboards/reports). One row per user × item; the runner dedupes per day
+    via last_sent_key."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        if USE_POSTGRES:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS item_subscriptions (
+                    id            SERIAL PRIMARY KEY,
+                    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    kind          TEXT NOT NULL,
+                    item_id       INTEGER NOT NULL,
+                    cadence       TEXT NOT NULL DEFAULT 'weekly',
+                    day_of_week   INTEGER NOT NULL DEFAULT 0,
+                    hour          INTEGER NOT NULL DEFAULT 9,
+                    recipients    TEXT,
+                    active        INTEGER NOT NULL DEFAULT 1,
+                    last_sent_key TEXT,
+                    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (user_id, kind, item_id)
+                )
+            """)
+        else:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS item_subscriptions (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    kind          TEXT NOT NULL,
+                    item_id       INTEGER NOT NULL,
+                    cadence       TEXT NOT NULL DEFAULT 'weekly',
+                    day_of_week   INTEGER NOT NULL DEFAULT 0,
+                    hour          INTEGER NOT NULL DEFAULT 9,
+                    recipients    TEXT,
+                    active        INTEGER NOT NULL DEFAULT 1,
+                    last_sent_key TEXT,
+                    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (user_id, kind, item_id)
+                )
+            """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_item_subscriptions_active ON item_subscriptions(active)")
+        conn.commit()
+        conn.close()
+        print("[DB] Migration: item_subscriptions table ready")
+    except Exception as e:
+        print(f"[DB] item_subscriptions migration error: {e}")
 
 
 def _migrate_add_feedback_tables():

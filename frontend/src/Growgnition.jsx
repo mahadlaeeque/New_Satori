@@ -3925,6 +3925,7 @@ const ReportsPage = () => {
   const [activeCanEdit, setActiveCanEdit] = useState(false); // editor-role recipients
   const [chatOpen, setChatOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   const [saveState, setSaveState] = useState("idle");
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -4265,6 +4266,14 @@ const ReportsPage = () => {
                 }}>
                   <Share2 size={14} /> Share
                 </button>
+                <button onClick={() => setScheduleOpen(true)} title="Email this to me on a schedule" style={{
+                  background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
+                  padding: "8px 14px", cursor: "pointer", color: COLORS.textPrimary,
+                  fontSize: 13, fontWeight: 600,
+                  display: "flex", alignItems: "center", gap: 6
+                }}>
+                  <Calendar size={14} /> Schedule
+                </button>
                 <button
                   onClick={() => setChatOpen((v) => !v)}
                   title={chatOpen ? "Close AI editor" : "Open AI editor"}
@@ -4366,6 +4375,14 @@ const ReportsPage = () => {
             itemId={activeId}
             itemName={activeName}
             onClose={() => setShareOpen(false)}
+          />
+        )}
+        {scheduleOpen && activeId && (
+          <ScheduleModal
+            kind="report"
+            itemId={activeId}
+            itemName={activeName}
+            onClose={() => setScheduleOpen(false)}
           />
         )}
       </div>
@@ -6890,6 +6907,136 @@ const MenuItem = ({ children, onClick, danger, icon: Icon }) => (
 // /api/{kind}s/{id}/shares for list/add/remove and /api/users/search for the
 // autocomplete. Owner-only — the parent should only render this modal when
 // the current user owns the item.
+// ─── Schedule modal — email me this dashboard/report on a cadence ──────────
+// One subscription per user × item (saving replaces). Delivery is handled by
+// /api/subscriptions/run-due (Cloud Scheduler, hourly); times are Pakistan
+// time. Reports arrive as an inline table, dashboards as their KPI values.
+const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const ScheduleModal = ({ kind, itemId, itemName, onClose }) => {
+  const [cadence, setCadence] = useState("weekly");
+  const [dayOfWeek, setDayOfWeek] = useState(0);
+  const [hour, setHour] = useState(9);
+  const [recipients, setRecipients] = useState("");
+  const [existing, setExisting] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const headers = { Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/subscriptions?kind=${kind}&item_id=${itemId}`, { headers });
+        if (!r.ok) return;
+        const j = await r.json();
+        const s = (j.subscriptions || [])[0];
+        if (s && !cancelled) {
+          setExisting(s);
+          setCadence(s.cadence || "weekly");
+          setDayOfWeek(Number(s.day_of_week || 0));
+          setHour(Number(s.hour ?? 9));
+          setRecipients(s.recipients || "");
+        }
+      } catch { /* fresh form */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, itemId]);
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(`${API_BASE}/api/subscriptions`, {
+        method: "POST", headers,
+        body: JSON.stringify({ kind, item_id: itemId, cadence, day_of_week: dayOfWeek, hour, recipients }),
+      });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.detail || `HTTP ${r.status}`); }
+      setMsg("Scheduled ✓ — first email arrives at the next matching time.");
+      setExisting({ id: -1 });
+    } catch (e) { setMsg(`Couldn't save: ${e.message || e}`); }
+    finally { setBusy(false); }
+  };
+
+  const unsubscribe = async () => {
+    if (!existing?.id || existing.id === -1) {
+      // Saved this session — refetch to get the id.
+      const r = await fetch(`${API_BASE}/api/subscriptions?kind=${kind}&item_id=${itemId}`, { headers });
+      const j = await r.json().catch(() => ({}));
+      existing.id = (j.subscriptions || [])[0]?.id;
+    }
+    if (!existing?.id) return;
+    setBusy(true); setMsg(null);
+    try {
+      await fetch(`${API_BASE}/api/subscriptions/${existing.id}`, { method: "DELETE", headers });
+      setExisting(null);
+      setMsg("Subscription removed.");
+    } finally { setBusy(false); }
+  };
+
+  const sel = {
+    padding: "9px 12px", borderRadius: 8, border: `1px solid ${COLORS.border}`,
+    background: COLORS.surface, color: COLORS.textPrimary, fontSize: 13, fontWeight: 600, width: "100%",
+  };
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 1400, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: COLORS.surface, borderRadius: 16, width: "100%", maxWidth: 460, padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+          <div style={{ fontSize: 17, fontWeight: 800, color: COLORS.textPrimary, display: "flex", alignItems: "center", gap: 8 }}>
+            <Calendar size={18} color={COLORS.accent} /> Schedule by email
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted }}><X size={18} /></button>
+        </div>
+        <div style={{ fontSize: 12.5, color: COLORS.textMuted, marginBottom: 16 }}>
+          "{itemName}" will be emailed {kind === "report" ? "as a table" : "with its KPI values"} on the schedule below (Pakistan time).
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: cadence === "weekly" ? "1fr 1fr 1fr" : "1fr 1fr", gap: 10, marginBottom: 12 }}>
+          <div>
+            <label style={{ fontSize: 10.5, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase" }}>Cadence</label>
+            <select value={cadence} onChange={e => setCadence(e.target.value)} style={{ ...sel, marginTop: 4 }}>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly (1st)</option>
+            </select>
+          </div>
+          {cadence === "weekly" && (
+            <div>
+              <label style={{ fontSize: 10.5, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase" }}>Day</label>
+              <select value={dayOfWeek} onChange={e => setDayOfWeek(Number(e.target.value))} style={{ ...sel, marginTop: 4 }}>
+                {WEEKDAYS.map((d, i) => <option key={d} value={i}>{d}</option>)}
+              </select>
+            </div>
+          )}
+          <div>
+            <label style={{ fontSize: 10.5, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase" }}>From (hour)</label>
+            <select value={hour} onChange={e => setHour(Number(e.target.value))} style={{ ...sel, marginTop: 4 }}>
+              {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
+            </select>
+          </div>
+        </div>
+
+        <label style={{ fontSize: 10.5, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase" }}>Recipients</label>
+        <input value={recipients} onChange={e => setRecipients(e.target.value)}
+          placeholder="Leave blank to send to yourself, or comma-separate emails"
+          style={{ ...sel, marginTop: 4, marginBottom: 14, boxSizing: "border-box" }} />
+
+        {msg && <div style={{ fontSize: 12.5, color: msg.startsWith("Couldn't") ? "#B91C1C" : COLORS.accentDark || COLORS.accent, fontWeight: 600, marginBottom: 10 }}>{msg}</div>}
+
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+          {existing ? (
+            <button onClick={unsubscribe} disabled={busy} style={{ padding: "9px 14px", borderRadius: 8, border: `1px solid ${COLORS.border}`, background: COLORS.surface, color: "#B91C1C", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+              Unsubscribe
+            </button>
+          ) : <span />}
+          <button onClick={save} disabled={busy} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: COLORS.accent, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            {busy ? "Saving…" : existing ? "Update schedule" : "Schedule"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const ShareModal = ({ kind, itemId, itemName, onClose }) => {
   const baseUrl = (kind === "report" ? "/api/reports" : "/api/dashboards") + `/${itemId}/shares`;
   const [shares, setShares] = useState([]);
@@ -7316,6 +7463,7 @@ const DashboardsPage = () => {
   const [activeCanEdit, setActiveCanEdit] = useState(false); // editor-role recipients
   const [chatOpen, setChatOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   const [saveState, setSaveState] = useState("idle");
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -7628,6 +7776,14 @@ const DashboardsPage = () => {
                 }}>
                   <Share2 size={14} /> Share
                 </button>
+                <button onClick={() => setScheduleOpen(true)} title="Email this to me on a schedule" style={{
+                  background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
+                  padding: "8px 14px", cursor: "pointer", color: COLORS.textPrimary,
+                  fontSize: 13, fontWeight: 600,
+                  display: "flex", alignItems: "center", gap: 6
+                }}>
+                  <Calendar size={14} /> Schedule
+                </button>
                 <button
                   onClick={() => setChatOpen((v) => !v)}
                   title={chatOpen ? "Close AI editor" : "Open AI editor"}
@@ -7722,6 +7878,14 @@ const DashboardsPage = () => {
             itemId={activeId}
             itemName={activeName}
             onClose={() => setShareOpen(false)}
+          />
+        )}
+        {scheduleOpen && activeId && (
+          <ScheduleModal
+            kind="dashboard"
+            itemId={activeId}
+            itemName={activeName}
+            onClose={() => setScheduleOpen(false)}
           />
         )}
       </div>
