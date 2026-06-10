@@ -93,6 +93,7 @@ def init_db():
     _migrate_add_availability_tasks()
     _migrate_add_chat_tables()
     _migrate_add_support_tickets()
+    _migrate_add_insights()
     _migrate_add_feedback_tables()
     _migrate_rename_sfml_to_tmc()
     _migrate_reset_passwords_to_welcome()
@@ -1091,6 +1092,51 @@ def _migrate_add_support_tickets():
         print("[DB] Migration: support_tickets table ready")
     except Exception as e:
         print(f"[DB] support_tickets migration error: {e}")
+
+
+def _migrate_add_insights():
+    """Idempotent — insights (the proactive 'Satori noticed' feed). One row per
+    finding per generation day; the UNIQUE constraint makes regeneration
+    idempotent (ON CONFLICT DO NOTHING works on both PG and SQLite ≥3.24)."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        if USE_POSTGRES:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS insights (
+                    id           SERIAL PRIMARY KEY,
+                    insight_date TEXT NOT NULL,
+                    category     TEXT NOT NULL,
+                    severity     TEXT NOT NULL DEFAULT 'info',
+                    department   TEXT NOT NULL DEFAULT '',
+                    title        TEXT NOT NULL,
+                    body         TEXT,
+                    metric       TEXT,
+                    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (insight_date, category, department, title)
+                )
+            """)
+        else:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS insights (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    insight_date TEXT NOT NULL,
+                    category     TEXT NOT NULL,
+                    severity     TEXT NOT NULL DEFAULT 'info',
+                    department   TEXT NOT NULL DEFAULT '',
+                    title        TEXT NOT NULL,
+                    body         TEXT,
+                    metric       TEXT,
+                    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (insight_date, category, department, title)
+                )
+            """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_insights_date ON insights(insight_date)")
+        conn.commit()
+        conn.close()
+        print("[DB] Migration: insights table ready")
+    except Exception as e:
+        print(f"[DB] insights migration error: {e}")
 
 
 def _migrate_add_feedback_tables():

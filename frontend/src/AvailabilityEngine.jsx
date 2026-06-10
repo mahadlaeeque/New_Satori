@@ -1614,7 +1614,7 @@ const BenchRadarPanel = ({ onOpen }) => {
   };
 
   return (
-    <div style={{ marginBottom: 20, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12 }}>
+    <div data-tour="bench-radar" style={{ marginBottom: 20, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12 }}>
       <button onClick={() => setOpen(o => !o)} style={{
         width: "100%", padding: "12px 16px", border: "none", background: "transparent", color: C.textPrimary,
         display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontWeight: 700, fontSize: 14,
@@ -2055,7 +2055,7 @@ const AvailabilityEnginePage = () => {
 
       {/* View toggle: cards | capacity heatmap */}
       <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
-        <div style={{ display: "inline-flex", background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 10, padding: 3, gap: 2 }}>
+        <div data-tour="avail-toggle" style={{ display: "inline-flex", background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 10, padding: 3, gap: 2 }}>
           {[["cards", "Cards", LayoutGrid], ["heatmap", "Capacity heatmap", Grid3x3]].map(([key, label, Icon]) => (
             <button key={key} onClick={() => setViewMode(key)} style={{
               padding: "7px 14px", borderRadius: 8, border: "none", cursor: "pointer",

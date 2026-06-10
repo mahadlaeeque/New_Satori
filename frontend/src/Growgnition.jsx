@@ -250,32 +250,69 @@ const DataAsOf = ({ source, prefix = "Data as of", style = {} }) => {
 // Hand-rolled spotlight tour (no external lib) anchored to elements via their
 // data-tour="…" attribute. Auto-runs once for new users; replayable from Help.
 const ONBOARDING_STEPS = [
-  { selector: null, title: "Welcome to Satori 👋",
-    body: "Your AI assistant for workforce & sales intelligence. Here's a 30-second tour of the essentials — replay it anytime from the Help button." },
-  { selector: '[data-tour="nav"]', placement: "right", title: "Find your way around",
-    body: "Switch between the AI assistant, Report Builder, Dashboard Builder, and the Availability Engine from here." },
-  { selector: '[data-tour="agent-input"]', placement: "top", title: "Just ask, in plain English",
-    body: "Ask about attendance, allocation, sales pipeline, or your team. Satori writes the SQL and answers — no query language needed." },
-  { selector: '[data-tour="sample-prompts"]', placement: "left", title: "Not sure where to start?",
-    body: "Tap a sample prompt to see what Satori can do. They're grouped by topic." },
-  { selector: '[data-tour="data-as-of"]', placement: "bottom", title: "Know how fresh your data is",
-    body: "This shows the latest date your warehouse data covers, so you always know how current an answer is." },
-  { selector: '[data-tour="help"]', placement: "left", title: "Help, anytime",
-    body: "Open Help for guidance or to replay this tour. That's it — you're ready to go!" },
+  { selector: null, page: "agent", title: "Welcome to Satori 👋",
+    body: "Your AI partner for workforce and sales intelligence. This two-minute tour walks through every part of the platform — skip anytime, or replay it from Help.",
+    narration: "Hi, I'm Satori — your AI partner for workforce and sales intelligence. Let me walk you through everything I can do. It only takes two minutes, and you can skip or replay this tour anytime from the Help menu." },
+  { selector: '[data-tour="nav"]', placement: "right", page: "agent", title: "Find your way around",
+    body: "Everything lives in this sidebar: Ask Me Anything, the Report Builder, the Dashboard Builder, and the Availability Engine. We'll visit each one.",
+    narration: "This sidebar is home base. From here you can reach Ask Me Anything, the Report Builder, the Dashboard Builder, and the Availability Engine. Let's visit each one." },
+  { selector: '[data-tour="agent-input"]', placement: "top", page: "agent", title: "Ask Me Anything — in plain English",
+    body: "Ask about attendance, timesheets, allocation, or sales — Satori writes the SQL against live warehouse data and answers in business language. There's a voice mode too, in English or Urdu.",
+    narration: "This is Ask Me Anything. Type any question about attendance, timesheets, allocation, or sales — in plain English — and I'll query the live data warehouse and answer in business language. You can also talk to me by voice, in English or Urdu." },
+  { selector: '[data-tour="sample-prompts"]', placement: "left", page: "agent", title: "Not sure where to start?",
+    body: "Tap a sample prompt — they're grouped by topic and show the kinds of questions Satori handles well.",
+    narration: "If you're not sure where to start, tap one of these sample prompts. They're grouped by topic and show the kinds of questions I handle well." },
+  { selector: '[data-tour="insight-feed"]', placement: "left", page: "agent", title: "Satori noticed…",
+    body: "Every day Satori scans attendance, timesheets and allocations for anomalies and posts what it finds here — click any card to dig in, or press Briefing to hear the day's summary read aloud.",
+    narration: "I don't just wait for questions. Every day I scan attendance, timesheets and allocations for anomalies, and post what I notice right here. Click any card to dig in — or press the briefing button and I'll read you the day's summary." },
+  { selector: '[data-tour="nav-reports"]', placement: "right", page: "reports", title: "Report Builder",
+    body: "Describe the report you need and Satori builds it as a real table — refine it in chat, download as Excel or PDF, and share it with teammates as view-only or editable.",
+    narration: "This is the Report Builder. Describe the report you need and I'll build it as a real table. You can refine it in chat, download it as Excel or P D F, and share it with teammates." },
+  { selector: '[data-tour="nav-dashboards"]', placement: "right", page: "dashboards", title: "Dashboard Builder",
+    body: "Describe a dashboard and get live KPIs, charts and filters built from the warehouse. Click any chart to drill down, refine in chat, and share with your team.",
+    narration: "Next, the Dashboard Builder. Describe what you want to monitor and I'll build live KPIs, charts and filters. Click any chart to drill into the detail behind it, refine it in chat, and share it with your team." },
+  { selector: '[data-tour="nav-availability"]', placement: "right", page: "availability", title: "Availability Engine",
+    body: "Live capacity across the whole workforce: who's allocated, who's partial, who's on the bench — backed by the weekly allocation plan and real timesheets.",
+    narration: "This is the Availability Engine — live capacity across the whole workforce. It shows who's fully allocated, who has spare capacity, and who's on the bench, using the weekly allocation plan cross-checked against real timesheets." },
+  { selector: '[data-tour="avail-toggle"]', placement: "bottom", page: "availability", title: "Heatmap, Bench Radar & more",
+    body: "Flip to the Capacity heatmap to see every person's allocation week by week — including planned future weeks. The Bench Radar flags who frees up soon, and Create Task finds the best-fit person for new work.",
+    narration: "Flip this toggle to the capacity heatmap to see every person's allocation week by week, including planned future weeks. The Bench Radar flags who frees up soon — before they hit the bench — and Create Task ranks the best-fit people for new work using skills tagged by practice heads." },
+  { selector: '[data-tour="avail-toggle"]', placement: "bottom", page: "availability", title: "Every person, one click deep",
+    body: "Click any employee for their full profile — projects, weekly allocation, plan-vs-actuals, 30-day attendance, skills — and export a staffing-ready PDF one-pager.",
+    narration: "And click any employee to open their full profile — current projects, weekly allocation, plan versus actuals, thirty-day attendance, and skills. You can even export a staffing-ready P D F one-pager." },
+  { selector: '[data-tour="data-as-of"]', placement: "bottom", page: "agent", title: "Know how fresh your data is",
+    body: "The warehouse refreshes every 30 minutes. This pill always shows when data was last loaded, so you know exactly how current every answer is.",
+    narration: "One more thing — the data behind all of this refreshes every thirty minutes, and this pill always shows when it was last loaded. So you know exactly how current every answer is." },
+  { selector: '[data-tour="help"]', placement: "left", page: "agent", title: "Help & support, anytime",
+    body: "Open Help for guidance, to replay this tour, or to report an issue straight to the team. That's the tour — you're ready!",
+    narration: "If you ever need a hand, the Help menu has guidance, lets you replay this tour, and can send an issue report straight to the team. That's the tour — now go ahead and ask me anything!" },
 ];
 
-const ONBOARDING_FLAG = "satori_onboarding_done_v1";
+const ONBOARDING_FLAG = "satori_onboarding_done_v2";
 
-const OnboardingTour = () => {
+const OnboardingTour = ({ onNavigate }) => {
   const [active, setActive] = useState(false);
   const [idx, setIdx] = useState(0);
   const [rect, setRect] = useState(null);
+  // Narrated by the avatar via /api/tts; mute persists across sessions.
+  const [voiceOn, setVoiceOn] = useState(() => {
+    try { return localStorage.getItem("satori_tour_voice") !== "0"; } catch { return true; }
+  });
+  const [speaking, setSpeaking] = useState(false);
+  const audioRef = useRef(null);
+  const ttsCache = useRef({});
+
+  const stopNarration = useCallback(() => {
+    if (audioRef.current) { try { audioRef.current.pause(); } catch { /* noop */ } audioRef.current = null; }
+    setSpeaking(false);
+  }, []);
 
   const start = useCallback(() => { setIdx(0); setActive(true); }, []);
   const finish = useCallback(() => {
     setActive(false);
+    stopNarration();
     try { localStorage.setItem(ONBOARDING_FLAG, "1"); } catch (_) { /* ignore */ }
-  }, []);
+  }, [stopNarration]);
 
   // Launch on the "replay" event, and auto-launch once for first-time users.
   useEffect(() => {
@@ -290,9 +327,12 @@ const OnboardingTour = () => {
 
   const step = ONBOARDING_STEPS[idx];
 
-  // Recompute the spotlight rect whenever the step changes or the window moves.
+  // Steps carry a `page` so the tour actually SHOWS each area while talking
+  // about it — switch view first, then measure (with retries, since the
+  // target mounts after the page renders and may fetch before it appears).
   useEffect(() => {
     if (!active) return;
+    if (step?.page && onNavigate) { try { onNavigate(step.page); } catch { /* noop */ } }
     const measure = () => {
       const sel = step?.selector;
       if (!sel) { setRect(null); return; }
@@ -302,15 +342,62 @@ const OnboardingTour = () => {
       setRect(r && r.width > 4 && r.height > 4 ? r : null);
     };
     measure();
+    const retries = [setTimeout(measure, 350), setTimeout(measure, 900), setTimeout(measure, 1800)];
     window.addEventListener("resize", measure);
     window.addEventListener("scroll", measure, true);
-    return () => { window.removeEventListener("resize", measure); window.removeEventListener("scroll", measure, true); };
-  }, [active, idx, step]);
+    return () => {
+      retries.forEach(clearTimeout);
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [active, idx, step, onNavigate]);
+
+  // Speak the step's narration (cached per step so Back/Next don't re-bill TTS).
+  useEffect(() => {
+    if (!active || !voiceOn) { stopNarration(); return; }
+    let cancelled = false;
+    (async () => {
+      stopNarration();
+      const text = step?.narration || step?.body;
+      if (!text) return;
+      try {
+        let b64 = ttsCache.current[idx];
+        if (!b64) {
+          const r = await fetch(`${API_BASE}/api/tts`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ text }),
+          });
+          if (!r.ok) return; // silent — the tour works fine without voice
+          const j = await r.json();
+          b64 = j.audio;
+          ttsCache.current[idx] = b64;
+        }
+        if (cancelled || !b64) return;
+        const audio = new Audio(`data:audio/wav;base64,${b64}`);
+        audioRef.current = audio;
+        audio.onended = () => { if (!cancelled) setSpeaking(false); };
+        setSpeaking(true);
+        audio.play().catch(() => setSpeaking(false));
+      } catch { /* voice is best-effort */ }
+    })();
+    return () => { cancelled = true; stopNarration(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, idx, voiceOn]);
+
+  const toggleVoice = () => {
+    setVoiceOn(v => {
+      const nv = !v;
+      try { localStorage.setItem("satori_tour_voice", nv ? "1" : "0"); } catch { /* ignore */ }
+      if (!nv) stopNarration();
+      return nv;
+    });
+  };
 
   if (!active) return null;
 
   const last = idx >= ONBOARDING_STEPS.length - 1;
-  const PAD = 8, CARD_W = 320, CARD_H = 178;
+  const PAD = 8, CARD_W = 360, CARD_H = 250;
   const vw = window.innerWidth, vh = window.innerHeight;
 
   const spot = rect ? {
@@ -352,10 +439,19 @@ const OnboardingTour = () => {
         boxShadow: "0 24px 60px rgba(0,0,0,0.28)", padding: 18, zIndex: 2001,
       }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.textPrimary }}>{step.title}</div>
-          <button onClick={finish} title="Skip tour" style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted, display: "flex" }}>
-            <X size={16} />
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+            <SatoriAvatar state={speaking ? "speaking" : "idle"} audioLevel={speaking ? 0.55 : 0} size={46} />
+            <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.textPrimary }}>{step.title}</div>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            <button onClick={toggleVoice} title={voiceOn ? "Mute the narration" : "Unmute the narration"}
+              style={{ background: "none", border: "none", cursor: "pointer", color: voiceOn ? COLORS.accent : COLORS.textMuted, display: "flex" }}>
+              {voiceOn ? <Volume2 size={16} /> : <VolumeX size={16} />}
+            </button>
+            <button onClick={finish} title="Skip tour" style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted, display: "flex" }}>
+              <X size={16} />
+            </button>
+          </div>
         </div>
         <div style={{ fontSize: 12.5, lineHeight: 1.6, color: COLORS.textSecondary, marginBottom: 16, minHeight: 56 }}>
           {step.body}
@@ -2121,6 +2217,160 @@ const renderMarkdown = (text) => {
   return <div>{elements}</div>;
 };
 
+// ─── Proactive insight feed ("Satori noticed") + spoken morning briefing ───
+// The feed is Satori talking FIRST: deterministic anomaly checks run server-
+// side once a day and surface here. Clicking a card drops a ready-made
+// question into the chat input; the Briefing button has the avatar read a
+// composed summary aloud (script from /api/briefing, voice from /api/tts).
+const INSIGHT_SEV = {
+  critical: { bg: "#FEE2E2", fg: "#B91C1C", label: "Critical" },
+  warn:     { bg: "#FEF3C7", fg: "#B45309", label: "Heads-up" },
+  info:     { bg: "#E0F2FE", fg: "#0A5F89", label: "FYI" },
+};
+
+const BriefingPlayer = ({ onClose }) => {
+  const [phase, setPhase] = useState("loading"); // loading | speaking | done | error
+  const [script, setScript] = useState("");
+  const [err, setErr] = useState(null);
+  const [level, setLevel] = useState(0);
+  const audioRef = useRef(null);
+  const lvlTimer = useRef(null);
+
+  const stop = () => {
+    if (audioRef.current) { try { audioRef.current.pause(); } catch { /* noop */ } audioRef.current = null; }
+    if (lvlTimer.current) { clearInterval(lvlTimer.current); lvlTimer.current = null; }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const headers = { Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" };
+        const b = await fetch(`${API_BASE}/api/briefing`, { headers })
+          .then(r => { if (!r.ok) throw new Error("Couldn't prepare the briefing."); return r.json(); });
+        if (cancelled) return;
+        setScript(b.script || "");
+        const t = await fetch(`${API_BASE}/api/tts`, { method: "POST", headers, body: JSON.stringify({ text: b.script }) })
+          .then(r => { if (!r.ok) throw new Error("Voice is unavailable right now — here's the text instead."); return r.json(); });
+        if (cancelled) return;
+        const audio = new Audio(`data:${t.mime || "audio/wav"};base64,${t.audio}`);
+        audioRef.current = audio;
+        audio.onended = () => { if (!cancelled) { setPhase("done"); setLevel(0); stop(); } };
+        setPhase("speaking");
+        lvlTimer.current = setInterval(() => setLevel(0.35 + Math.random() * 0.45), 130);
+        audio.play().catch(() => { if (!cancelled) setPhase("done"); });
+      } catch (e) {
+        if (!cancelled) { setErr(String(e.message || e)); setPhase(script ? "done" : "error"); }
+      }
+    })();
+    return () => { cancelled = true; stop(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div onClick={() => { stop(); onClose(); }} style={{
+      position: "fixed", inset: 0, zIndex: 1500, background: "rgba(15,23,42,0.6)",
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: COLORS.surface, borderRadius: 18, maxWidth: 520, width: "100%",
+        padding: 28, textAlign: "center", boxShadow: "0 24px 60px rgba(0,0,0,0.3)",
+      }}>
+        <div style={{ display: "inline-flex", marginBottom: 14 }}>
+          <SatoriAvatar state={phase === "speaking" ? "speaking" : "idle"} audioLevel={level} size={170} />
+        </div>
+        <div style={{ fontSize: 16, fontWeight: 800, color: COLORS.textPrimary, marginBottom: 8 }}>
+          {phase === "loading" ? "Preparing your briefing…" : phase === "error" ? "Briefing unavailable" : "Today's briefing"}
+        </div>
+        {phase === "error" ? (
+          <div style={{ fontSize: 13, color: "#B91C1C" }}>{err}</div>
+        ) : (
+          <div style={{ fontSize: 13, lineHeight: 1.65, color: COLORS.textSecondary, maxHeight: 190, overflowY: "auto", textAlign: "left", padding: "0 6px" }}>
+            {script || "…"}
+          </div>
+        )}
+        {phase === "done" && err && <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 8 }}>{err}</div>}
+        <div style={{ marginTop: 18 }}>
+          <button onClick={() => { stop(); onClose(); }} style={{
+            padding: "9px 22px", borderRadius: 10, border: "none", background: COLORS.accent,
+            color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer",
+          }}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const InsightFeed = ({ onAsk }) => {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [briefingOpen, setBriefingOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/insights`, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } });
+        if (r.ok) { const j = await r.json(); if (!cancelled) setData(j); }
+      } catch { /* feed is additive — never break the page */ }
+      finally { if (!cancelled) setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const items = (data && data.insights) || [];
+  const shown = expanded ? items : items.slice(0, 4);
+  return (
+    <div data-tour="insight-feed" style={{ padding: "20px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.textPrimary, display: "flex", alignItems: "center", gap: 6 }}>
+          <Zap size={14} color={COLORS.accent} /> Satori noticed
+        </div>
+        <button onClick={() => setBriefingOpen(true)} title="Have Satori read today's briefing aloud" style={{
+          padding: "5px 10px", borderRadius: 7, border: "none", background: COLORS.accent, color: "#fff",
+          fontSize: 11, fontWeight: 700, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5,
+        }}>
+          <Play size={11} /> Briefing
+        </button>
+      </div>
+      {loading ? (
+        <div style={{ fontSize: 11, color: COLORS.textMuted }}>Scanning today's data — first load of the day takes a few seconds…</div>
+      ) : items.length === 0 ? (
+        <div style={{ fontSize: 11, color: COLORS.textMuted }}>All quiet — no anomalies in today's scan of attendance, timesheets and allocations.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {shown.map((it) => {
+            const sev = INSIGHT_SEV[it.severity] || INSIGHT_SEV.info;
+            return (
+              <button key={it.id} onClick={() => onAsk && onAsk(`Dig into this finding: ${it.title} — ${it.body}`)}
+                title="Ask Satori about this" style={{
+                  padding: "10px 12px", background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+                  borderRadius: 10, cursor: "pointer", textAlign: "left", width: "100%", transition: "all 0.15s",
+                }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = COLORS.accent; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = COLORS.border; }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
+                  <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 7px", borderRadius: 999, background: sev.bg, color: sev.fg, textTransform: "uppercase", letterSpacing: "0.4px", flexShrink: 0 }}>{sev.label}</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: COLORS.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.title}</span>
+                </div>
+                <div style={{ fontSize: 10.5, color: COLORS.textSecondary, lineHeight: 1.45 }}>{it.body}</div>
+              </button>
+            );
+          })}
+          {items.length > 4 && (
+            <button onClick={() => setExpanded(x => !x)} style={{
+              padding: "6px 10px", borderRadius: 8, border: `1px dashed ${COLORS.border}`, background: "transparent",
+              color: COLORS.textMuted, fontSize: 11, fontWeight: 600, cursor: "pointer",
+            }}>{expanded ? "Show less" : `Show all ${items.length}`}</button>
+          )}
+        </div>
+      )}
+      {briefingOpen && <BriefingPlayer onClose={() => setBriefingOpen(false)} />}
+    </div>
+  );
+};
+
 // ─── Agent & RAG Page ───
 const AgentPage = () => {
   const [messages, setMessages] = useState([]);
@@ -2814,6 +3064,9 @@ const AgentPage = () => {
         width: 340, borderLeft: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt,
         display: "flex", flexDirection: "column", overflowY: "auto", flexShrink: 0
       }}>
+        {/* Proactive insights + spoken morning briefing */}
+        <InsightFeed onAsk={(q) => setInput(q)} />
+
         {/* Sample Prompts */}
         <div data-tour="sample-prompts" style={{ padding: "20px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 }}>
@@ -11036,6 +11289,7 @@ export default function App() {
             return (
               <button
                 key={item.id}
+                data-tour={`nav-${item.id}`}
                 onClick={() => { setActivePage(item.id); if (window.location.hash) window.location.hash = ""; }}
                 style={{
                   width: "100%", display: "flex", alignItems: "center", gap: 12,
@@ -11241,7 +11495,7 @@ export default function App() {
       <FabButtons pageLabel={currentNav?.label} />
 
       {/* First-run product tour (replayable from Help) */}
-      <OnboardingTour />
+      <OnboardingTour onNavigate={setActivePage} />
 
       {/* Pulse survey + welcome-back nudge */}
       <EngagementPrompts />

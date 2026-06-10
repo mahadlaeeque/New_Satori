@@ -8738,6 +8738,440 @@ def availability_bench_radar(weeks: int = 8, user: dict = Depends(get_current_us
     }
 
 
+# ─── Proactive insights ("Satori noticed") + morning briefing + TTS ─────────
+# The feed flips Satori from reactive to proactive: deterministic anomaly
+# checks run over the warehouse once per day (lazily, on the first /api/insights
+# call of the day) and store plain-language findings in the `insights` table.
+# The morning briefing composes the same findings into a spoken script, and
+# /api/tts turns any short script into audio for the avatar player + the
+# product-tour narration. Card text is DETERMINISTIC (templates, real numbers —
+# no model in the loop, so no hallucinated figures); only the briefing's
+# narrative glue uses Gemini, grounded on the stored cards.
+
+import threading as _threading
+_INSIGHTS_LOCK = _threading.Lock()
+_SEV_RANK = {"critical": 0, "warn": 1, "info": 2}
+
+
+def _insights_for_day(day: str) -> list:
+    db = get_db(); cur = db.cursor()
+    cur.execute(
+        "SELECT id, category, severity, department, title, body, metric "
+        "FROM insights WHERE insight_date = ?", (day,))
+    rows = cur.fetchall(); db.close()
+    out = []
+    for r in rows:
+        d = r if isinstance(r, dict) else {
+            "id": r[0], "category": r[1], "severity": r[2],
+            "department": r[3], "title": r[4], "body": r[5], "metric": r[6]}
+        out.append(dict(d))
+    out.sort(key=lambda x: (_SEV_RANK.get(x.get("severity"), 9), x.get("id", 0)))
+    return out
+
+
+def _insight_save(day: str, category: str, severity: str, dept: str,
+                  title: str, body: str, metric: str = ""):
+    db = get_db(); cur = db.cursor()
+    cur.execute(
+        "INSERT INTO insights (insight_date, category, severity, department, title, body, metric) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (insight_date, category, department, title) DO NOTHING",
+        (day, category, severity, dept or "", title[:300], body[:1500], metric[:80]))
+    db.commit(); db.close()
+
+
+def _generate_insights(day: str):
+    """Run every anomaly check; each is independent (one failing check never
+    blocks the rest). All numbers are computed in SQL/python from the
+    warehouse — values from bq_run_query arrive STRINGIFIED, so everything is
+    float()-parsed defensively."""
+    active = "LOWER(e.Employee_Type) IN ('mto','permanent','probation')"
+    dept_expr = "COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified')"
+    att_join = f"{_norm_emp_id('a.personal_no')} = {_norm_emp_id('e.Employee_Code')}"
+    f = lambda v: float(v or 0)
+
+    def run(sql, max_rows=2000):
+        r = bq_run_query(normalize_bq_project(_autofix_dashboard_sql(sql)), max_rows=max_rows)
+        if "error" in r:
+            raise RuntimeError(r["error"])
+        return r.get("rows") or []
+
+    # A — attendance rate dip, this week vs last (anchored on the data, not
+    # the wall clock, so a lagging feed never fakes a company-wide collapse).
+    def check_attendance_dip():
+        rows = run(f"""
+            WITH mx AS (SELECT MAX(attendance_date) AS m FROM {_bq_avail('Attendance_Data')}),
+            att AS (
+              SELECT {dept_expr} AS dept,
+                     IF(a.attendance_date > DATE_SUB(mx.m, INTERVAL 7 DAY), 'cur', 'prev') AS win,
+                     SUM(a.is_present + a.is_remote) AS attended,
+                     COUNTIF(a.is_weekend = 0 AND a.is_holiday = 0) AS workdays
+              FROM {_bq_avail('Attendance_Data')} a, mx
+              JOIN {_bq_avail('Employee_Data')} e ON {att_join}
+              WHERE a.attendance_date > DATE_SUB(mx.m, INTERVAL 14 DAY) AND {active}
+              GROUP BY dept, win
+            )
+            SELECT dept,
+                   MAX(IF(win='cur',  SAFE_DIVIDE(attended, NULLIF(workdays,0)), NULL)) AS cur_rate,
+                   MAX(IF(win='prev', SAFE_DIVIDE(attended, NULLIF(workdays,0)), NULL)) AS prev_rate,
+                   MAX(IF(win='cur', workdays, NULL)) AS cur_days
+            FROM att GROUP BY dept
+        """)
+        flagged = []
+        for r in rows:
+            curr, prev, days = f(r.get("cur_rate")) * 100, f(r.get("prev_rate")) * 100, f(r.get("cur_days"))
+            if days >= 25 and prev > 0 and (prev - curr) >= 10:
+                flagged.append((prev - curr, r.get("dept"), curr, prev))
+        for drop, dept, curr, prev in sorted(flagged, reverse=True)[:6]:
+            _insight_save(day, "attendance_dip", "critical" if drop >= 20 else "warn", dept,
+                          f"Attendance dropped in {dept}",
+                          f"{dept}'s attendance rate fell from {prev:.0f}% last week to {curr:.0f}% this week "
+                          f"({drop:.0f} points). Worth a look at who's absent or on leave.",
+                          f"{curr:.0f}%")
+
+    # B — late-arrival spike (the 09:30 business rule).
+    def check_late_spike():
+        rows = run(f"""
+            WITH mx AS (SELECT MAX(attendance_date) AS m FROM {_bq_avail('Attendance_Data')}),
+            lt AS (
+              SELECT {dept_expr} AS dept,
+                     IF(a.attendance_date > DATE_SUB(mx.m, INTERVAL 7 DAY), 'cur', 'prev') AS win,
+                     COUNTIF(a.checkin_time IS NOT NULL AND
+                             TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', a.checkin_time)) > TIME '09:30:00') AS late
+              FROM {_bq_avail('Attendance_Data')} a, mx
+              JOIN {_bq_avail('Employee_Data')} e ON {att_join}
+              WHERE a.attendance_date > DATE_SUB(mx.m, INTERVAL 14 DAY) AND {active}
+              GROUP BY dept, win
+            )
+            SELECT dept, MAX(IF(win='cur', late, NULL)) AS cur_late,
+                         MAX(IF(win='prev', late, NULL)) AS prev_late
+            FROM lt GROUP BY dept
+        """)
+        flagged = []
+        for r in rows:
+            c, p = f(r.get("cur_late")), f(r.get("prev_late"))
+            if c >= 10 and p > 0 and c >= 1.5 * p:
+                flagged.append((c - p, r.get("dept"), c, p))
+        for _, dept, c, p in sorted(flagged, reverse=True)[:5]:
+            _insight_save(day, "late_spike", "warn", dept,
+                          f"Late arrivals jumped in {dept}",
+                          f"{int(c)} late check-ins (after 09:30) this week in {dept}, up from {int(p)} last week.",
+                          f"{int(c)} late")
+
+    # C — allocated ≥80% this week but ZERO timesheet hours in the last 14
+    # data-days. Anchored on the timesheet feed's own MAX date.
+    def check_allocated_not_logging():
+        rows = run(f"""
+            WITH cur AS (SELECT MAX(Date) AS d FROM {_bq_avail('Allocation_Data')} WHERE Date <= CURRENT_DATE()),
+            tmax AS (SELECT MAX(COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),
+                                          SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))) AS m
+                     FROM {_bq_avail('Timesheet_Data')}),
+            booked AS (
+              SELECT {_norm_emp_id('a.employee_id')} AS nid,
+                     SUM(IF(a.Flag='Allocated', SAFE_CAST(a.allocation_percent AS FLOAT64), 0)) AS pct
+              FROM {_bq_avail('Allocation_Data')} a JOIN cur ON a.Date = cur.d
+              GROUP BY nid HAVING pct >= 80
+            ),
+            logged AS (
+              SELECT {_norm_emp_id('t.EMPLOYEE_CODE')} AS nid, SUM(t.TICKET_HOURS) AS h
+              FROM {_bq_avail('Timesheet_Data')} t, tmax
+              WHERE COALESCE(SAFE_CAST(CAST(t.DATE_KEY AS STRING) AS DATE),
+                             SAFE.PARSE_DATE('%Y%m%d', CAST(t.DATE_KEY AS STRING))) > DATE_SUB(tmax.m, INTERVAL 14 DAY)
+              GROUP BY nid
+            )
+            SELECT e.Resource_Name AS name, {dept_expr} AS dept
+            FROM {_bq_avail('Employee_Data')} e
+            JOIN booked b ON {_norm_emp_id('e.Employee_Code')} = b.nid
+            LEFT JOIN logged l ON l.nid = b.nid
+            WHERE COALESCE(l.h, 0) = 0 AND {active}
+        """)
+        by_dept = {}
+        for r in rows:
+            by_dept.setdefault(r.get("dept") or "Unspecified", []).append(r.get("name") or "?")
+        for dept, names in sorted(by_dept.items(), key=lambda kv: -len(kv[1]))[:6]:
+            n = len(names)
+            sample = ", ".join(_strip_code_prefix(x) for x in names[:3])
+            _insight_save(day, "not_logging", "critical" if n >= 5 else "warn", dept,
+                          f"Allocated but not logging hours in {dept}",
+                          f"{n} {'person is' if n == 1 else 'people are'} ≥80% allocated this week but logged "
+                          f"zero timesheet hours in the last two weeks — e.g. {sample}.",
+                          f"{n} silent")
+
+    # D — long bench: zero allocated across the last ~8 weekly snapshots AND
+    # no timesheet hours in 90 days (someone logging real hours is never idle).
+    def check_long_bench():
+        rows = run(f"""
+            WITH cur AS (SELECT MAX(Date) AS d FROM {_bq_avail('Allocation_Data')} WHERE Date <= CURRENT_DATE()),
+            tmax AS (SELECT MAX(COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),
+                                          SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))) AS m
+                     FROM {_bq_avail('Timesheet_Data')}),
+            wk AS (
+              SELECT {_norm_emp_id('a.employee_id')} AS nid,
+                     MAX(IF(a.Flag='Allocated', SAFE_CAST(a.allocation_percent AS FLOAT64), 0)) AS mx
+              FROM {_bq_avail('Allocation_Data')} a, cur
+              WHERE a.Date BETWEEN DATE_SUB(cur.d, INTERVAL 56 DAY) AND cur.d
+              GROUP BY nid HAVING mx = 0
+            ),
+            logged AS (
+              SELECT {_norm_emp_id('t.EMPLOYEE_CODE')} AS nid, SUM(t.TICKET_HOURS) AS h
+              FROM {_bq_avail('Timesheet_Data')} t, tmax
+              WHERE COALESCE(SAFE_CAST(CAST(t.DATE_KEY AS STRING) AS DATE),
+                             SAFE.PARSE_DATE('%Y%m%d', CAST(t.DATE_KEY AS STRING))) > DATE_SUB(tmax.m, INTERVAL 90 DAY)
+              GROUP BY nid
+            )
+            SELECT e.Resource_Name AS name, {dept_expr} AS dept
+            FROM {_bq_avail('Employee_Data')} e
+            JOIN wk ON {_norm_emp_id('e.Employee_Code')} = wk.nid
+            LEFT JOIN logged l ON l.nid = wk.nid
+            WHERE COALESCE(l.h, 0) = 0 AND {active}
+        """)
+        by_dept = {}
+        for r in rows:
+            by_dept.setdefault(r.get("dept") or "Unspecified", []).append(r.get("name") or "?")
+        for dept, names in sorted(by_dept.items(), key=lambda kv: -len(kv[1]))[:6]:
+            n = len(names)
+            sample = ", ".join(_strip_code_prefix(x) for x in names[:3])
+            _insight_save(day, "long_bench", "warn" if n >= 3 else "info", dept,
+                          f"Long-running bench in {dept}",
+                          f"{n} {'person has' if n == 1 else 'people have'} had zero project allocation for 8+ weeks "
+                          f"and no logged hours in 90 days — e.g. {sample}. Candidates for redeployment or training.",
+                          f"{n} on bench 8w+")
+
+    # E — upcoming roll-offs within 4 weeks (the Bench Radar, condensed):
+    # planning opportunity, not a problem — severity info.
+    def check_rolloffs():
+        rows = run(f"""
+            WITH cur AS (SELECT MAX(Date) AS d FROM {_bq_avail('Allocation_Data')} WHERE Date <= CURRENT_DATE()),
+            wk AS (
+              SELECT {_norm_emp_id('a.employee_id')} AS nid, a.Date AS wd,
+                     SUM(IF(a.Flag='Allocated', SAFE_CAST(a.allocation_percent AS FLOAT64), 0)) AS pct
+              FROM {_bq_avail('Allocation_Data')} a, cur
+              WHERE a.Date BETWEEN cur.d AND DATE_ADD(cur.d, INTERVAL 28 DAY)
+              GROUP BY nid, wd
+            ),
+            agg AS (
+              SELECT nid,
+                     MAX(IF(wd = (SELECT d FROM cur), pct, NULL)) AS now_pct,
+                     MIN(IF(wd > (SELECT d FROM cur) AND pct <= 50, pct, NULL)) AS drop_pct
+              FROM wk GROUP BY nid
+            )
+            SELECT e.Resource_Name AS name, {dept_expr} AS dept
+            FROM {_bq_avail('Employee_Data')} e
+            JOIN agg ON {_norm_emp_id('e.Employee_Code')} = agg.nid
+            WHERE agg.now_pct >= 80 AND agg.drop_pct IS NOT NULL AND {active}
+        """)
+        by_dept = {}
+        for r in rows:
+            by_dept.setdefault(r.get("dept") or "Unspecified", []).append(r.get("name") or "?")
+        for dept, names in sorted(by_dept.items(), key=lambda kv: -len(kv[1]))[:6]:
+            n = len(names)
+            sample = ", ".join(_strip_code_prefix(x) for x in names[:3])
+            _insight_save(day, "rolloff", "info", dept,
+                          f"Capacity opening up in {dept}",
+                          f"{n} fully-booked {'person rolls' if n == 1 else 'people roll'} off within the next 4 weeks "
+                          f"— e.g. {sample}. Check the Bench Radar to plan their next assignment early.",
+                          f"{n} freeing up")
+
+    # F — departments averaging under 6 logged hours per person-day last week.
+    def check_underlogging():
+        rows = run(f"""
+            WITH tmax AS (SELECT MAX(COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),
+                                               SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))) AS m
+                          FROM {_bq_avail('Timesheet_Data')}),
+            t AS (
+              SELECT {_norm_emp_id('t.EMPLOYEE_CODE')} AS nid,
+                     COALESCE(SAFE_CAST(CAST(t.DATE_KEY AS STRING) AS DATE),
+                              SAFE.PARSE_DATE('%Y%m%d', CAST(t.DATE_KEY AS STRING))) AS d,
+                     t.TICKET_HOURS AS h
+              FROM {_bq_avail('Timesheet_Data')} t, tmax
+              WHERE COALESCE(SAFE_CAST(CAST(t.DATE_KEY AS STRING) AS DATE),
+                             SAFE.PARSE_DATE('%Y%m%d', CAST(t.DATE_KEY AS STRING))) > DATE_SUB(tmax.m, INTERVAL 7 DAY)
+            )
+            SELECT {dept_expr} AS dept,
+                   COUNT(DISTINCT t.nid) AS loggers,
+                   ROUND(SUM(t.h) / NULLIF(COUNT(DISTINCT FORMAT_DATE('%Y%m%d', t.d)) * COUNT(DISTINCT t.nid), 0), 1) AS avg_day
+            FROM t JOIN {_bq_avail('Employee_Data')} e ON {_norm_emp_id('e.Employee_Code')} = t.nid
+            WHERE {active}
+            GROUP BY dept HAVING loggers >= 5 AND avg_day < 6
+            ORDER BY avg_day ASC LIMIT 5
+        """)
+        for r in rows:
+            dept, avg_day, loggers = r.get("dept"), f(r.get("avg_day")), int(f(r.get("loggers")))
+            _insight_save(day, "underlogging", "info", dept,
+                          f"Low timesheet coverage in {dept}",
+                          f"{dept} averaged {avg_day:g} logged hours per person per day last week across "
+                          f"{loggers} people — under the 8-hour benchmark. Hours may be going unrecorded.",
+                          f"{avg_day:g}h/day")
+
+    for name, chk in [("attendance_dip", check_attendance_dip), ("late_spike", check_late_spike),
+                      ("not_logging", check_allocated_not_logging), ("long_bench", check_long_bench),
+                      ("rolloff", check_rolloffs), ("underlogging", check_underlogging)]:
+        try:
+            chk()
+        except Exception as e:
+            print(f"[insights] check '{name}' failed: {e}")
+    # Marker row so a day with zero findings doesn't re-run the checks on
+    # every request (filtered out of every read path).
+    _insight_save(day, "_generated", "info", "", "_generated", "", "")
+
+
+def _strip_code_prefix(name: str) -> str:
+    """Resource_Name carries a code prefix ('E-1571 Mahad Laeeque') — show people, not codes."""
+    return re.sub(r"^[A-Za-z]{1,4}-\d+\s*[-–—]?\s*", "", str(name or "")).strip() or str(name or "")
+
+
+def _scoped_insights(user: dict, day: str) -> list:
+    rows = [r for r in _insights_for_day(day) if r.get("category") != "_generated"]
+    dept_scope = _get_user_dept_scope(int(user["sub"]))
+    if dept_scope:
+        allowed = {str(d).strip().lower() for d in dept_scope}
+        rows = [r for r in rows if (r.get("department") or "").strip().lower() in allowed]
+    return rows
+
+
+@app.get("/api/insights")
+def get_insights(user: dict = Depends(get_current_user)):
+    """Today's proactive findings, generated lazily on the first call of the
+    day (the generation is locked so concurrent first-callers don't double-run;
+    the UNIQUE constraint also makes any race idempotent)."""
+    day = datetime.now().strftime("%Y-%m-%d")
+    if not _insights_for_day(day):
+        with _INSIGHTS_LOCK:
+            if not _insights_for_day(day):
+                try:
+                    _generate_insights(day)
+                except Exception as e:
+                    print(f"[insights] generation failed: {e}")
+    return {"date": day, "insights": _scoped_insights(user, day)}
+
+
+@app.get("/api/briefing")
+def get_briefing(user: dict = Depends(get_current_user)):
+    """Compose today's findings into a ~60-second spoken briefing script for
+    the avatar. The narrative glue is Gemini, grounded STRICTLY on the stored
+    deterministic cards; if the model call fails we fall back to a plain
+    template so the briefing always works."""
+    day = datetime.now().strftime("%Y-%m-%d")
+    if not _insights_for_day(day):
+        with _INSIGHTS_LOCK:
+            if not _insights_for_day(day):
+                try:
+                    _generate_insights(day)
+                except Exception as e:
+                    print(f"[insights] generation failed: {e}")
+    rows = _scoped_insights(user, day)
+    first_name = (user.get("name") or user.get("email") or "there").split("@")[0].split(" ")[0].title()
+    today_label = datetime.now().strftime("%A, %B %d")
+
+    if not rows:
+        script = (f"Good morning {first_name}! It's {today_label}. I checked attendance, timesheets and "
+                  f"allocations this morning and everything looks steady — no anomalies worth flagging. "
+                  f"Ask me anything if you want to dig into the details.")
+        return {"date": day, "script": script, "count": 0}
+
+    findings = "\n".join(f"- [{r['severity']}] {r['title']}: {r['body']}" for r in rows[:10])
+    fallback = (f"Good morning {first_name}! It's {today_label}. Here's what I noticed today. "
+                + " ".join(f"{r['body']}" for r in rows[:5])
+                + " Open the feed for the full list, or just ask me about any of these.")
+    try:
+        client = get_genai_client()
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=(f"Listener's first name: {first_name}. Today is {today_label}.\n"
+                      f"FINDINGS (already verified — use ONLY these, do not invent numbers or names):\n{findings}"),
+            config=genai.types.GenerateContentConfig(
+                system_instruction=(
+                    "You write Satori's spoken morning briefing for a TMC manager. Compose ONE flowing, "
+                    "conversational script of 90-140 words: greet the listener by name, then walk through the "
+                    "findings most-severe first, speaking numbers naturally ('twelve people', 'sixty-two percent'). "
+                    "No markdown, no bullets, no headings, no emojis — it will be read aloud by a TTS voice. "
+                    "Close with one short sentence inviting them to ask Satori for details."),
+                temperature=0.4, max_output_tokens=400,
+                thinking_config=genai.types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        script = (resp.text or "").strip() or fallback
+    except Exception as e:
+        print(f"[briefing] compose error: {e}")
+        script = fallback
+    return {"date": day, "script": script, "count": len(rows)}
+
+
+# TTS — Gemini speech generation, returned as a base64 WAV the browser can
+# play directly. Model resolved once per process: env override, then the
+# preferred list filtered against ListModels (same self-heal as voice_session).
+_TTS_MODEL_CACHE: dict = {}
+
+
+def _resolve_tts_model() -> str:
+    if _TTS_MODEL_CACHE.get("model"):
+        return _TTS_MODEL_CACHE["model"]
+    env = os.environ.get("GEMINI_TTS_MODEL", "").strip()
+    if env:
+        _TTS_MODEL_CACHE["model"] = env
+        return env
+    preferred = ["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"]
+    chosen = preferred[0]
+    try:
+        import requests as _rq
+        resp = _rq.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}", timeout=15)
+        names = [m.get("name", "").replace("models/", "") for m in resp.json().get("models", [])]
+        tts = [n for n in names if "tts" in n.lower()]
+        for p in preferred:
+            if p in tts:
+                chosen = p
+                break
+        else:
+            if tts:
+                chosen = sorted(tts)[-1]
+    except Exception as e:
+        print(f"[tts] model probe failed (using {chosen}): {e}")
+    _TTS_MODEL_CACHE["model"] = chosen
+    return chosen
+
+
+class TTSBody(BaseModel):
+    text: str
+
+
+@app.post("/api/tts")
+def tts_speak(body: TTSBody, user: dict = Depends(get_current_user)):
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is required.")
+    if len(text) > 2500:
+        text = text[:2500]
+    voice = os.environ.get("GEMINI_TTS_VOICE", "Leda")
+    model = _resolve_tts_model()
+    try:
+        client = get_genai_client()
+        resp = client.models.generate_content(
+            model=model,
+            contents=text,
+            config=genai.types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=genai.types.SpeechConfig(
+                    voice_config=genai.types.VoiceConfig(
+                        prebuilt_voice_config=genai.types.PrebuiltVoiceConfig(voice_name=voice))),
+            ),
+        )
+        part = resp.candidates[0].content.parts[0]
+        pcm = part.inline_data.data
+        if isinstance(pcm, str):
+            pcm = base64.b64decode(pcm)
+    except Exception as e:
+        print(f"[tts] generation error ({model}): {e}")
+        _TTS_MODEL_CACHE.pop("model", None)  # re-probe next call (model may have been retired)
+        raise HTTPException(status_code=502, detail="Text-to-speech is unavailable right now.")
+    # Gemini TTS returns raw 24 kHz 16-bit mono PCM — wrap it in a WAV header.
+    import io as _io, wave as _wave
+    buf = _io.BytesIO()
+    with _wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+        w.writeframes(pcm)
+    return {"audio": base64.b64encode(buf.getvalue()).decode(), "mime": "audio/wav"}
+
+
 # ─── Employee skills (practice-head assigned, used by find-best-fit) ────────
 def _get_employee_skills(emp_code: str) -> list[str]:
     """Skills assigned to one employee (by warehouse Employee_Code), sorted."""
