@@ -8626,6 +8626,118 @@ def availability_capacity(department: str = "", weeks_back: int = 4, weeks_fwd: 
     }
 
 
+@app.get("/api/availability/bench-radar")
+def availability_bench_radar(weeks: int = 8, user: dict = Depends(get_current_user)):
+    """Upcoming roll-offs: who becomes available BEFORE they hit the bench.
+
+    The allocation feed carries forward-planned weeks, so we can see capacity
+    opening up ahead of time. Rule (kept deliberately simple + explainable):
+    a person is "rolling off" when they are effectively booked THIS week
+    (allocated >= 80%) and some planned week within the horizon drops them to
+    <= 50% — the first such week is their roll-off week. full_free marks the
+    ones who drop to 0%. Dept-scope aware. Returns the small flagged list,
+    each with their current projects so the head knows what they roll off OF.
+    """
+    horizon = max(2, min(int(weeks or 8), 16))
+    dept_scope = _get_user_dept_scope(int(user["sub"]))
+    scope_clause = _dept_scope_clause(dept_scope)
+
+    radar_sql = f"""
+        WITH cur AS (
+          SELECT MAX(Date) AS d FROM {_bq_avail('Allocation_Data')}
+          WHERE Date <= CURRENT_DATE()
+        ),
+        emp AS (
+          SELECT CAST(Employee_Code AS STRING) AS code,
+                 Resource_Name AS name,
+                 COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS dept,
+                 COALESCE(NULLIF(TRIM(EmployeePosition), ''), '') AS position,
+                 {_norm_emp_id('Employee_Code')} AS nid
+          FROM {_bq_avail('Employee_Data')}
+          WHERE LOWER(Employee_Type) IN ('mto','permanent','probation'){scope_clause}
+        ),
+        wk AS (
+          SELECT {_norm_emp_id('a.employee_id')} AS nid, a.Date AS wd,
+                 SUM(IF(a.Flag = 'Allocated', SAFE_CAST(a.allocation_percent AS FLOAT64), 0)) AS pct
+          FROM {_bq_avail('Allocation_Data')} a, cur
+          WHERE a.Date BETWEEN cur.d AND DATE_ADD(cur.d, INTERVAL {horizon * 7} DAY)
+          GROUP BY nid, wd
+        )
+        SELECT e.code, e.name, e.dept, e.position, w.wd, w.pct,
+               (SELECT d FROM cur) AS cur_week
+        FROM emp e
+        JOIN wk w ON w.nid = e.nid
+        ORDER BY e.code, w.wd
+    """
+    radar_sql = normalize_bq_project(_autofix_dashboard_sql(radar_sql))
+    rr = bq_run_query(radar_sql, max_rows=30000)
+    if "error" in rr:
+        print(f"[/api/availability/bench-radar] BQ error: {rr['error']}")
+        raise HTTPException(status_code=500, detail=rr["error"])
+
+    # Group week series per employee, then detect the booked → free transition.
+    series = {}   # code -> {meta, weeks: [(date, pct)]}
+    cur_week = None
+    for row in (rr.get("rows") or []):
+        cur_week = str(row.get("cur_week")) if row.get("cur_week") else cur_week
+        code = row.get("code") or ""
+        s = series.setdefault(code, {
+            "code": code, "name": row.get("name") or code,
+            "dept": row.get("dept") or "Unspecified",
+            "position": row.get("position") or "",
+            "weeks": [],
+        })
+        wd = row.get("wd")
+        if wd:
+            try:
+                s["weeks"].append((str(wd), float(row.get("pct") or 0)))
+            except Exception:
+                s["weeks"].append((str(wd), 0.0))
+
+    from datetime import date as _date
+    items = []
+    for s in series.values():
+        wks = sorted(s["weeks"])
+        if not wks or not cur_week:
+            continue
+        now_pct = next((p for (d, p) in wks if d == cur_week), None)
+        if now_pct is None or now_pct < 80:
+            continue  # not effectively booked today — nothing to roll off
+        hit = next(((d, p) for (d, p) in wks if d > cur_week and p <= 50), None)
+        if not hit:
+            continue
+        rolloff_week, pct_at = hit
+        try:
+            weeks_until = max(1, round((_date.fromisoformat(rolloff_week) - _date.fromisoformat(cur_week)).days / 7))
+        except Exception:
+            weeks_until = 0
+        items.append({
+            "code": s["code"],
+            "name": s["name"],
+            "dept": s["dept"],
+            "position": s["position"],
+            "current_pct": round(now_pct),
+            "rolloff_week": rolloff_week,
+            "pct_at_rolloff": round(pct_at),
+            "weeks_until": weeks_until,
+            "full_free": pct_at <= 0,
+        })
+    items.sort(key=lambda x: (x["weeks_until"], -x["current_pct"], x["name"].lower()))
+    items = items[:100]
+
+    # Attach what they're rolling off OF — current active projects.
+    proj_map = _current_projects_for_codes([x["code"] for x in items])
+    for x in items:
+        x["current_projects"] = proj_map.get(_norm_code_py(x["code"]), [])
+
+    return {
+        "weeks_horizon": horizon,
+        "current_week": cur_week,
+        "items": items,
+        "total": len(items),
+    }
+
+
 # ─── Employee skills (practice-head assigned, used by find-best-fit) ────────
 def _get_employee_skills(emp_code: str) -> list[str]:
     """Skills assigned to one employee (by warehouse Employee_Code), sorted."""

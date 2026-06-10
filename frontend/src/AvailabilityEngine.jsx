@@ -28,7 +28,7 @@ import {
   Users, Search, Plus, X, Sparkles, MapPin, Briefcase, Clock,
   Activity, Filter, AlertCircle, CheckCircle, Loader2, Trash2,
   ArrowRight, TrendingUp, ChevronRight, FileText, Star, Calendar,
-  Download, LayoutGrid, Grid3x3
+  Download, LayoutGrid, Grid3x3, Radar
 } from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
@@ -1580,6 +1580,100 @@ const TaskDetailModal = ({ task, onClose, onOpenEmployee, onToggleStatus, onDele
 };
 
 // ─── Main Page ───
+// ─── Bench Radar — upcoming roll-offs ───
+// People who are effectively booked TODAY (>=80% allocated) but whose
+// forward-planned allocation drops to <=50% within the horizon. This is the
+// early-warning view the flat bench list can't give: capacity you can plan
+// for BEFORE it sits idle. Clicking a row opens the employee detail modal.
+const BenchRadarPanel = ({ onOpen }) => {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const d = await fetchJson("/api/availability/bench-radar?weeks=8");
+        if (!cancelled) {
+          setData(d);
+          // Auto-expand when someone frees up within a fortnight — that's
+          // actionable now; otherwise stay collapsed with the count visible.
+          if ((d.items || []).some(i => i.weeks_until <= 2)) setOpen(true);
+        }
+      } catch (e) { if (!cancelled) setError(String(e.message || e)); }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  if (error || !data) return null; // radar is additive — never block the page
+  const items = data.items || [];
+  const fmtWk = (iso) => {
+    try { return new Date(`${iso}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" }); }
+    catch { return iso; }
+  };
+
+  return (
+    <div style={{ marginBottom: 20, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12 }}>
+      <button onClick={() => setOpen(o => !o)} style={{
+        width: "100%", padding: "12px 16px", border: "none", background: "transparent", color: C.textPrimary,
+        display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontWeight: 700, fontSize: 14,
+      }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Radar size={16} style={{ color: C.accentDark }} /> Bench Radar
+          <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999, background: items.length ? "#FEF3C7" : C.surfaceAlt, color: items.length ? "#B45309" : C.textMuted }}>
+            {items.length ? `${items.length} rolling off in the next ${data.weeks_horizon} weeks` : `no roll-offs in the next ${data.weeks_horizon} weeks`}
+          </span>
+        </span>
+        <ChevronRight size={16} style={{ transform: open ? "rotate(90deg)" : "rotate(0)", transition: "transform 0.15s" }} />
+      </button>
+      {open && (
+        <div style={{ borderTop: `1px solid ${C.border}`, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+          {items.length === 0 && (
+            <div style={{ padding: 14, color: C.textMuted, fontSize: 13, textAlign: "center" }}>
+              Everyone who is booked today stays booked through the planning horizon.
+            </div>
+          )}
+          {items.map((it) => (
+            <div key={it.code}
+              onClick={() => onOpen && onOpen({ code: it.code, name: it.name, department: it.dept, position: it.position })}
+              style={{
+                padding: 12, border: `1px solid ${C.border}`, borderRadius: 10, cursor: "pointer",
+                display: "grid", gridTemplateColumns: "1fr auto auto", gap: 12, alignItems: "center",
+                transition: "box-shadow 0.15s, transform 0.15s",
+              }}
+              onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.06)"; e.currentTarget.style.transform = "translateY(-1px)"; }}
+              onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.transform = "translateY(0)"; }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: C.textPrimary }}>
+                  {cleanName(it)} <span style={{ color: C.textMuted, fontWeight: 500, fontSize: 12 }}>· {it.code}</span>
+                </div>
+                <div style={{ fontSize: 12, color: C.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {[it.position, it.dept].filter(Boolean).join(" · ")}
+                  {it.current_projects && it.current_projects.length > 0 && (
+                    <> · rolling off {it.current_projects.slice(0, 2).join(", ")}{it.current_projects.length > 2 ? "…" : ""}</>
+                  )}
+                </div>
+              </div>
+              <span style={{ fontSize: 12, fontWeight: 700, color: C.textSecondary, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>
+                {it.current_pct}% → {it.pct_at_rolloff}%
+              </span>
+              <span style={{
+                fontSize: 11, fontWeight: 700, padding: "4px 10px", borderRadius: 999, whiteSpace: "nowrap",
+                background: it.full_free ? "#DCFCE7" : "#FEF3C7",
+                color: it.full_free ? "#0E7E3E" : "#B45309",
+              }}>
+                {it.full_free ? "fully free" : "partially free"} in {it.weeks_until}w · wk of {fmtWk(it.rolloff_week)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── Capacity heatmap (people × weeks) ───
 // Each cell = that week's total Flag='Allocated' percent from the weekly
 // allocation feed (which extends into FORWARD-PLANNED weeks) — green is FREE
@@ -1910,6 +2004,9 @@ const AvailabilityEnginePage = () => {
           <KPICard key={b.key} label={b.label} value={kpis?.[b.key]} accent={b.accent} subtitle={b.subtitle} />
         ))}
       </div>
+
+      {/* Bench Radar — upcoming roll-offs (collapsible) */}
+      <BenchRadarPanel onOpen={(e) => setDetailEmp(e)} />
 
       {/* Tasks panel (collapsible) */}
       <SavedTasksPanel tasks={tasks} onDelete={handleDeleteTask} onToggleStatus={handleToggleStatus} onOpen={setSelectedTask} />
