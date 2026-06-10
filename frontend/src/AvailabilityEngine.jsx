@@ -877,6 +877,11 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
               <div style={{ fontSize: 13, color: C.textSecondary, marginTop: 4 }}>
                 {emp.position || "—"}{emp.department && ` · ${emp.department}`}{emp.location && ` · ${emp.location}`}
               </div>
+              {detail?.profile?.email && (
+                <a href={`mailto:${detail.profile.email}`} style={{ fontSize: 12, color: C.accent, fontWeight: 600, textDecoration: "none", marginTop: 2, display: "inline-block" }}>
+                  {detail.profile.email}
+                </a>
+              )}
             </div>
           </div>
           <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.textMuted, padding: 4 }}><X size={20} /></button>
@@ -900,7 +905,7 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
           {tab === "attendance" && <AttendanceTab data={att} loading={attLoading} error={attError} />}
           {tab === "overview" && <>
           {/* Snapshot row */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 20 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
             <div style={{ background: C.surfaceAlt, borderRadius: 10, padding: "12px 14px" }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>Peak allocation</div>
               <div style={{ fontSize: 20, fontWeight: 800, color: C.textPrimary, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>{Math.round(allocPct)}%</div>
@@ -919,6 +924,17 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
                 {Math.round(Number(emp.hrs_90d || 0))}h
               </div>
               <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4 }}>{Number(emp.hrs_90d) === 0 ? "No timesheet activity" : "logged hours"}</div>
+            </div>
+            <div style={{ background: C.surfaceAlt, borderRadius: 10, padding: "12px 14px" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>Tenure</div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: C.textPrimary, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>
+                {detail?.profile?.tenure_label || detail?.profile?.employee_type || (loading ? "…" : "—")}
+              </div>
+              <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {detail?.profile?.tenure_label
+                  ? [`since ${detail.profile.joining_date}`, detail.profile.employee_type].filter(Boolean).join(" · ")
+                  : (detail?.profile?.employee_status || "—")}
+              </div>
             </div>
           </div>
 
@@ -1051,6 +1067,64 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
               </div>
             )}
           </div>
+
+          {/* Plan vs actuals — this week's allocation plan against 90d logged hours */}
+          {detail?.plan_vs_actual?.items?.length > 0 && (
+            <div style={{ marginBottom: 20 }}>
+              <h3 style={{ margin: "0 0 10px", fontSize: 13, fontWeight: 700, color: C.textPrimary, textTransform: "uppercase", letterSpacing: "0.5px", display: "flex", alignItems: "center", gap: 6 }}>
+                <TrendingUp size={14} /> Plan vs actuals
+              </h3>
+              {(detail.plan_vs_actual.not_logging > 0 || detail.plan_vs_actual.unplanned > 0) && (
+                <div style={{ fontSize: 12, color: "#B45309", fontWeight: 600, marginBottom: 8 }}>
+                  {[
+                    detail.plan_vs_actual.not_logging > 0 ? `${detail.plan_vs_actual.not_logging} allocated project${detail.plan_vs_actual.not_logging > 1 ? "s" : ""} with no logged hours` : null,
+                    detail.plan_vs_actual.unplanned > 0 ? `${detail.plan_vs_actual.unplanned} project${detail.plan_vs_actual.unplanned > 1 ? "s" : ""} logged without an allocation` : null,
+                  ].filter(Boolean).join(" · ")}
+                </div>
+              )}
+              <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+                <div style={{ padding: "8px 14px", display: "grid", gridTemplateColumns: "1fr 110px 110px 60px", gap: 12, fontSize: 10, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px", background: C.surfaceAlt }}>
+                  <span>Project</span>
+                  <span style={{ textAlign: "right" }}>Planned</span>
+                  <span style={{ textAlign: "right" }}>Logged share</span>
+                  <span style={{ textAlign: "right" }}>Hours</span>
+                </div>
+                {detail.plan_vs_actual.items.map((r, i) => {
+                  const planned = Math.max(0, Math.min(100, Number(r.planned_pct || 0)));
+                  const share = Math.max(0, Math.min(100, Number(r.share_pct || 0)));
+                  return (
+                    <div key={i} style={{
+                      padding: "10px 14px", borderTop: `1px solid ${C.border}`,
+                      display: "grid", gridTemplateColumns: "1fr 110px 110px 60px", gap: 12, alignItems: "center",
+                    }}>
+                      <div style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: C.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.project_name}</span>
+                        {r.flag === "not_logging" && (
+                          <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: "#FEF3C7", color: "#B45309" }}>Not logging</span>
+                        )}
+                        {r.flag === "unplanned" && (
+                          <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: "#E0F2FE", color: "#0A5F89" }}>Unplanned</span>
+                        )}
+                      </div>
+                      <div>
+                        <div style={{ height: 6, background: C.surfaceAlt, borderRadius: 999, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${planned}%`, background: STATUS_COLOR.Allocated.fg }} />
+                        </div>
+                        <div style={{ fontSize: 11, color: C.textSecondary, marginTop: 4, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>{Math.round(Number(r.planned_pct || 0))}%</div>
+                      </div>
+                      <div>
+                        <div style={{ height: 6, background: C.surfaceAlt, borderRadius: 999, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${share}%`, background: C.accent }} />
+                        </div>
+                        <div style={{ fontSize: 11, color: C.textSecondary, marginTop: 4, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>{share}%</div>
+                      </div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: C.textSecondary, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{Math.round(Number(r.hrs_90d || 0))}h</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Timesheet by project */}
           <div>

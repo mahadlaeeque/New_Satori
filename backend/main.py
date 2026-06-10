@@ -7976,6 +7976,27 @@ def availability_diag(_: dict = Depends(require_admin)):
     }
 
 
+def _parse_joining_date(raw):
+    """Joining_Date arrives in whatever shape the source sheet had: ISO date,
+    m/d/Y, d-Mon-Y, or an Excel serial. Return a datetime.date or None."""
+    import re as _re
+    from datetime import date as _date, datetime as _dt, timedelta as _td
+    s = str(raw or "").strip()
+    if not s or s.lower() in ("none", "null", "nan", "nat"):
+        return None
+    if _re.fullmatch(r"\d{5}(\.0+)?", s):  # Excel serial, e.g. 43586
+        try:
+            return _date(1899, 12, 30) + _td(days=int(float(s)))
+        except Exception:
+            return None
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%d-%b-%Y", "%d-%m-%Y"):
+        try:
+            return _dt.strptime(s[:10] if fmt == "%Y-%m-%d" else s, fmt).date()
+        except Exception:
+            pass
+    return None
+
+
 @app.get("/api/availability/employees/{code}/detail")
 def availability_employee_detail(code: str, user: dict = Depends(get_current_user)):
     """Return drill-down detail for one employee: projects + timesheet
@@ -8082,6 +8103,7 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
         WITH t AS (
           SELECT
             COALESCE(NULLIF(TRIM(TICKET_PROJECT_LABEL), ''), 'Unspecified') AS project,
+            COALESCE(NULLIF(TRIM(CAST(TICKET_PROJECT_CODE AS STRING)), ''), '') AS project_code,
             SAFE_CAST(TICKET_HOURS AS FLOAT64) AS hours,
             COALESCE(
               SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),
@@ -8092,12 +8114,13 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
         )
         SELECT
           project,
+          project_code,
           ROUND(SUM(hours), 1) AS hrs,
           COUNT(*) AS tickets,
           MAX(d) AS last_entry
         FROM t
         WHERE d >= (SELECT DATE_SUB(MAX(d), INTERVAL 90 DAY) FROM t)
-        GROUP BY project
+        GROUP BY project, project_code
         ORDER BY hrs DESC
         LIMIT 20
     """
@@ -8114,11 +8137,100 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
             total_hrs_90d += hrs
             last_entry = row.get("last_entry")
             timesheet_by_project.append({
-                "project":    row.get("project") or "Unspecified",
-                "hrs":        hrs,
-                "tickets":    int(row.get("tickets") or 0),
-                "last_entry": str(last_entry) if last_entry else None,
+                "project":      row.get("project") or "Unspecified",
+                "project_code": (row.get("project_code") or "").strip(),
+                "hrs":          hrs,
+                "tickets":      int(row.get("tickets") or 0),
+                "last_entry":   str(last_entry) if last_entry else None,
             })
+
+    # ── Profile basics — tenure, type, status, email ──
+    # Joining_Date existed in the older warehouse upload but the live Drive
+    # CSV feed may not carry it — try with it first, fall back without.
+    profile = {}
+    for cols in (
+        "CAST(Joining_Date AS STRING) AS joining_date, employee_type, employee_status, EmployeeEmail AS email",
+        "employee_type, employee_status, EmployeeEmail AS email",
+    ):
+        p_sql = normalize_bq_project(f"""
+            SELECT {cols}
+            FROM {_bq_avail('Employee_Data')}
+            WHERE CAST(Employee_Code AS STRING) = '{safe_code}'
+            LIMIT 1
+        """)
+        rp = bq_run_query(p_sql, max_rows=1)
+        if "error" in rp:
+            print(f"[/api/availability/employees/detail] profile BQ error (cols='{cols[:30]}…'): {rp['error']}")
+            continue
+        prows = rp.get("rows") or []
+        if prows:
+            pr = prows[0]
+            profile = {
+                "employee_type":   (pr.get("employee_type") or "").strip() or None,
+                "employee_status": (pr.get("employee_status") or "").strip() or None,
+                "email":           (pr.get("email") or "").strip() or None,
+            }
+            jd = _parse_joining_date(pr.get("joining_date"))
+            if jd:
+                from datetime import date as _date
+                today = _date.today()
+                months = (today.year - jd.year) * 12 + (today.month - jd.month)
+                if today.day < jd.day:
+                    months -= 1
+                months = max(0, months)
+                profile["joining_date"] = jd.isoformat()
+                profile["tenure_months"] = months
+                profile["tenure_label"] = f"{months // 12}y {months % 12}m"
+        break
+
+    # ── Planned vs actual — line up this week's allocation plan against the
+    # last 90 days of logged hours per project. Allocation project_id and
+    # Timesheet TICKET_PROJECT_CODE both join Project_Master.Project_Code,
+    # so the codes match directly. Bench-project rows are excluded from the
+    # planned side (a 100% bench row is not a plan to work on anything).
+    hrs_by_code = {}
+    for t in timesheet_by_project:
+        pc = t["project_code"]
+        if not pc:
+            # Fall back to the label's leading code token ("1104 - FF Rise…").
+            tok = (t["project"] or "").split(" ")[0].strip()
+            pc = tok if tok.isdigit() else ""
+        if pc:
+            hrs_by_code[pc] = hrs_by_code.get(pc, 0.0) + t["hrs"]
+    pva_items, planned_codes = [], set()
+    for p in projects:
+        if p.get("on_bench"):
+            continue
+        pid = (p.get("project_id") or "").strip()
+        if pid in planned_codes:
+            continue
+        planned_codes.add(pid)
+        hrs = round(hrs_by_code.get(pid, 0.0), 1)
+        planned = float(p.get("allocation_pct") or 0)
+        pva_items.append({
+            "project_id":   pid,
+            "project_name": p.get("project_name") or pid,
+            "planned_pct":  planned,
+            "hrs_90d":      hrs,
+            "share_pct":    round(100.0 * hrs / total_hrs_90d) if total_hrs_90d else 0,
+            "flag":         "not_logging" if (planned > 0 and hrs == 0) else "ok",
+        })
+    for t in timesheet_by_project:
+        pc = t["project_code"] or ((t["project"] or "").split(" ")[0].strip() if (t["project"] or "").split(" ")[0].strip().isdigit() else "")
+        if (pc and pc in planned_codes) or t["hrs"] <= 0:
+            continue
+        if pc:
+            planned_codes.add(pc)
+        hrs = round(hrs_by_code.get(pc, t["hrs"]), 1) if pc else t["hrs"]
+        pva_items.append({
+            "project_id":   pc,
+            "project_name": t["project"],
+            "planned_pct":  0.0,
+            "hrs_90d":      hrs,
+            "share_pct":    round(100.0 * hrs / total_hrs_90d) if total_hrs_90d else 0,
+            "flag":         "unplanned",
+        })
+    pva_items.sort(key=lambda x: (-x["planned_pct"], -x["hrs_90d"]))
 
     return {
         "code": emp_code,
@@ -8126,6 +8238,12 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
         "timesheet": {
             "total_hrs_90d": round(total_hrs_90d, 1),
             "by_project":    timesheet_by_project,
+        },
+        "profile": profile,
+        "plan_vs_actual": {
+            "items":       pva_items,
+            "not_logging": sum(1 for x in pva_items if x["flag"] == "not_logging"),
+            "unplanned":   sum(1 for x in pva_items if x["flag"] == "unplanned"),
         },
         "skills": _get_employee_skills(emp_code),
         "can_edit_skills": _can_edit_employee_skills(user, emp_code),
