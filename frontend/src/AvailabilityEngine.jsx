@@ -30,6 +30,7 @@ import {
   ArrowRight, TrendingUp, ChevronRight, FileText, Star, Calendar,
   Download, LayoutGrid, Grid3x3, Radar
 } from "lucide-react";
+import SatoriAvatar from "./components/SatoriAvatar.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 
@@ -1586,6 +1587,118 @@ const TaskDetailModal = ({ task, onClose, onOpenEmployee, onToggleStatus, onDele
 };
 
 // ─── Main Page ───
+// ─── Suggest-work modal (Bench Radar → "Find work") ───
+// Satori first proposes concrete, skill-anchored task ideas for the person
+// (department-tailored when no skills are tagged). Picking one drops it into
+// Create Task / Find Best Fit pre-filled; "Write my own" skips to the blank
+// prefilled form. The avatar thinks while Gemini works.
+const rolloffContext = (it) =>
+  `${cleanName(it)} (${it.code}${it.dept ? `, ${it.dept}` : ""}${it.position ? `, ${it.position}` : ""}) ` +
+  `rolls off ${(it.current_projects || []).slice(0, 2).join(", ") || "their current project"} ` +
+  `around the week of ${it.rolloff_week} (${it.current_pct}% → ${it.pct_at_rolloff}% allocated).`;
+
+const SuggestWorkModal = ({ item, onClose, onPick, onCustom }) => {
+  const [sugs, setSugs] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!item) { setSugs(null); setError(null); return; }
+    let cancelled = false;
+    (async () => {
+      setLoading(true); setError(null); setSugs(null);
+      try {
+        const r = await fetchJson("/api/availability/suggest-work", {
+          method: "POST",
+          body: JSON.stringify({
+            code: item.code, name: item.name, department: item.dept,
+            position: item.position, current_projects: item.current_projects || [],
+          }),
+        });
+        if (!cancelled) setSugs(r.suggestions || []);
+      } catch (e) { if (!cancelled) setError(String(e.message || e)); }
+      finally { if (!cancelled) setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [item]);
+
+  if (!item) return null;
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 1100,
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: C.surface, borderRadius: 16, width: "100%", maxWidth: 640, maxHeight: "86vh",
+        display: "flex", flexDirection: "column", boxShadow: "0 20px 60px rgba(0,0,0,0.25)", overflow: "hidden",
+      }}>
+        <div style={{ padding: "18px 22px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 14 }}>
+          <SatoriAvatar state={loading ? "thinking" : "idle"} size={52} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h2 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: C.textPrimary }}>
+              What should {cleanName(item)} do next?
+            </h2>
+            <div style={{ fontSize: 12.5, color: C.textSecondary, marginTop: 3 }}>
+              {loading ? "Looking at their skills, role and current projects…"
+                : "Skill-matched suggestions — pick one, or write your own."}
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.textMuted, padding: 4 }}><X size={20} /></button>
+        </div>
+
+        <div style={{ flex: 1, overflowY: "auto", padding: 18 }}>
+          {loading && (
+            <div style={{ padding: 30, textAlign: "center", color: C.textMuted, fontSize: 13 }}>
+              <Loader2 size={22} className="spin" />
+              <div style={{ marginTop: 8 }}>Generating ideas for {cleanName(item)}…</div>
+            </div>
+          )}
+          {error && (
+            <div style={{ padding: "10px 14px", background: "#FEE2E2", color: "#991B1B", borderRadius: 8, fontSize: 13, marginBottom: 12 }}>
+              {error} — you can still write your own task below.
+            </div>
+          )}
+          {!loading && (sugs || []).map((s, i) => (
+            <button key={i} onClick={() => onPick(s, item)} style={{
+              width: "100%", textAlign: "left", padding: "14px 16px", marginBottom: 10,
+              background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12,
+              cursor: "pointer", transition: "all 0.15s",
+            }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = C.accent; e.currentTarget.style.boxShadow = "0 4px 14px rgba(0,0,0,0.07)"; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.boxShadow = "none"; }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: C.textPrimary }}>{s.title}</div>
+                <span style={{ fontSize: 11, fontWeight: 700, color: C.accentDark, display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+                  Use this <ArrowRight size={12} />
+                </span>
+              </div>
+              <div style={{ fontSize: 12.5, color: C.textSecondary, lineHeight: 1.5, marginTop: 5 }}>{s.description}</div>
+              {s.skills && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 8 }}>
+                  {s.skills.split(",").map(sk => sk.trim()).filter(Boolean).slice(0, 6).map(sk => (
+                    <span key={sk} style={{ fontSize: 10.5, fontWeight: 700, padding: "3px 9px", borderRadius: 999, background: `${C.accent}18`, color: C.accentDark }}>{sk}</span>
+                  ))}
+                </div>
+              )}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ padding: "12px 22px", borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", background: C.surfaceAlt }}>
+          <button onClick={() => onCustom(item)} style={{
+            padding: "9px 14px", borderRadius: 8, border: `1px solid ${C.border}`,
+            background: C.surface, color: C.textSecondary, fontWeight: 600, fontSize: 13, cursor: "pointer",
+          }}>Write my own instead</button>
+          <button onClick={onClose} style={{
+            padding: "9px 14px", borderRadius: 8, border: "none",
+            background: "transparent", color: C.textMuted, fontWeight: 600, fontSize: 13, cursor: "pointer",
+          }}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── Bench Radar — upcoming roll-offs ───
 // People who are effectively booked TODAY (>=80% allocated) but whose
 // forward-planned allocation drops to <=50% within the horizon. This is the
@@ -1829,6 +1942,7 @@ const AvailabilityEnginePage = () => {
   // Modal state
   const [createOpen, setCreateOpen] = useState(false);
   const [createPrefill, setCreatePrefill] = useState(null);
+  const [suggestFor, setSuggestFor] = useState(null); // Bench Radar person awaiting task suggestions
   const [bestFitOpen, setBestFitOpen] = useState(false);
   const [bestFitLoading, setBestFitLoading] = useState(false);
   const [bestFitError, setBestFitError] = useState(null);
@@ -2053,26 +2167,10 @@ const AvailabilityEnginePage = () => {
         ))}
       </div>
 
-      {/* Bench Radar — upcoming roll-offs (collapsible, follows the dept filter) */}
+      {/* Bench Radar — upcoming roll-offs (collapsible, follows the dept filter).
+          "Find work" opens Satori's skill-matched task suggestions first. */}
       <BenchRadarPanel onOpen={(e) => setDetailEmp(e)} department={deptFilter}
-        onFindWork={async (it) => {
-          // Prefill Find Best Fit with the roll-off person's skills + context
-          // so the radar's early warning becomes a one-click staffing action.
-          let personSkills = [];
-          try {
-            const r = await fetchJson(`/api/availability/employees/${encodeURIComponent(it.code)}/skills`);
-            personSkills = r.skills || [];
-          } catch { /* skills are optional */ }
-          const offOf = (it.current_projects || []).slice(0, 2).join(", ");
-          setCreatePrefill({
-            name: `Next assignment for ${cleanName(it)}`,
-            skills: personSkills.join(", "),
-            description: `${cleanName(it)} (${it.code}${it.dept ? `, ${it.dept}` : ""}${it.position ? `, ${it.position}` : ""}) `
-              + `rolls off ${offOf || "their current project"} around the week of ${it.rolloff_week} `
-              + `(${it.current_pct}% → ${it.pct_at_rolloff}% allocated). Find suitable work for them to pick up from then.`,
-          });
-          setCreateOpen(true);
-        }} />
+        onFindWork={(it) => setSuggestFor(it)} />
 
       {/* Tasks panel (collapsible) */}
       <SavedTasksPanel tasks={tasks} onDelete={handleDeleteTask} onToggleStatus={handleToggleStatus} onOpen={setSelectedTask} />
@@ -2170,6 +2268,35 @@ const AvailabilityEnginePage = () => {
         </div>
       )}
 
+      <SuggestWorkModal
+        item={suggestFor}
+        onClose={() => setSuggestFor(null)}
+        onPick={(s, it) => {
+          setCreatePrefill({
+            name: s.title,
+            skills: s.skills || "",
+            description: `${s.description} ${rolloffContext(it)}`,
+          });
+          setSuggestFor(null);
+          setCreateOpen(true);
+        }}
+        onCustom={async (it) => {
+          // Skip the suggestions — open the plain prefilled form with the
+          // person's tagged skills and roll-off context.
+          let personSkills = [];
+          try {
+            const r = await fetchJson(`/api/availability/employees/${encodeURIComponent(it.code)}/skills`);
+            personSkills = r.skills || [];
+          } catch { /* skills are optional */ }
+          setCreatePrefill({
+            name: `Next assignment for ${cleanName(it)}`,
+            skills: personSkills.join(", "),
+            description: `${rolloffContext(it)} Find suitable work for them to pick up from then.`,
+          });
+          setSuggestFor(null);
+          setCreateOpen(true);
+        }}
+      />
       <CreateTaskModal
         open={createOpen}
         onClose={() => setCreateOpen(false)}
