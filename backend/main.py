@@ -8654,7 +8654,8 @@ def availability_capacity(department: str = "", weeks_back: int = 4, weeks_fwd: 
 
 
 @app.get("/api/availability/bench-radar")
-def availability_bench_radar(weeks: int = 8, user: dict = Depends(get_current_user)):
+def availability_bench_radar(weeks: int = 8, department: str = "",
+                             user: dict = Depends(get_current_user)):
     """Upcoming roll-offs: who becomes available BEFORE they hit the bench.
 
     The allocation feed carries forward-planned weeks, so we can see capacity
@@ -8668,6 +8669,11 @@ def availability_bench_radar(weeks: int = 8, user: dict = Depends(get_current_us
     horizon = max(2, min(int(weeks or 8), 16))
     dept_scope = _get_user_dept_scope(int(user["sub"]))
     scope_clause = _dept_scope_clause(dept_scope)
+    dept = (department or "").strip().replace("'", "''")
+    dept_clause = (
+        f" AND LOWER(COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified')) = LOWER('{dept}')"
+        if dept else ""
+    )
 
     radar_sql = f"""
         WITH cur AS (
@@ -8681,7 +8687,7 @@ def availability_bench_radar(weeks: int = 8, user: dict = Depends(get_current_us
                  COALESCE(NULLIF(TRIM(EmployeePosition), ''), '') AS position,
                  {_norm_emp_id('Employee_Code')} AS nid
           FROM {_bq_avail('Employee_Data')}
-          WHERE LOWER(Employee_Type) IN ('mto','permanent','probation'){scope_clause}
+          WHERE LOWER(Employee_Type) IN ('mto','permanent','probation'){dept_clause}{scope_clause}
         ),
         wk AS (
           SELECT {_norm_emp_id('a.employee_id')} AS nid, a.Date AS wd,

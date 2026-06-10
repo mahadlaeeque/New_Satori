@@ -1585,26 +1585,31 @@ const TaskDetailModal = ({ task, onClose, onOpenEmployee, onToggleStatus, onDele
 // forward-planned allocation drops to <=50% within the horizon. This is the
 // early-warning view the flat bench list can't give: capacity you can plan
 // for BEFORE it sits idle. Clicking a row opens the employee detail modal.
-const BenchRadarPanel = ({ onOpen }) => {
+const BenchRadarPanel = ({ onOpen, department }) => {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [open, setOpen] = useState(false);
+  const autoOpened = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const d = await fetchJson("/api/availability/bench-radar?weeks=8");
+        const d = await fetchJson(`/api/availability/bench-radar?weeks=8&department=${encodeURIComponent(department || "")}`);
         if (!cancelled) {
           setData(d);
-          // Auto-expand when someone frees up within a fortnight — that's
-          // actionable now; otherwise stay collapsed with the count visible.
-          if ((d.items || []).some(i => i.weeks_until <= 2)) setOpen(true);
+          // Auto-expand once when someone frees up within a fortnight —
+          // that's actionable now; otherwise stay collapsed with the count
+          // visible. (Once only, so changing filters doesn't keep popping it.)
+          if (!autoOpened.current && (d.items || []).some(i => i.weeks_until <= 2)) {
+            autoOpened.current = true;
+            setOpen(true);
+          }
         }
       } catch (e) { if (!cancelled) setError(String(e.message || e)); }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [department]);
 
   if (error || !data) return null; // radar is additive — never block the page
   const items = data.items || [];
@@ -1622,7 +1627,7 @@ const BenchRadarPanel = ({ onOpen }) => {
         <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Radar size={16} style={{ color: C.accentDark }} /> Bench Radar
           <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999, background: items.length ? "#FEF3C7" : C.surfaceAlt, color: items.length ? "#B45309" : C.textMuted }}>
-            {items.length ? `${items.length} rolling off in the next ${data.weeks_horizon} weeks` : `no roll-offs in the next ${data.weeks_horizon} weeks`}
+            {items.length ? `${items.length} rolling off in the next ${data.weeks_horizon} weeks` : `no roll-offs in the next ${data.weeks_horizon} weeks`}{department ? ` · ${department}` : ""}
           </span>
         </span>
         <ChevronRight size={16} style={{ transform: open ? "rotate(90deg)" : "rotate(0)", transition: "transform 0.15s" }} />
@@ -2005,8 +2010,8 @@ const AvailabilityEnginePage = () => {
         ))}
       </div>
 
-      {/* Bench Radar — upcoming roll-offs (collapsible) */}
-      <BenchRadarPanel onOpen={(e) => setDetailEmp(e)} />
+      {/* Bench Radar — upcoming roll-offs (collapsible, follows the dept filter) */}
+      <BenchRadarPanel onOpen={(e) => setDetailEmp(e)} department={deptFilter} />
 
       {/* Tasks panel (collapsible) */}
       <SavedTasksPanel tasks={tasks} onDelete={handleDeleteTask} onToggleStatus={handleToggleStatus} onOpen={setSelectedTask} />
