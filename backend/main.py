@@ -2601,6 +2601,20 @@ Every numeric figure (counts, dates, percentages, hours, names of employees, dep
 This is a multi-turn conversation. Whenever the user has established a SUBJECT or FILTER — a specific employee (e.g. "E-210"), a department (e.g. "Qlik"), a project, or a time period — that filter STAYS IN EFFECT for every follow-up turn until the user clearly changes it. Short follow-ups like "make it month-on-month", "now show timesheet", "what about May", "and their attendance" inherit the SAME employee/department/period as the previous turn. NEVER silently widen the scope to all employees or all departments on a follow-up. Concretely: if the prior turns were about employee E-210 and the user then asks "share timesheet for May 2026", you MUST return E-210's timesheet for May 2026 (WHERE the employee = E-210), NOT a company-wide total. If you are ever unsure whether the filter still applies, keep it and say which subject you're answering for. Re-apply the same WHERE clause in your run_sql every turn.
 ### END CONVERSATION CONTEXT ###
 
+### PERSON DISAMBIGUATION — NEVER GUESS BETWEEN NAMESAKES ###
+When the user names a person ("Hamza", "what time did Hamza check in today"), FIRST resolve the identity against Employee_Data IN THE SAME TURN:
+  SELECT Employee_Code, Resource_Name, EmployeeHierarchyNode, EmployeePosition FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%hamza%' AND LOWER(Employee_Type) IN ('mto','permanent','probation')
+- EXACTLY ONE match → answer the question, and mention who you resolved to ("Hamza Iftikhar, E-1234").
+- MULTIPLE matches → DO NOT answer the question yet and DO NOT pick the most likely one. Reply ONLY with the candidate list — full name, employee code, department, position — and ask which one they mean, e.g.:
+  "We have 3 Hamzas — which one do you mean?
+  - **Hamza Iftikhar** (E-1234) — Qlik · Consultant
+  - **Hamza Ali** (E-2101) — SAP Finance · Senior Consultant
+  - **Hamza Sheikh** (E-0987) — Digital · Analyst"
+  When they answer (or if the name they gave already narrows it to one — "Hamza Iftikhar"), continue with THAT person and keep them as the conversation's subject per the conversation-context rule (do not re-ask on follow-ups).
+- ZERO matches → say no employee by that name was found; suggest checking the spelling.
+This applies to EVERY per-person question — attendance, check-in time, timesheets, allocation, profile — in chat AND voice. Answering with the wrong namesake's data is a serious error; one clarifying question is always better.
+### END PERSON DISAMBIGUATION ###
+
 ### EXACT COLUMN NAMES IN Employee_Data (case-insensitive, BUT UNDERSCORE-SENSITIVE - copy verbatim) ###
 LOWERCASE-WITH-UNDERSCORE columns (these DO have underscores):
 - employee_code          (e.g. 'E-902')
@@ -2899,6 +2913,7 @@ SCOPE: TMC's workforce + sales data only. SAP ERP, inventory, AR/AP, payroll/sal
 STYLE:
   • Voice answers مختصر رکھیں — 2-3 جملے۔ Numbers کو speak-friendly بنائیں ("تقریباً 87 فیصد" نہ کہ "87.523").
   • وقت 12-گھنٹے کی form میں ("صبح 9 بج کر 30 منٹ").
+  • اگر ایک نام کے کئی employees ہوں (مثلاً کئی "Hamza") تو کبھی خود guess نہ کریں — پہلے Employee_Data سے سب matches نکالیں، پھر نام + department بول کر پوچھیں کون سا، اور جواب صرف user کے confirm کرنے کے بعد دیں۔
   • User کی زبان match کریں — اگر وہ English پر switch کریں تو آپ بھی۔
   • کبھی بھی individual salary یا confidential PII expose نہ کریں۔
 - End with a natural conversational hook in Urdu."""
@@ -2920,6 +2935,10 @@ When the user asks ANY question about TMC data:
 DO NOT say "I don't have access" — you DO have access via run_sql. CALL THE TOOL.
 DO NOT say "let me check" without calling the tool — actually call run_sql.
 DO NOT answer from memory.
+
+AMBIGUOUS NAMES — NEVER GUESS BETWEEN NAMESAKES: when the user names a person, FIRST resolve them:
+  run_sql: SELECT Employee_Code, Resource_Name, EmployeeHierarchyNode FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%<name>%' AND LOWER(Employee_Type) IN ('mto','permanent','probation')
+If MORE THAN ONE employee matches, do NOT answer yet — speak the options briefly and ask which one: "We have three Hamzas — Hamza Iftikhar in Qlik, Hamza Ali in SAP Finance, and Hamza Sheikh in Digital. Which one do you mean?" Then answer for the person they pick and remember that choice for follow-ups. If exactly one matches, answer and say their full name.
 
 ═══ run_sql EXAMPLES (mimic these patterns — these cover most question types) ═══
 
@@ -5224,8 +5243,16 @@ DEFAULT FILTERS — apply automatically without asking:
    - "this month" = May 2026; "last month" = April 2026; "Q1" = Jan–Mar 2026;
      "YTD" = Jan 1, 2026 to CURRENT_DATE(); "recent" / "lately" = last 30 days.
    - When the user names a month with no year, assume current year (2026).
-5. Person searches — fuzzy match: WHERE LOWER(employee_name) LIKE '%mahad%'
-   not WHERE employee_name = 'Mahad Laeeque'. People type partial names.
+5. Person searches — fuzzy match AND resolve identity first; NEVER guess
+   between namesakes:
+   - Match fuzzily (LOWER(Resource_Name) LIKE '%hamza%') — people type partial
+     names — but FIRST run an identity lookup on Employee_Data
+     (Employee_Code, Resource_Name, EmployeeHierarchyNode, EmployeePosition).
+   - Exactly ONE match → proceed and state who you resolved to.
+   - MULTIPLE matches → stop and ask which one, listing each candidate's full
+     name, code, department and position. Answer only after the user picks
+     (a fuller name that narrows to one counts as picking). Keep the chosen
+     person as the conversation subject — don't re-ask on follow-ups.
 6. Department, location, position, AM, VP, city, tier — these are STRINGs.
    Always TRIM and COALESCE empties to 'Unspecified' when grouping.
 7. Sales currency — USD values are STRING; SAFE_CAST AS FLOAT64 before sums.
@@ -5338,7 +5365,7 @@ ANALYST_COMMON_SENSE_COMPACT = """ANALYST COMMON SENSE (apply silently):
 - Working-day COUNT for a period = company calendar from Attendance_Data (majority vote per date: a date is a working day when most rows have is_weekend=0 AND is_holiday=0) — same number for every employee; NEVER count weekdays arithmetically or from one employee's own rows.
 - Headcount → COUNT(DISTINCT Employee_Code) on Employee_Data (never COUNT(*) on Attendance_Data).
 - Today is May 2026. "this month"=May 2026; "last month"=April 2026; "Q1"=Jan-Mar 2026.
-- Name searches → fuzzy: LOWER(employee_name) LIKE '%mahad%'.
+- Name searches → fuzzy: LOWER(employee_name) LIKE '%mahad%'. If MULTIPLE employees match a name (namesakes), do NOT guess — list them (name + department) and ask which one before answering; remember the choice for follow-ups.
 - STRING numerics (need SAFE_CAST AS FLOAT64 before AVG/SUM/`* 100`): allocation_percent, TICKET_HOURS, Open_Pipeline, Q1_ACH, col_2026_Target, Q1_Visits, Coverage_Ratio, Hist_Win_Rate, Win_Rate_by.
 - Genuinely numeric (NEVER cast/REPLACE): Open_Deals (INT64), is_* (INT64 0/1).
 - Timesheet_Data.DATE_KEY: type varies — DATE on capability-agent-prod, INT64 YYYYMMDD elsewhere. ALWAYS filter with `COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))) >= <cutoff>`. Plain `PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))` errors when DATE_KEY is DATE (CAST gives ISO "2025-07-01" which `%Y%m%d` rejects).
@@ -10418,7 +10445,7 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "FROM Allocation_Data a JOIN cur ON a.Date=cur.d LEFT JOIN Project_Master p ON CAST(a.project_id AS STRING)=p.Project_Code "
             "WHERE norm(a.employee_id)='<digits>' GROUP BY project HAVING pct>0 ORDER BY pct DESC. "
             "Show ONLY active rows (pct>0); these can sum to >100% (overallocated). Omit 0% rows and the Bench project unless asked. For a SPECIFIC MONTH use that month's latest week (MAX(Date) WHERE Year=Y AND Month=M). NEVER use MAX(allocation_percent) across all history, and never group-by-month-pick-one (that yields 'Qlik Bench 100%').\n"
-            "IDENTITY: resolve the exact Employee_Code by name FIRST — SELECT Employee_Code, Resource_Name FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%<name>%'; there is usually exactly ONE match (e.g. 'Adnan Raza' = E-218). Use THAT code, state it, and never guess a code.\n"
+            "IDENTITY: resolve the exact Employee_Code by name FIRST — SELECT Employee_Code, Resource_Name, EmployeeHierarchyNode FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%<name>%'. If MULTIPLE employees match the name (namesakes like 'Hamza'), do NOT pick one — list the candidates (full name, code, department) and ASK the user which one they mean before answering. If exactly one matches (e.g. 'Adnan Raza' = E-218), use THAT code, state it, and never guess a code.\n"
             "⚠️ BENCH IS PER-WEEK, NOT 'EVER' — the #1 mistake. 'On the bench' / 'zero allocation' means on bench in a SPECIFIC week (default = the CURRENT/latest week), NEVER 'has ever had one 0% week'. Someone allocated this week but benched months ago is NOT on the bench. CURRENT bench population recipe: WITH cur AS (SELECT MAX(Date) d FROM Allocation_Data WHERE Date<=CURRENT_DATE()) SELECT e.Resource_Name FROM Employee_Data e WHERE <active + dept filter> AND NOT EXISTS (SELECT 1 FROM Allocation_Data a, cur WHERE norm(a.employee_id)=norm(e.Employee_Code) AND a.Date=cur.d AND a.Flag='Allocated' AND SAFE_CAST(a.allocation_percent AS FLOAT64)>0).\n"
             "WHEN LISTING WHO IS ON BENCH, do NOT return a flat name list — report each person's WEEKS-ON-BENCH (how many consecutive recent weeks at 0% allocated), because a flat list hides that one person is benched 1 week and another 75. weeks-on-bench recipe: WITH wk AS (SELECT a.Date d, SUM(IF(a.Flag='Allocated',SAFE_CAST(a.allocation_percent AS FLOAT64),0)) alloc FROM Allocation_Data a WHERE norm(a.employee_id)=norm('<code>') AND a.Date<=CURRENT_DATE() GROUP BY d), ranked AS (SELECT d,alloc,ROW_NUMBER() OVER(ORDER BY d DESC) rn FROM wk) SELECT COUNTIF(alloc=0 AND rn <= (SELECT MIN(IF(alloc>0,rn,999999)) FROM ranked)-1) AS weeks_on_bench.\n"
             "WEEK-BY-WEEK allocation for a person (incl. FUTURE weeks): SELECT a.Date AS week_date, ROUND(SUM(IF(a.Flag='Allocated',SAFE_CAST(a.allocation_percent AS FLOAT64),0)),0) AS allocated_pct FROM Allocation_Data a WHERE norm(a.employee_id)=norm('<code>') GROUP BY week_date ORDER BY week_date (alias the date column week_date, NOT 'week' — it collides with the Week column). For 'allocation per week / for which week / upcoming weeks' show this series, not a single snapshot.\n"
@@ -10528,6 +10555,7 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "take MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per project",  # pre latest-weekly-snapshot allocation note
     "restrict to LOWER(attendance_status_text) IN ('present','remote work')",  # pre checkin=NOT NULL (Missing-Punch has a real check-in) note
     "Attendance % = ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1)",  # pre company-calendar working-days note
+    "there is usually exactly ONE match (e.g. 'Adnan Raza' = E-218)",   # pre namesake-disambiguation note
     "Hist_Win_Rate (decimal 0-1 — multiply by 100 for %)",      # pre Hist_Win_Rate-is-STRING note
     "Open_Deals, Win_Rate_by (decimal 0-1).",                   # pre Win_Rate_by-is-STRING note
     "CRM_Pipeline, Coverage_Ratio, Status, Action.",            # pre Coverage_Ratio-is-STRING note
