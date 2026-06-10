@@ -8516,6 +8516,116 @@ def availability_employee_attendance(code: str, days: int = 30,
     }
 
 
+@app.get("/api/availability/capacity")
+def availability_capacity(department: str = "", weeks_back: int = 4, weeks_fwd: int = 12,
+                          user: dict = Depends(get_current_user)):
+    """People × weeks allocation grid for the capacity heatmap.
+
+    Each cell = SUM of Flag='Allocated' allocation_percent for that employee in
+    that weekly snapshot (0 = free/bench, 100 = fully booked, >100 =
+    overallocated). The window is anchored on the latest snapshot at or before
+    today and extends into the FORWARD-PLANNED weeks, so the grid shows
+    upcoming capacity, not just history. Dept-scope aware; the all-company view
+    (no department picked, unrestricted user) is capped to keep the payload and
+    the screen sane — pick a department for the full picture.
+    """
+    wb = max(0, min(int(weeks_back or 0), 26))
+    wf = max(0, min(int(weeks_fwd or 0), 26))
+    dept_scope = _get_user_dept_scope(int(user["sub"]))
+    scope_clause = _dept_scope_clause(dept_scope)
+    dept = (department or "").strip().replace("'", "''")
+    dept_clause = (
+        f" AND LOWER(COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified')) = LOWER('{dept}')"
+        if dept else ""
+    )
+    cap = 400 if (dept or dept_scope) else 80
+
+    cap_sql = f"""
+        WITH cur AS (
+          SELECT MAX(Date) AS d FROM {_bq_avail('Allocation_Data')}
+          WHERE Date <= CURRENT_DATE()
+        ),
+        emp AS (
+          SELECT CAST(Employee_Code AS STRING) AS code,
+                 Resource_Name AS name,
+                 COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS dept,
+                 {_norm_emp_id('Employee_Code')} AS nid
+          FROM {_bq_avail('Employee_Data')}
+          WHERE LOWER(Employee_Type) IN ('mto','permanent','probation'){dept_clause}{scope_clause}
+        ),
+        emp_page AS (
+          SELECT * FROM emp ORDER BY name LIMIT {cap}
+        ),
+        wk AS (
+          SELECT {_norm_emp_id('a.employee_id')} AS nid, a.Date AS wd,
+                 MAX(a.Week) AS wkno,
+                 SUM(IF(a.Flag = 'Allocated', SAFE_CAST(a.allocation_percent AS FLOAT64), 0)) AS pct
+          FROM {_bq_avail('Allocation_Data')} a, cur
+          WHERE a.Date BETWEEN DATE_SUB(cur.d, INTERVAL {wb * 7} DAY)
+                           AND DATE_ADD(cur.d, INTERVAL {wf * 7} DAY)
+          GROUP BY nid, wd
+        )
+        SELECT e.code, e.name, e.dept, w.wd, w.wkno, w.pct,
+               (SELECT COUNT(*) FROM emp) AS total_people,
+               (SELECT d FROM cur) AS cur_week
+        FROM emp_page e
+        LEFT JOIN wk w ON w.nid = e.nid
+        ORDER BY e.name, w.wd
+    """
+    cap_sql = normalize_bq_project(_autofix_dashboard_sql(cap_sql))
+    rc = bq_run_query(cap_sql, max_rows=15000)
+    if "error" in rc:
+        print(f"[/api/availability/capacity] BQ error: {rc['error']}")
+        raise HTTPException(status_code=500, detail=rc["error"])
+
+    rows = rc.get("rows") or []
+    weeks_map = {}          # date str -> week_no
+    people = {}             # code -> {code, name, dept, cells{date: pct}}
+    total_people, cur_week = 0, None
+    for row in rows:
+        total_people = int(float(row.get("total_people") or 0))
+        cur_week = str(row.get("cur_week")) if row.get("cur_week") else cur_week
+        code = row.get("code") or ""
+        p = people.setdefault(code, {
+            "code": code,
+            "name": row.get("name") or code,
+            "dept": row.get("dept") or "Unspecified",
+            "cells": {},
+        })
+        wd = row.get("wd")
+        if wd:
+            wd = str(wd)
+            try:
+                weeks_map.setdefault(wd, int(float(row.get("wkno") or 0)))
+            except Exception:
+                weeks_map.setdefault(wd, 0)
+            try:
+                p["cells"][wd] = round(float(row.get("pct") or 0))
+            except Exception:
+                p["cells"][wd] = 0
+    weeks = sorted(weeks_map.keys())
+    people_out = [
+        {
+            "code": p["code"],
+            "name": p["name"],
+            "dept": p["dept"],
+            # Aligned to `weeks`; a person with no snapshot row that week
+            # has no allocation feed entry — render as 0 (free).
+            "pcts": [p["cells"].get(w, 0) for w in weeks],
+        }
+        for p in people.values()
+    ]
+    people_out.sort(key=lambda x: x["name"].lower())
+    return {
+        "weeks": weeks,
+        "week_nos": [weeks_map[w] for w in weeks],
+        "current_week": cur_week,
+        "people": people_out,
+        "total_people": total_people,
+        "truncated": total_people > len(people_out),
+    }
+
+
 # ─── Employee skills (practice-head assigned, used by find-best-fit) ────────
 def _get_employee_skills(emp_code: str) -> list[str]:
     """Skills assigned to one employee (by warehouse Employee_Code), sorted."""

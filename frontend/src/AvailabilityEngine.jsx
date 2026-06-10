@@ -27,7 +27,8 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Users, Search, Plus, X, Sparkles, MapPin, Briefcase, Clock,
   Activity, Filter, AlertCircle, CheckCircle, Loader2, Trash2,
-  ArrowRight, TrendingUp, ChevronRight, FileText, Star, Calendar
+  ArrowRight, TrendingUp, ChevronRight, FileText, Star, Calendar,
+  Download, LayoutGrid, Grid3x3
 } from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
@@ -741,6 +742,139 @@ const AttendanceTab = ({ data, loading, error }) => {
   );
 };
 
+// ─── Resource one-pager (PDF export) ───
+// A4-proportioned, staffing-ready profile sheet rendered off-screen and
+// captured with html2canvas → jsPDF. This is a PRINT artifact: colors are
+// deliberately hardcoded light (the theme-token convention doesn't apply —
+// a PDF must look identical regardless of the app's dark/light mode).
+const OP = {
+  ink: "#0F172A", sub: "#475569", muted: "#94A3B8", line: "#E2E8F0",
+  panel: "#F8FAFC", green: "#8AC441", greenDark: "#68933F",
+};
+const ResourceOnePager = ({ emp, detail, att, innerRef }) => {
+  const prof = (detail && detail.profile) || {};
+  const s = (att && att.summary) || null;
+  const projects = ((detail && detail.projects) || []).filter(p => !p.on_bench).slice(0, 6);
+  const ts = (detail && detail.timesheet) || {};
+  const topTs = (ts.by_project || []).slice(0, 5);
+  const skills = (detail && detail.skills) || [];
+  const today = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+  const head = { fontSize: 11, fontWeight: 800, color: OP.greenDark, textTransform: "uppercase", letterSpacing: "1px", margin: "0 0 8px" };
+  const kpi = (label, value, sub) => (
+    <div style={{ flex: 1, background: OP.panel, border: `1px solid ${OP.line}`, borderRadius: 8, padding: "10px 12px" }}>
+      <div style={{ fontSize: 9, fontWeight: 800, color: OP.muted, textTransform: "uppercase", letterSpacing: "0.5px" }}>{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 800, color: OP.ink, marginTop: 3 }}>{value}</div>
+      {sub && <div style={{ fontSize: 9.5, color: OP.sub, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+  return (
+    <div ref={innerRef} style={{
+      position: "fixed", left: -10000, top: 0, width: 794, background: "#ffffff",
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: OP.ink, zIndex: -1,
+    }}>
+      {/* Brand band */}
+      <div style={{ background: `linear-gradient(135deg, ${OP.green}, ${OP.greenDark})`, padding: "14px 36px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ color: "#fff", fontWeight: 800, fontSize: 15, letterSpacing: "0.5px" }}>Satori · TMC Capability Intelligence</div>
+        <div style={{ color: "#fff", fontSize: 11, opacity: 0.9 }}>Resource Profile · {today}</div>
+      </div>
+
+      <div style={{ padding: "26px 36px 18px" }}>
+        {/* Identity */}
+        <div style={{ display: "flex", alignItems: "center", gap: 16, paddingBottom: 18, borderBottom: `2px solid ${OP.line}` }}>
+          <div style={{
+            width: 58, height: 58, borderRadius: "50%", background: `${OP.green}30`, color: OP.greenDark,
+            display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 22, flexShrink: 0,
+          }}>{initials(cleanName(emp))}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 24, fontWeight: 800 }}>{cleanName(emp)}</div>
+            <div style={{ fontSize: 13, color: OP.sub, marginTop: 3 }}>
+              {[emp.position, emp.department, emp.location].filter(Boolean).join("  ·  ")}
+            </div>
+            {prof.email && <div style={{ fontSize: 12, color: OP.greenDark, fontWeight: 600, marginTop: 2 }}>{prof.email}</div>}
+          </div>
+          <div style={{ textAlign: "right", flexShrink: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: OP.sub, background: OP.panel, border: `1px solid ${OP.line}`, borderRadius: 999, padding: "4px 12px", display: "inline-block" }}>{emp.code}</div>
+            {prof.tenure_label && (
+              <div style={{ fontSize: 11, color: OP.sub, marginTop: 6 }}>
+                Tenure <b>{prof.tenure_label}</b>{prof.joining_date ? ` · since ${prof.joining_date}` : ""}
+              </div>
+            )}
+            {prof.employee_type && <div style={{ fontSize: 11, color: OP.muted, marginTop: 2 }}>{prof.employee_type}</div>}
+          </div>
+        </div>
+
+        {/* KPI row */}
+        <div style={{ display: "flex", gap: 10, margin: "16px 0 20px" }}>
+          {kpi("Allocation", `${Math.round(Number(emp.allocation_pct || 0))}%`, emp.status || "")}
+          {kpi("Hours / 90d", `${Math.round(Number(ts.total_hrs_90d || emp.hrs_90d || 0))}h`, `${(ts.by_project || []).length} projects logged`)}
+          {s && kpi("Attendance / 30d", s.attendance_rate != null ? `${s.attendance_rate}%` : "—", `${s.attended || 0} of ${s.working_days || 0} working days`)}
+          {s && kpi("Late arrivals / 30d", `${s.late_arrivals || 0}`, s.avg_checkin ? `avg in ${s.avg_checkin}` : "")}
+        </div>
+
+        {/* Skills */}
+        <div style={{ marginBottom: 20 }}>
+          <h3 style={head}>Skills</h3>
+          {skills.length ? (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {skills.map(sk => (
+                <span key={sk} style={{ fontSize: 11, fontWeight: 700, padding: "4px 12px", borderRadius: 999, background: `${OP.green}1F`, color: OP.greenDark, border: `1px solid ${OP.green}55` }}>{sk}</span>
+              ))}
+            </div>
+          ) : <div style={{ fontSize: 11.5, color: OP.muted }}>No skills tagged yet.</div>}
+        </div>
+
+        {/* Current allocations */}
+        <div style={{ marginBottom: 20 }}>
+          <h3 style={head}>Current project allocations</h3>
+          {projects.length ? projects.map((p, i) => {
+            const pct = Math.max(0, Math.min(100, Number(p.allocation_pct || 0)));
+            return (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 0", borderBottom: i < projects.length - 1 ? `1px solid ${OP.line}` : "none" }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700 }}>{p.project_name || p.project_id}</div>
+                  <div style={{ fontSize: 10.5, color: OP.muted }}>{[p.client_name, p.project_type, p.competency].filter(Boolean).join(" · ") || " "}</div>
+                </div>
+                <div style={{ width: 130 }}>
+                  <div style={{ height: 6, background: OP.panel, border: `1px solid ${OP.line}`, borderRadius: 999, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${pct}%`, background: OP.green }} />
+                  </div>
+                </div>
+                <div style={{ width: 44, textAlign: "right", fontSize: 12.5, fontWeight: 800 }}>{Math.round(Number(p.allocation_pct || 0))}%</div>
+              </div>
+            );
+          }) : <div style={{ fontSize: 11.5, color: OP.muted }}>No active project allocations this week.</div>}
+        </div>
+
+        {/* Recent delivery */}
+        <div style={{ marginBottom: 8 }}>
+          <h3 style={head}>Recent delivery — logged hours (last 90 days)</h3>
+          {topTs.length ? topTs.map((t, i) => {
+            const total = Number(ts.total_hrs_90d || 1);
+            const bar = Math.min(100, (Number(t.hrs || 0) / total) * 100);
+            return (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "6px 0", borderBottom: i < topTs.length - 1 ? `1px solid ${OP.line}` : "none" }}>
+                <div style={{ flex: 1, fontSize: 12, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.project}</div>
+                <div style={{ width: 130 }}>
+                  <div style={{ height: 6, background: OP.panel, border: `1px solid ${OP.line}`, borderRadius: 999, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${bar}%`, background: OP.greenDark }} />
+                  </div>
+                </div>
+                <div style={{ width: 50, textAlign: "right", fontSize: 12, fontWeight: 800 }}>{Math.round(Number(t.hrs || 0))}h</div>
+              </div>
+            );
+          }) : <div style={{ fontSize: 11.5, color: OP.muted }}>No timesheet entries in the last 90 days.</div>}
+        </div>
+      </div>
+
+      {/* Footer */}
+      <div style={{ borderTop: `1px solid ${OP.line}`, padding: "10px 36px", display: "flex", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 9.5, color: OP.muted }}>Generated by Satori from live workforce data · Internal use only</span>
+        <span style={{ fontSize: 9.5, color: OP.muted }}>tmcltd.com</span>
+      </div>
+    </div>
+  );
+};
+
 const EmployeeDetailModal = ({ emp, onClose }) => {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -804,6 +938,36 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
     })();
     return () => { cancelled = true; };
   }, [emp]);
+
+  // ── One-pager PDF export ──
+  // The ResourceOnePager mounts off-screen only while exporting; html2canvas
+  // captures it at 2× and jsPDF wraps it as a single A4 page (scaled to fit).
+  const [exporting, setExporting] = useState(false);
+  const onePagerRef = useRef(null);
+  const exportPdf = async () => {
+    if (exporting || !detail || !emp) return;
+    setExporting(true);
+    try {
+      await new Promise(r => setTimeout(r, 120)); // let the hidden sheet mount + paint
+      const el = onePagerRef.current;
+      if (!el) throw new Error("export node missing");
+      const html2canvas = (await import("html2canvas")).default;
+      const { jsPDF } = await import("jspdf");
+      const canvas = await html2canvas(el, { backgroundColor: "#ffffff", scale: 2, useCORS: true, logging: false });
+      const pdf = new jsPDF({ unit: "pt", format: "a4" });
+      const pw = pdf.internal.pageSize.getWidth();
+      const ph = pdf.internal.pageSize.getHeight();
+      const ratio = canvas.height / canvas.width;
+      let w = pw, h = pw * ratio;
+      if (h > ph) { h = ph; w = ph / ratio; } // taller than A4 → fit height
+      pdf.addImage(canvas.toDataURL("image/png"), "PNG", (pw - w) / 2, 0, w, h);
+      pdf.save(`${(cleanName(emp) || "resource").replace(/[^\w-]+/g, "_")}_profile.pdf`);
+    } catch (e) {
+      console.error("one-pager export failed", e);
+    } finally {
+      setExporting(false);
+    }
+  };
 
   // ── Skills (practice-head assigned) ──
   const [skills, setSkills] = useState([]);
@@ -1169,12 +1333,22 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
           </>}
         </div>
 
-        <div style={{ padding: "12px 24px", borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "flex-end", background: C.surfaceAlt }}>
+        <div style={{ padding: "12px 24px", borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", background: C.surfaceAlt }}>
+          <button onClick={exportPdf} disabled={exporting || !detail} title="Download a staffing-ready PDF profile" style={{
+            padding: "9px 16px", borderRadius: 8, border: "none",
+            background: `linear-gradient(135deg, ${C.accent}, ${C.accentDark})`, color: "#fff",
+            fontWeight: 700, fontSize: 13, cursor: (exporting || !detail) ? "default" : "pointer",
+            display: "inline-flex", alignItems: "center", gap: 6, opacity: (exporting || !detail) ? 0.6 : 1,
+          }}>
+            {exporting ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
+            {exporting ? "Exporting…" : "Export one-pager (PDF)"}
+          </button>
           <button onClick={onClose} style={{
             padding: "9px 16px", borderRadius: 8, border: `1px solid ${C.border}`,
             background: C.surface, color: C.textSecondary, fontWeight: 600, fontSize: 13, cursor: "pointer",
           }}>Close</button>
         </div>
+        {exporting && <ResourceOnePager emp={emp} detail={detail} att={att} innerRef={onePagerRef} />}
       </div>
     </div>
   );
@@ -1406,6 +1580,120 @@ const TaskDetailModal = ({ task, onClose, onOpenEmployee, onToggleStatus, onDele
 };
 
 // ─── Main Page ───
+// ─── Capacity heatmap (people × weeks) ───
+// Each cell = that week's total Flag='Allocated' percent from the weekly
+// allocation feed (which extends into FORWARD-PLANNED weeks) — green is FREE
+// capacity, red is fully booked, deep red is overallocated, matching the
+// engine's existing bench=green / allocated=red vocabulary. Semantic status
+// tints are intentionally literal hex (same rule as the status badges).
+const heatCell = (pct) => {
+  if (pct <= 0)   return { bg: "#DCFCE7", fg: "#0E7E3E" };   // free
+  if (pct < 50)   return { bg: "#FEF9C3", fg: "#854D0E" };   // lightly loaded
+  if (pct < 100)  return { bg: "#FDE68A", fg: "#92400E" };   // partial
+  if (pct <= 110) return { bg: "#FECACA", fg: "#9F1239" };   // fully booked
+  return { bg: "#E11D48", fg: "#FFFFFF" };                    // overallocated
+};
+
+const CapacityHeatmap = ({ department, searchTerm, onOpen }) => {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true); setError(null);
+      try {
+        const d = await fetchJson(`/api/availability/capacity?department=${encodeURIComponent(department || "")}`);
+        if (!cancelled) setData(d);
+      } catch (e) { if (!cancelled) setError(String(e.message || e)); }
+      finally { if (!cancelled) setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [department]);
+
+  if (loading && !data) {
+    return <div style={{ padding: 40, textAlign: "center", color: C.textMuted }}><Loader2 size={24} className="spin" /><div style={{ marginTop: 8 }}>Loading capacity grid…</div></div>;
+  }
+  if (error) {
+    return <div style={{ padding: "10px 14px", background: "#FEE2E2", color: "#991B1B", borderRadius: 8, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}><AlertCircle size={16} /> {error}</div>;
+  }
+  if (!data) return null;
+
+  const weeks = data.weeks || [];
+  const weekNos = data.week_nos || [];
+  const cur = data.current_week;
+  const firstFuture = weeks.findIndex(w => cur && w > cur);
+  const term = (searchTerm || "").trim().toLowerCase();
+  const people = (data.people || []).filter(p =>
+    !term || `${p.name} ${p.code} ${p.dept}`.toLowerCase().includes(term));
+
+  const legend = [
+    ["Free", heatCell(0)], ["Partial", heatCell(60)],
+    ["Booked", heatCell(100)], ["Overallocated", heatCell(120)],
+  ];
+  const CELL_W = 34;
+
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          {legend.map(([label, c0]) => (
+            <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: C.textSecondary, fontWeight: 600 }}>
+              <span style={{ width: 12, height: 12, borderRadius: 3, background: c0.bg, border: `1px solid ${C.border}` }} /> {label}
+            </span>
+          ))}
+        </div>
+        <span style={{ fontSize: 11, color: C.accent, fontWeight: 600 }}>← past · now (dashed) · planned →</span>
+      </div>
+      {data.truncated && (
+        <div style={{ fontSize: 12, color: "#B45309", fontWeight: 600, marginBottom: 10 }}>
+          Showing {people.length} of {data.total_people} people — pick a department to see everyone.
+        </div>
+      )}
+      {people.length === 0 ? (
+        <div style={{ padding: 30, textAlign: "center", color: C.textMuted, fontSize: 13 }}>No people match the current filters.</div>
+      ) : (
+        <div style={{ overflowX: "auto", paddingBottom: 4 }}>
+          {/* Header row: week numbers */}
+          <div style={{ display: "grid", gridTemplateColumns: `230px repeat(${weeks.length}, ${CELL_W}px)`, gap: 2, alignItems: "center", marginBottom: 2 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>Resource · week #</div>
+            {weeks.map((w, i) => (
+              <div key={w} title={w} style={{
+                fontSize: 9.5, color: i === firstFuture ? C.accent : C.textMuted, textAlign: "center", fontWeight: 700,
+                borderLeft: i === firstFuture ? `2px dashed ${C.accent}` : "2px solid transparent",
+              }}>{weekNos[i] || ""}</div>
+            ))}
+          </div>
+          {people.map((p) => (
+            <div key={p.code} style={{ display: "grid", gridTemplateColumns: `230px repeat(${weeks.length}, ${CELL_W}px)`, gap: 2, alignItems: "center", marginBottom: 2 }}>
+              <button onClick={() => onOpen({ code: p.code, name: p.name, department: p.dept })} title={`Open ${cleanName(p)}`} style={{
+                textAlign: "left", background: "transparent", border: "none", cursor: "pointer", padding: "2px 4px",
+                fontSize: 12, fontWeight: 600, color: C.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              }}>
+                {cleanName(p)} <span style={{ color: C.textMuted, fontWeight: 500 }}>· {p.code}</span>
+              </button>
+              {weeks.map((w, i) => {
+                const pct = Math.round(Number(p.pcts?.[i] ?? 0));
+                const c0 = heatCell(pct);
+                const future = firstFuture >= 0 && i >= firstFuture;
+                return (
+                  <div key={w} title={`${cleanName(p)} · ${w} · ${pct}%${future ? " (planned)" : ""}`} style={{
+                    height: 24, borderRadius: 4, background: c0.bg, opacity: future ? 0.65 : 1,
+                    borderLeft: i === firstFuture ? `2px dashed ${C.accent}` : "none",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 9, fontWeight: 800, color: c0.fg, fontVariantNumeric: "tabular-nums",
+                  }}>{pct > 100 ? pct : ""}</div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const AvailabilityEnginePage = () => {
   const [kpis, setKpis] = useState(null);
   const [employees, setEmployees] = useState([]);
@@ -1435,6 +1723,9 @@ const AvailabilityEnginePage = () => {
 
   // Employee detail drawer state
   const [detailEmp, setDetailEmp] = useState(null);
+
+  // View mode: card grid | capacity heatmap (people × weeks)
+  const [viewMode, setViewMode] = useState("cards");
 
   // Saved-task detail modal state
   const [selectedTask, setSelectedTask] = useState(null);
@@ -1665,13 +1956,37 @@ const AvailabilityEnginePage = () => {
         </button>
       </div>
 
-      {/* Employee grid */}
+      {/* View toggle: cards | capacity heatmap */}
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+        <div style={{ display: "inline-flex", background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 10, padding: 3, gap: 2 }}>
+          {[["cards", "Cards", LayoutGrid], ["heatmap", "Capacity heatmap", Grid3x3]].map(([key, label, Icon]) => (
+            <button key={key} onClick={() => setViewMode(key)} style={{
+              padding: "7px 14px", borderRadius: 8, border: "none", cursor: "pointer",
+              background: viewMode === key ? C.surface : "transparent",
+              color: viewMode === key ? C.accentDark : C.textMuted,
+              fontWeight: 700, fontSize: 12.5, display: "inline-flex", alignItems: "center", gap: 6,
+              boxShadow: viewMode === key ? "0 1px 2px rgba(0,0,0,0.08)" : "none",
+            }}>
+              <Icon size={14} /> {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Employee grid / heatmap */}
       {errorList && (
         <div style={{ padding: "10px 14px", background: "#FEE2E2", color: "#991B1B", borderRadius: 8, fontSize: 13, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
           <AlertCircle size={16} /> {errorList}
         </div>
       )}
-      {loadingList ? (
+      {viewMode === "heatmap" ? (
+        <>
+          <CapacityHeatmap department={deptFilter} searchTerm={searchTerm} onOpen={(e) => setDetailEmp(e)} />
+          <div style={{ marginTop: 16, fontSize: 12, color: C.textMuted, textAlign: "center" }}>
+            Weekly allocated % per person, past and forward-planned weeks · click a name to drill in · status and skill filters apply to the card view
+          </div>
+        </>
+      ) : loadingList ? (
         <div style={{ padding: 40, textAlign: "center", color: C.textMuted }}>
           <Loader2 size={24} className="spin" /> <div style={{ marginTop: 8 }}>Loading employees…</div>
         </div>
@@ -1686,9 +2001,11 @@ const AvailabilityEnginePage = () => {
         </div>
       )}
 
-      <div style={{ marginTop: 16, fontSize: 12, color: C.textMuted, textAlign: "center" }}>
-        Showing {filteredEmployees.length} of {employees.length} active employees · status from current project allocations (real billable vs bench, latest actual weeks)
-      </div>
+      {viewMode === "cards" && (
+        <div style={{ marginTop: 16, fontSize: 12, color: C.textMuted, textAlign: "center" }}>
+          Showing {filteredEmployees.length} of {employees.length} active employees · status from current project allocations (real billable vs bench, latest actual weeks)
+        </div>
+      )}
 
       <CreateTaskModal
         open={createOpen}
