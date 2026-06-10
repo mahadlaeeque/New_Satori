@@ -749,18 +749,21 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
   const [weeklyLoading, setWeeklyLoading] = useState(false);
 
   // Tabs: overview (existing detail) | attendance (last 30 days).
-  // Attendance is fetched lazily on first tab activation — it's a separate
-  // BQ query and most opens never leave the overview.
+  // Attendance is fetched when the modal opens, keyed on emp only — the
+  // previous lazy-on-tab version listed its own loading flag in the effect
+  // deps, so setting it re-ran the effect and the cleanup cancelled the
+  // in-flight fetch: the result was discarded and the tab showed
+  // "Loading…" forever. Same proven pattern as the weekly/detail fetches.
   const [tab, setTab] = useState("overview");
   const [att, setAtt] = useState(null);
   const [attLoading, setAttLoading] = useState(false);
   const [attError, setAttError] = useState(null);
-  useEffect(() => { setTab("overview"); setAtt(null); setAttError(null); }, [emp]);
+  useEffect(() => { setTab("overview"); }, [emp]);
   useEffect(() => {
-    if (!emp || tab !== "attendance" || att || attLoading) return;
+    if (!emp) { setAtt(null); setAttError(null); return; }
     let cancelled = false;
     (async () => {
-      setAttLoading(true); setAttError(null);
+      setAttLoading(true); setAtt(null); setAttError(null);
       try {
         const a = await fetchJson(`/api/availability/employees/${encodeURIComponent(emp.code)}/attendance?days=30`);
         if (!cancelled) setAtt(a);
@@ -768,7 +771,7 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
       finally { if (!cancelled) setAttLoading(false); }
     })();
     return () => { cancelled = true; };
-  }, [emp, tab, att, attLoading]);
+  }, [emp]);
 
   useEffect(() => {
     if (!emp) { setWeekly(null); return; }
