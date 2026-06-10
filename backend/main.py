@@ -8415,12 +8415,12 @@ def availability_employee_attendance(code: str, days: int = 30,
           GROUP BY a.attendance_date
         )
         SELECT cal.attendance_date AS d,
-               cal.is_off,
+               CAST(cal.is_off AS INT64) AS is_off,
                m.status, m.leave_type,
                m.f_present, m.f_absent, m.f_leave, m.f_remote, m.f_missing,
                FORMAT_TIME('%H:%M', TIME(m.cints)) AS cin,
                FORMAT_TIME('%H:%M', TIME(m.coutts)) AS cout,
-               TIME(m.cints) > TIME '09:30:00' AS is_late,
+               IF(TIME(m.cints) > TIME '09:30:00', 1, 0) AS is_late,
                ROUND(SAFE_DIVIDE(TIMESTAMP_DIFF(m.coutts, m.cints, MINUTE), 60.0), 1) AS worked_hrs
         FROM cal
         LEFT JOIN mine m ON cal.attendance_date = m.attendance_date
@@ -8439,21 +8439,35 @@ def availability_employee_attendance(code: str, days: int = 30,
         except Exception:
             return None
 
+    def _iv(v):
+        # bq_run_query stringifies every value (str(row[col])), so BOOL/INT
+        # columns arrive as 'True'/'False'/'1'/'0' strings — and a naive
+        # bool('False') is True. Parse defensively to a 0/1 int.
+        s = str(v).strip().lower() if v is not None else ""
+        if s in ("", "none", "null", "false"):
+            return 0
+        if s == "true":
+            return 1
+        try:
+            return int(float(s))
+        except Exception:
+            return 0
+
     days_detail = []
     working_days = present = remote = on_leave = absent = missing = late = 0
     cin_mins, cout_mins = [], []
     total_worked = 0.0
     for row in (ra.get("rows") or []):
-        is_off = bool(row.get("is_off"))
+        is_off = _iv(row.get("is_off")) == 1
         has_row = row.get("status") is not None
         if not is_off:
             working_days += 1
-            present  += int(row.get("f_present") or 0)
-            remote   += int(row.get("f_remote") or 0)
-            on_leave += int(row.get("f_leave") or 0)
-            absent   += int(row.get("f_absent") or 0)
-            missing  += int(row.get("f_missing") or 0)
-        if row.get("is_late"):
+            present  += _iv(row.get("f_present"))
+            remote   += _iv(row.get("f_remote"))
+            on_leave += _iv(row.get("f_leave"))
+            absent   += _iv(row.get("f_absent"))
+            missing  += _iv(row.get("f_missing"))
+        if _iv(row.get("is_late")) == 1:
             late += 1
         cm, om = _mins(row.get("cin")), _mins(row.get("cout"))
         if cm is not None:
@@ -8470,7 +8484,7 @@ def availability_employee_attendance(code: str, days: int = 30,
             "leave_type":     row.get("leave_type") or None,
             "checkin":        row.get("cin") or None,
             "checkout":       row.get("cout") or None,
-            "late":           bool(row.get("is_late")),
+            "late":           _iv(row.get("is_late")) == 1,
             "worked_hrs":     float(wh) if wh is not None else None,
         })
 
