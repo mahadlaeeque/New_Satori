@@ -1588,25 +1588,29 @@ const TaskDetailModal = ({ task, onClose, onOpenEmployee, onToggleStatus, onDele
 
 // ─── Main Page ───
 // ─── Suggest-work modal (Bench Radar → "Find work") ───
-// Satori first proposes concrete, skill-anchored task ideas for the person
-// (department-tailored when no skills are tagged). Picking one drops it into
-// Create Task / Find Best Fit pre-filled; "Write my own" skips to the blank
-// prefilled form. The avatar thinks while Gemini works.
+// Satori proposes concrete, skill-anchored task ideas for the person
+// (department-tailored when no skills are tagged). The suggestions ARE the
+// product — this is deliberately decoupled from Find Best Fit (which ranks
+// candidates for a task; the inverse problem). Each idea can optionally be
+// saved straight to Saved Tasks with this person assigned.
 const rolloffContext = (it) =>
   `${cleanName(it)} (${it.code}${it.dept ? `, ${it.dept}` : ""}${it.position ? `, ${it.position}` : ""}) ` +
   `rolls off ${(it.current_projects || []).slice(0, 2).join(", ") || "their current project"} ` +
   `around the week of ${it.rolloff_week} (${it.current_pct}% → ${it.pct_at_rolloff}% allocated).`;
 
-const SuggestWorkModal = ({ item, onClose, onPick, onCustom }) => {
+const SuggestWorkModal = ({ item, onClose, onSaved }) => {
   const [sugs, setSugs] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [nonce, setNonce] = useState(0);      // bump = "More ideas" re-roll
+  const [savedIdx, setSavedIdx] = useState(new Set());
+  const [savingIdx, setSavingIdx] = useState(null);
 
   useEffect(() => {
-    if (!item) { setSugs(null); setError(null); return; }
+    if (!item) { setSugs(null); setError(null); setSavedIdx(new Set()); return; }
     let cancelled = false;
     (async () => {
-      setLoading(true); setError(null); setSugs(null);
+      setLoading(true); setError(null); setSugs(null); setSavedIdx(new Set());
       try {
         const r = await fetchJson("/api/availability/suggest-work", {
           method: "POST",
@@ -1620,7 +1624,39 @@ const SuggestWorkModal = ({ item, onClose, onPick, onCustom }) => {
       finally { if (!cancelled) setLoading(false); }
     })();
     return () => { cancelled = true; };
-  }, [item]);
+  }, [item, nonce]);
+
+  const saveAsTask = async (s, i) => {
+    if (savingIdx != null || !item) return;
+    setSavingIdx(i);
+    try {
+      await fetchJson("/api/availability/tasks", {
+        method: "POST",
+        body: JSON.stringify({
+          name: s.title,
+          description: `${s.description} ${rolloffContext(item)}`,
+          skills: s.skills || "",
+          department: item.dept || "",
+          assigned_employee_codes: [item.code],
+          ai_reasoning: {
+            [item.code]: {
+              rank: 1,
+              reasoning: s.description,
+              name: item.name || null,
+              position: item.position || null,
+              department: item.dept || null,
+            },
+          },
+        }),
+      });
+      setSavedIdx(prev => { const n = new Set(prev); n.add(i); return n; });
+      onSaved && onSaved();
+    } catch (e) {
+      alert("Failed to save task: " + (e.message || e));
+    } finally {
+      setSavingIdx(null);
+    }
+  };
 
   if (!item) return null;
   return (
@@ -1640,7 +1676,7 @@ const SuggestWorkModal = ({ item, onClose, onPick, onCustom }) => {
             </h2>
             <div style={{ fontSize: 12.5, color: C.textSecondary, marginTop: 3 }}>
               {loading ? "Looking at their skills, role and current projects…"
-                : "Skill-matched suggestions — pick one, or write your own."}
+                : "Where they'd do great next — matched to their skills and department."}
             </div>
           </div>
           <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.textMuted, padding: 4 }}><X size={20} /></button>
@@ -1659,40 +1695,49 @@ const SuggestWorkModal = ({ item, onClose, onPick, onCustom }) => {
             </div>
           )}
           {!loading && (sugs || []).map((s, i) => (
-            <button key={i} onClick={() => onPick(s, item)} style={{
-              width: "100%", textAlign: "left", padding: "14px 16px", marginBottom: 10,
+            <div key={i} style={{
+              padding: "14px 16px", marginBottom: 10,
               background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12,
-              cursor: "pointer", transition: "all 0.15s",
-            }}
-              onMouseEnter={e => { e.currentTarget.style.borderColor = C.accent; e.currentTarget.style.boxShadow = "0 4px 14px rgba(0,0,0,0.07)"; }}
-              onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.boxShadow = "none"; }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: C.textPrimary }}>{s.title}</div>
-                <span style={{ fontSize: 11, fontWeight: 700, color: C.accentDark, display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-                  Use this <ArrowRight size={12} />
-                </span>
-              </div>
+            }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: C.textPrimary }}>{s.title}</div>
               <div style={{ fontSize: 12.5, color: C.textSecondary, lineHeight: 1.5, marginTop: 5 }}>{s.description}</div>
-              {s.skills && (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 8 }}>
-                  {s.skills.split(",").map(sk => sk.trim()).filter(Boolean).slice(0, 6).map(sk => (
+              <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 10, marginTop: 9 }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                  {(s.skills || "").split(",").map(sk => sk.trim()).filter(Boolean).slice(0, 6).map(sk => (
                     <span key={sk} style={{ fontSize: 10.5, fontWeight: 700, padding: "3px 9px", borderRadius: 999, background: `${C.accent}18`, color: C.accentDark }}>{sk}</span>
                   ))}
                 </div>
-              )}
-            </button>
+                {savedIdx.has(i) ? (
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: "#0E7E3E", display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+                    <CheckCircle size={13} /> Saved to tasks
+                  </span>
+                ) : (
+                  <button onClick={() => saveAsTask(s, i)} disabled={savingIdx != null}
+                    title={`Save as a task assigned to ${cleanName(item)}`} style={{
+                      padding: "5px 11px", borderRadius: 8, border: `1px solid ${C.accent}55`,
+                      background: `${C.accent}12`, color: C.accentDark, fontWeight: 700, fontSize: 11.5,
+                      cursor: savingIdx != null ? "default" : "pointer", whiteSpace: "nowrap", flexShrink: 0,
+                      display: "inline-flex", alignItems: "center", gap: 4, opacity: savingIdx != null && savingIdx !== i ? 0.5 : 1,
+                    }}>
+                    {savingIdx === i ? <Loader2 size={12} className="spin" /> : <Plus size={12} />} Save as task
+                  </button>
+                )}
+              </div>
+            </div>
           ))}
         </div>
 
         <div style={{ padding: "12px 22px", borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", background: C.surfaceAlt }}>
-          <button onClick={() => onCustom(item)} style={{
+          <button onClick={() => setNonce(n => n + 1)} disabled={loading} style={{
             padding: "9px 14px", borderRadius: 8, border: `1px solid ${C.border}`,
-            background: C.surface, color: C.textSecondary, fontWeight: 600, fontSize: 13, cursor: "pointer",
-          }}>Write my own instead</button>
+            background: C.surface, color: C.textSecondary, fontWeight: 600, fontSize: 13,
+            cursor: loading ? "default" : "pointer", display: "inline-flex", alignItems: "center", gap: 6,
+            opacity: loading ? 0.6 : 1,
+          }}><Sparkles size={13} /> More ideas</button>
           <button onClick={onClose} style={{
-            padding: "9px 14px", borderRadius: 8, border: "none",
-            background: "transparent", color: C.textMuted, fontWeight: 600, fontSize: 13, cursor: "pointer",
-          }}>Cancel</button>
+            padding: "9px 16px", borderRadius: 8, border: "none",
+            background: C.accent, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer",
+          }}>Done</button>
         </div>
       </div>
     </div>
@@ -2271,30 +2316,12 @@ const AvailabilityEnginePage = () => {
       <SuggestWorkModal
         item={suggestFor}
         onClose={() => setSuggestFor(null)}
-        onPick={(s, it) => {
-          setCreatePrefill({
-            name: s.title,
-            skills: s.skills || "",
-            description: `${s.description} ${rolloffContext(it)}`,
-          });
-          setSuggestFor(null);
-          setCreateOpen(true);
-        }}
-        onCustom={async (it) => {
-          // Skip the suggestions — open the plain prefilled form with the
-          // person's tagged skills and roll-off context.
-          let personSkills = [];
+        onSaved={async () => {
+          // A suggestion was saved as a task — refresh the Saved Tasks panel.
           try {
-            const r = await fetchJson(`/api/availability/employees/${encodeURIComponent(it.code)}/skills`);
-            personSkills = r.skills || [];
-          } catch { /* skills are optional */ }
-          setCreatePrefill({
-            name: `Next assignment for ${cleanName(it)}`,
-            skills: personSkills.join(", "),
-            description: `${rolloffContext(it)} Find suitable work for them to pick up from then.`,
-          });
-          setSuggestFor(null);
-          setCreateOpen(true);
+            const t = await fetchJson("/api/availability/tasks");
+            setTasks(t.tasks || []);
+          } catch { /* panel refreshes on next load */ }
         }}
       />
       <CreateTaskModal
