@@ -2622,7 +2622,12 @@ EXACT COLUMN NAMES IN Attendance_Data (all lowercase or special):
 - employee_id (INT64 sequence number - NOT A JOIN KEY)
 - employee_name, employee_email
 - attendance_status_text (STRING — the canonical status. Values: 'Present', 'Absent', 'On Leave', 'Holiday', 'Weekend', 'Missing Punch', 'Remote Work', plus 'Submitted ...' variants). Count with COUNTIF(LOWER(attendance_status_text) = '<status>').
-- is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend, is_missing_punch (INT64 0/1) — these DO exist; SUM(is_present) is equivalent to COUNTIF(LOWER(attendance_status_text)='present'). Use either. Working-day denominator = COUNTIF(LOWER(attendance_status_text) NOT IN ('weekend','holiday')).
+- is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend, is_missing_punch (INT64 0/1) — these DO exist; SUM(is_present) is equivalent to COUNTIF(LOWER(attendance_status_text)='present'). Use either.
+- WORKING DAYS — SINGLE SOURCE OF TRUTH. The number of working days in a period comes from the COMPANY attendance calendar, computed in SQL — NEVER from weekday arithmetic in your head, and NEVER from one employee's own weekend/holiday row counts (those three methods disagree, e.g. 21 vs 20 for the same month — an inconsistency the user WILL notice). Canonical recipe (no employee filter — period filter only):
+    WITH days AS (SELECT attendance_date, COUNTIF(is_weekend=1 OR is_holiday=1) AS off_rows, COUNT(*) AS n
+                  FROM Attendance_Data WHERE attendance_date BETWEEN <start> AND <end> GROUP BY attendance_date)
+    SELECT COUNTIF(off_rows < n/2) AS working_days FROM days
+  (majority vote per date — a date is a working day when most employees' rows are not weekend/holiday). Compute it ONCE per period and reuse that EXACT number for every employee, every attendance rate, every timesheet hours-per-day denominator, and every follow-up turn about the same period.
 - LATE: there is no 'late' status value. A late arrival = check-in after 09:30 on a worked day: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00' (checkin_time IS NOT NULL).
 - checkin_time, checkout_time (STRING — FULL datetime like '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'. They can be NULL/blank on non-working or missing-punch days.)
   • To get the clock time, parse the whole string then take TIME:  TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time))
@@ -2797,12 +2802,32 @@ When the user asks about attendance for a period (a month, a week, a date range)
    Employee_Data via the standard digits-only employee-id rule + the
    EmployeeHierarchyNode IN (...) scope filter from the USER CONTEXT block.
 
-2. CALENDAR vs WORKING DAYS. For a named month (e.g. "March 2026"):
+2. CALENDAR vs WORKING DAYS — COMPANY CALENDAR, NOT PER-EMPLOYEE MATH.
      calendar_days = DATE_DIFF(LAST_DAY, FIRST_DAY, DAY) + 1.
-     weekend_days  = COUNTIF(LOWER(attendance_status_text) = 'weekend').
-     holiday_days  = COUNTIF(LOWER(attendance_status_text) = 'holiday').
-     working_days  = calendar_days - weekend_days - holiday_days.
-   Compute attendance rate against working_days, NOT calendar_days.
+     weekend_days / holiday_days / working_days = from the COMPANY attendance
+     calendar, computed in the SAME run_sql call via a CTE (period filter only,
+     NO employee filter), majority vote per date:
+       WITH days AS (SELECT attendance_date,
+                            COUNTIF(is_weekend=1) AS we_rows,
+                            COUNTIF(is_holiday=1) AS ho_rows,
+                            COUNT(*) AS n
+                     FROM Attendance_Data
+                     WHERE attendance_date BETWEEN <start> AND <end>
+                     GROUP BY attendance_date)
+       SELECT COUNTIF(we_rows >= n/2) AS weekend_days,
+              COUNTIF(ho_rows >= n/2) AS holiday_days,
+              COUNTIF(we_rows < n/2 AND ho_rows < n/2) AS working_days
+       FROM days
+   NEVER derive weekend/holiday/working-day counts from ONE employee's own
+   rows (an individual's rows can be missing or coded differently and WILL
+   disagree with the company calendar), and NEVER count weekdays
+   arithmetically from the calendar. Compute attendance rate against
+   working_days, NOT calendar_days. The SAME working_days number applies to
+   every employee in the period — and to any "hours per working day" math on
+   timesheet questions. Once computed for a period in this conversation,
+   REUSE that exact number in every later turn about the same period; two
+   answers stating different working-day counts for the same month is a
+   serious error.
 
 3. RESPONSE LAYOUT -- PAGINATED.
    Open with a 1-2 line summary stating: department(s), period,
@@ -5166,6 +5191,23 @@ DEFAULT FILTERS — apply automatically without asking:
    AND is_weekend = 0 AND is_holiday = 0.
    The denominator of an attendance rate must NEVER include weekends/holidays —
    that's what produces nonsense rates like 39.7%.
+   WORKING-DAY COUNT — SINGLE SOURCE OF TRUTH: the number of working days in a
+   period comes from the COMPANY attendance calendar in SQL, never from weekday
+   arithmetic and never from one employee's own weekend/holiday rows (those
+   methods disagree — quoting 21 working days in one answer and 20 in the next
+   for the same month is a serious, user-visible error). Canonical recipe
+   (period filter only, NO employee filter; majority vote per date):
+     WITH days AS (SELECT attendance_date,
+                          COUNTIF(is_weekend=1 OR is_holiday=1) AS off_rows,
+                          COUNT(*) AS n
+                   FROM Attendance_Data
+                   WHERE attendance_date BETWEEN <start> AND <end>
+                   GROUP BY attendance_date)
+     SELECT COUNTIF(off_rows < n/2) AS working_days FROM days
+   Use this SAME number for every employee in the period, for every attendance
+   rate, AND as the denominator of any "hours per working day" timesheet math —
+   compute it in the same query via a CTE. Reuse the exact number across
+   follow-up turns about the same period.
    LATE ARRIVALS — there is NO 'late' attendance_status_text value. BUSINESS
    RULE: a "late" arrival = any day with a check-in AFTER 09:30. Compute it from
    checkin_time, never a status filter:
@@ -5293,6 +5335,7 @@ SANITY CHECK YOUR OWN NUMBERS BEFORE EMITTING SQL:
 ANALYST_COMMON_SENSE_COMPACT = """ANALYST COMMON SENSE (apply silently):
 - Workforce queries → active employees only: LOWER(Employee_Type) IN ('mto','permanent','probation').
 - Attendance metrics → working days only: AND is_weekend=0 AND is_holiday=0. Never count weekends/holidays as absent.
+- Working-day COUNT for a period = company calendar from Attendance_Data (majority vote per date: a date is a working day when most rows have is_weekend=0 AND is_holiday=0) — same number for every employee; NEVER count weekdays arithmetically or from one employee's own rows.
 - Headcount → COUNT(DISTINCT Employee_Code) on Employee_Data (never COUNT(*) on Attendance_Data).
 - Today is May 2026. "this month"=May 2026; "last month"=April 2026; "Q1"=Jan-Mar 2026.
 - Name searches → fuzzy: LOWER(employee_name) LIKE '%mahad%'.
@@ -8189,6 +8232,158 @@ def availability_employee_weekly(code: str, weeks_back: int = 8, weeks_fwd: int 
     }
 
 
+@app.get("/api/availability/employees/{code}/attendance")
+def availability_employee_attendance(code: str, days: int = 30,
+                                     user: dict = Depends(get_current_user)):
+    """Last-N-days attendance for one employee (Availability Engine modal tab).
+
+    One BQ query returns a row per calendar date in the window: the COMPANY
+    calendar's working-day verdict (majority of all employees' rows per date
+    not weekend/holiday — the same single-source-of-truth rule the chat agent
+    uses, so the two surfaces can never disagree on working-day counts) plus
+    this employee's status / punches / flags for that date. The summary is
+    aggregated in Python from those rows.
+    """
+    emp_code = (code or "").strip()
+    if not emp_code:
+        raise HTTPException(status_code=400, detail="Employee code is required.")
+    safe_code = emp_code.replace("'", "''")
+    nd = max(7, min(int(days or 30), 90))
+
+    # Same dept-scope guard as the detail endpoint: a scoped user can only
+    # view attendance for employees in their own department.
+    dept_scope = _get_user_dept_scope(int(user["sub"]))
+    if dept_scope:
+        check_sql = normalize_bq_project(f"""
+            SELECT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS dept
+            FROM {_bq_avail('Employee_Data')}
+            WHERE CAST(Employee_Code AS STRING) = '{safe_code}'
+            LIMIT 1
+        """)
+        cr = bq_run_query(check_sql, max_rows=1)
+        if "error" not in cr:
+            crows = cr.get("rows") or []
+            if crows:
+                emp_dept = (crows[0].get("dept") or "").strip()
+                if emp_dept and emp_dept not in dept_scope:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"You're scoped to {', '.join(dept_scope)} and don't have access to this employee.",
+                    )
+
+    norm_target = _norm_emp_id(f"'{safe_code}'")
+    att_sql = f"""
+        WITH cal AS (
+          SELECT attendance_date,
+                 COUNTIF(is_weekend = 1 OR is_holiday = 1) >= COUNT(*) / 2 AS is_off
+          FROM {_bq_avail('Attendance_Data')}
+          WHERE attendance_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL {nd} DAY)
+                                    AND CURRENT_DATE()
+          GROUP BY attendance_date
+        ),
+        mine AS (
+          SELECT a.attendance_date,
+                 ANY_VALUE(a.attendance_status_text) AS status,
+                 ANY_VALUE(NULLIF(TRIM(a.leave_type_name), '')) AS leave_type,
+                 MAX(a.is_present) AS f_present, MAX(a.is_absent) AS f_absent,
+                 MAX(a.is_on_leave) AS f_leave, MAX(a.is_remote) AS f_remote,
+                 MAX(a.is_missing_punch) AS f_missing,
+                 ANY_VALUE(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', a.checkin_time)) AS cints,
+                 ANY_VALUE(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', a.checkout_time)) AS coutts
+          FROM {_bq_avail('Attendance_Data')} a
+          WHERE {_norm_emp_id('a.personal_no')} = {norm_target}
+            AND a.attendance_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL {nd} DAY)
+                                      AND CURRENT_DATE()
+          GROUP BY a.attendance_date
+        )
+        SELECT cal.attendance_date AS d,
+               cal.is_off,
+               m.status, m.leave_type,
+               m.f_present, m.f_absent, m.f_leave, m.f_remote, m.f_missing,
+               FORMAT_TIME('%H:%M', TIME(m.cints)) AS cin,
+               FORMAT_TIME('%H:%M', TIME(m.coutts)) AS cout,
+               TIME(m.cints) > TIME '09:30:00' AS is_late,
+               ROUND(SAFE_DIVIDE(TIMESTAMP_DIFF(m.coutts, m.cints, MINUTE), 60.0), 1) AS worked_hrs
+        FROM cal
+        LEFT JOIN mine m ON cal.attendance_date = m.attendance_date
+        ORDER BY d DESC
+    """
+    att_sql = normalize_bq_project(_autofix_dashboard_sql(att_sql))
+    ra = bq_run_query(att_sql, max_rows=120)
+    if "error" in ra:
+        print(f"[/api/availability/employees/attendance] BQ error: {ra['error']}")
+        raise HTTPException(status_code=500, detail=ra["error"])
+
+    def _mins(hhmm):
+        try:
+            h, m = str(hhmm).split(":")
+            return int(h) * 60 + int(m)
+        except Exception:
+            return None
+
+    days_detail = []
+    working_days = present = remote = on_leave = absent = missing = late = 0
+    cin_mins, cout_mins = [], []
+    total_worked = 0.0
+    for row in (ra.get("rows") or []):
+        is_off = bool(row.get("is_off"))
+        has_row = row.get("status") is not None
+        if not is_off:
+            working_days += 1
+            present  += int(row.get("f_present") or 0)
+            remote   += int(row.get("f_remote") or 0)
+            on_leave += int(row.get("f_leave") or 0)
+            absent   += int(row.get("f_absent") or 0)
+            missing  += int(row.get("f_missing") or 0)
+        if row.get("is_late"):
+            late += 1
+        cm, om = _mins(row.get("cin")), _mins(row.get("cout"))
+        if cm is not None:
+            cin_mins.append(cm)
+        if om is not None:
+            cout_mins.append(om)
+        wh = row.get("worked_hrs")
+        if wh is not None:
+            total_worked += float(wh)
+        days_detail.append({
+            "date":           str(row.get("d")),
+            "is_working_day": not is_off,
+            "status":         row.get("status") if has_row else ("Weekend/Holiday" if is_off else "No Record"),
+            "leave_type":     row.get("leave_type") or None,
+            "checkin":        row.get("cin") or None,
+            "checkout":       row.get("cout") or None,
+            "late":           bool(row.get("is_late")),
+            "worked_hrs":     float(wh) if wh is not None else None,
+        })
+
+    def _avg_hhmm(vals):
+        if not vals:
+            return None
+        m = round(sum(vals) / len(vals))
+        return f"{m // 60:02d}:{m % 60:02d}"
+
+    attended = present + remote + missing  # missing punch = punched in, worked
+    return {
+        "code": emp_code,
+        "days": nd,
+        "summary": {
+            "working_days":    working_days,
+            "present":         present,
+            "remote":          remote,
+            "on_leave":        on_leave,
+            "absent":          absent,
+            "missing_punch":   missing,
+            "attended":        attended,
+            "attendance_rate": round(100.0 * attended / working_days, 1) if working_days else None,
+            "late_arrivals":   late,
+            "avg_checkin":     _avg_hhmm(cin_mins),
+            "avg_checkout":    _avg_hhmm(cout_mins),
+            "total_worked_hrs": round(total_worked, 1),
+        },
+        "days_detail": days_detail,
+    }
+
+
 # ─── Employee skills (practice-head assigned, used by find-best-fit) ────────
 def _get_employee_skills(emp_code: str) -> list[str]:
     """Skills assigned to one employee (by warehouse Employee_Code), sorted."""
@@ -9403,7 +9598,10 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "Present, Weekend, Absent, Missing Punch, Holiday, On Leave, Remote Work, and their 'Submitted …' variants — no 'Late' status value; "
             "a LATE arrival = check-in after 09:30 on a worked day: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00'), "
             "is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1 INT), leave_type_name.\n"
-            "Attendance % = ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1). Avg/specific check-in/out time = parse the TIME; filter on checkin_time IS NOT NULL (includes Present, Remote Work AND Missing-Punch days — a Missing-Punch day still has a real check-in; do NOT use a present/remote status whitelist). For a specific person on a specific day, return checkin_time with NO status filter.\n"
+            "WORKING DAYS for a period = the COMPANY attendance calendar, computed in SQL — NEVER weekday arithmetic, NEVER one employee's own weekend/holiday row counts (those disagree, e.g. 21 vs 20 for the same month). Recipe (period filter only, NO employee filter; majority vote per date): "
+            "WITH days AS (SELECT attendance_date, COUNTIF(is_weekend=1 OR is_holiday=1) AS off_rows, COUNT(*) AS n FROM Attendance_Data WHERE attendance_date BETWEEN <start> AND <end> GROUP BY attendance_date) SELECT COUNTIF(off_rows < n/2) AS working_days FROM days. "
+            "Use that SAME working_days for every employee in the period, as the attendance-rate denominator (Attendance % = present_days / working_days — never COUNT(*) of all rows), and as the denominator for timesheet hours-per-working-day; compute it in the same query via a CTE and reuse the exact number across follow-ups.\n"
+            "Avg/specific check-in/out time = parse the TIME; filter on checkin_time IS NOT NULL (includes Present, Remote Work AND Missing-Punch days — a Missing-Punch day still has a real check-in; do NOT use a present/remote status whitelist). For a specific person on a specific day, return checkin_time with NO status filter.\n"
             "JOIN with Employee_Data on the digit-normalised code (NOT names — Resource_Name carries a code prefix): "
             "LTRIM(REGEXP_REPLACE(CAST(personal_no AS STRING),r'[^0-9]',''),'0') = LTRIM(REGEXP_REPLACE(CAST(Employee_Code AS STRING),r'[^0-9]',''),'0')."
         ),
@@ -9541,6 +9739,7 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "week_id, year_id, Week, Date (DATE), Year, Month (STRING), Data_Type.",  # pre real-Allocation-schema (INT64 Year/Month, no year_id) note
     "take MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per project",  # pre latest-weekly-snapshot allocation note
     "restrict to LOWER(attendance_status_text) IN ('present','remote work')",  # pre checkin=NOT NULL (Missing-Punch has a real check-in) note
+    "Attendance % = ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1)",  # pre company-calendar working-days note
     "Hist_Win_Rate (decimal 0-1 — multiply by 100 for %)",      # pre Hist_Win_Rate-is-STRING note
     "Open_Deals, Win_Rate_by (decimal 0-1).",                   # pre Win_Rate_by-is-STRING note
     "CRM_Pipeline, Coverage_Ratio, Status, Action.",            # pre Coverage_Ratio-is-STRING note

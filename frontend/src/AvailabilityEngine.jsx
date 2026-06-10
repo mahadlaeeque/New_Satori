@@ -643,12 +643,132 @@ const WeeklyTimeline = ({ data, loading }) => {
   );
 };
 
+// ─── Attendance tab (last 30 days) ───
+// Day-by-day attendance from /api/availability/employees/{code}/attendance.
+// Working-day counts come from the COMPANY calendar (same rule as the chat
+// agent) so this tab and Ask-Me-Anything can never disagree on working days.
+const attPill = (statusRaw) => {
+  const s = (statusRaw || "").toLowerCase();
+  if (s.includes("present")) return { fg: "#0E7E3E", bg: "#DCFCE7" };
+  if (s.includes("remote"))  return { fg: "#0A5F89", bg: "#E0F2FE" };
+  if (s.includes("leave"))   return { fg: "#B45309", bg: "#FEF3C7" };
+  if (s.includes("absent"))  return { fg: "#B91C1C", bg: "#FEE2E2" };
+  if (s.includes("missing")) return { fg: "#C2410C", bg: "#FFEDD5" };
+  return { fg: "var(--c-text-muted)", bg: "var(--c-surface-alt)" };
+};
+
+const fmtAttDay = (iso) => {
+  try {
+    return new Date(`${iso}T00:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  } catch { return iso; }
+};
+
+const AttendanceTab = ({ data, loading, error }) => {
+  if (loading && !data) return <div style={{ padding: 20, color: C.textMuted, fontSize: 13 }}>Loading attendance…</div>;
+  if (error) return (
+    <div style={{ padding: "10px 14px", background: "#FEE2E2", color: "#991B1B", borderRadius: 8, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+      <AlertCircle size={16} /> {error}
+    </div>
+  );
+  if (!data) return null;
+  const s = data.summary || {};
+  const rate = s.attendance_rate;
+  const cards = [
+    {
+      label: "Attendance rate",
+      value: rate != null ? `${rate}%` : "—",
+      sub: `${s.attended || 0} of ${s.working_days || 0} working days`,
+      color: rate == null ? C.textPrimary : rate >= 90 ? "#0E7E3E" : rate >= 70 ? "#B45309" : C.danger,
+    },
+    { label: "Present / Remote", value: `${s.present || 0} / ${s.remote || 0}`, sub: `${s.missing_punch || 0} missing punch` },
+    { label: "Leave / Absent", value: `${s.on_leave || 0} / ${s.absent || 0}`, sub: "days", color: (s.absent || 0) > 0 ? C.danger : C.textPrimary },
+    { label: "Late arrivals", value: `${s.late_arrivals || 0}`, sub: s.avg_checkin ? `avg in ${s.avg_checkin} · out ${s.avg_checkout || "—"}` : "no punches", color: (s.late_arrivals || 0) > 0 ? "#C2410C" : C.textPrimary },
+  ];
+  const detail = data.days_detail || [];
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}>
+        {cards.map((k, i) => (
+          <div key={i} style={{ background: C.surfaceAlt, borderRadius: 10, padding: "12px 14px" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>{k.label}</div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: k.color || C.textPrimary, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>{k.value}</div>
+            <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4 }}>{k.sub}</div>
+          </div>
+        ))}
+      </div>
+      <h3 style={{ margin: "0 0 10px", fontSize: 13, fontWeight: 700, color: C.textPrimary, textTransform: "uppercase", letterSpacing: "0.5px", display: "flex", alignItems: "center", gap: 6 }}>
+        <Calendar size={14} /> Day by day (last {data.days || 30} days)
+      </h3>
+      {detail.length === 0 ? (
+        <div style={{ padding: 14, color: C.textMuted, fontSize: 13, border: `1px dashed ${C.border}`, borderRadius: 10 }}>
+          No attendance records in this window.
+        </div>
+      ) : (
+        <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+          {detail.map((d, i) => {
+            const pill = attPill(d.status);
+            const offDay = !d.is_working_day;
+            return (
+              <div key={d.date} style={{
+                padding: "9px 14px", borderTop: i === 0 ? "none" : `1px solid ${C.border}`,
+                display: "grid", gridTemplateColumns: "118px 1fr 130px 60px", gap: 10, alignItems: "center",
+                opacity: offDay ? 0.55 : 1,
+              }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: C.textSecondary, fontVariantNumeric: "tabular-nums" }}>{fmtAttDay(d.date)}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", minWidth: 0 }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 9px", borderRadius: 999, background: pill.bg, color: pill.fg }}>
+                    {d.status || "—"}
+                  </span>
+                  {d.leave_type && <span style={{ fontSize: 11, color: C.textMuted }}>{d.leave_type}</span>}
+                  {d.late && (
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: "#FEE2E2", color: "#B91C1C" }}>
+                      Late
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: 12, color: C.textSecondary, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                  {d.checkin ? `${d.checkin} → ${d.checkout || "—"}` : ""}
+                </div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: C.textSecondary, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                  {d.worked_hrs != null ? `${d.worked_hrs}h` : ""}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const EmployeeDetailModal = ({ emp, onClose }) => {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [weekly, setWeekly] = useState(null);
   const [weeklyLoading, setWeeklyLoading] = useState(false);
+
+  // Tabs: overview (existing detail) | attendance (last 30 days).
+  // Attendance is fetched lazily on first tab activation — it's a separate
+  // BQ query and most opens never leave the overview.
+  const [tab, setTab] = useState("overview");
+  const [att, setAtt] = useState(null);
+  const [attLoading, setAttLoading] = useState(false);
+  const [attError, setAttError] = useState(null);
+  useEffect(() => { setTab("overview"); setAtt(null); setAttError(null); }, [emp]);
+  useEffect(() => {
+    if (!emp || tab !== "attendance" || att || attLoading) return;
+    let cancelled = false;
+    (async () => {
+      setAttLoading(true); setAttError(null);
+      try {
+        const a = await fetchJson(`/api/availability/employees/${encodeURIComponent(emp.code)}/attendance?days=30`);
+        if (!cancelled) setAtt(a);
+      } catch (e) { if (!cancelled) setAttError(String(e.message || e)); }
+      finally { if (!cancelled) setAttLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [emp, tab, att, attLoading]);
 
   useEffect(() => {
     if (!emp) { setWeekly(null); return; }
@@ -762,8 +882,23 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
           <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.textMuted, padding: 4 }}><X size={20} /></button>
         </div>
 
+        {/* Tab bar */}
+        <div style={{ display: "flex", gap: 4, padding: "0 24px", borderBottom: `1px solid ${C.border}`, background: C.surface }}>
+          {[["overview", "Overview"], ["attendance", "Attendance (30d)"]].map(([key, label]) => (
+            <button key={key} onClick={() => setTab(key)} style={{
+              padding: "10px 14px", border: "none", background: "transparent", cursor: "pointer",
+              fontSize: 13, fontWeight: 700,
+              color: tab === key ? C.accent : C.textMuted,
+              borderBottom: tab === key ? `2px solid ${C.accent}` : "2px solid transparent",
+              marginBottom: -1,
+            }}>{label}</button>
+          ))}
+        </div>
+
         {/* Body — scrollable */}
         <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+          {tab === "attendance" && <AttendanceTab data={att} loading={attLoading} error={attError} />}
+          {tab === "overview" && <>
           {/* Snapshot row */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 20 }}>
             <div style={{ background: C.surfaceAlt, borderRadius: 10, padding: "12px 14px" }}>
@@ -954,6 +1089,7 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
               </div>
             )}
           </div>
+          </>}
         </div>
 
         <div style={{ padding: "12px 24px", borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "flex-end", background: C.surfaceAlt }}>
