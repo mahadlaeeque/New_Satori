@@ -299,6 +299,7 @@ const OnboardingTour = ({ onNavigate }) => {
     try { return localStorage.getItem("satori_tour_voice") !== "0"; } catch { return true; }
   });
   const [speaking, setSpeaking] = useState(false);
+  const [narrLoading, setNarrLoading] = useState(false);
   const audioRef = useRef(null);
   const ttsCache = useRef({});
 
@@ -363,6 +364,7 @@ const OnboardingTour = ({ onNavigate }) => {
       try {
         let b64 = ttsCache.current[idx];
         if (!b64) {
+          setNarrLoading(true);
           const r = await fetch(`${API_BASE}/api/tts`, {
             method: "POST",
             headers: { Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" },
@@ -380,8 +382,9 @@ const OnboardingTour = ({ onNavigate }) => {
         setSpeaking(true);
         audio.play().catch(() => setSpeaking(false));
       } catch { /* voice is best-effort */ }
+      finally { if (!cancelled) setNarrLoading(false); }
     })();
-    return () => { cancelled = true; stopNarration(); };
+    return () => { cancelled = true; setNarrLoading(false); stopNarration(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, idx, voiceOn]);
 
@@ -440,7 +443,7 @@ const OnboardingTour = ({ onNavigate }) => {
       }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-            <SatoriAvatar state={speaking ? "speaking" : "idle"} audioLevel={speaking ? 0.55 : 0} size={46} />
+            <SatoriAvatar state={speaking ? "speaking" : narrLoading ? "thinking" : "idle"} audioLevel={speaking ? 0.55 : 0} size={46} />
             <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.textPrimary }}>{step.title}</div>
           </div>
           <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
@@ -1297,7 +1300,7 @@ const VoiceModal = ({ open, onClose }) => {
       <div onClick={(e) => e.stopPropagation()} style={{ textAlign: "center" }}>
         <div style={{ margin: "0 auto 24px", display: "inline-flex" }}>
           <SatoriAvatar
-            state={state === "connecting" || state === "closing" ? "idle" : state}
+            state={state === "connecting" ? "thinking" : state === "closing" ? "idle" : state}
             audioLevel={audioLevel}
             size={232}
             ariaLabel="Satori voice agent"
@@ -2277,7 +2280,7 @@ const BriefingPlayer = ({ onClose }) => {
         padding: 28, textAlign: "center", boxShadow: "0 24px 60px rgba(0,0,0,0.3)",
       }}>
         <div style={{ display: "inline-flex", marginBottom: 14 }}>
-          <SatoriAvatar state={phase === "speaking" ? "speaking" : "idle"} audioLevel={level} size={170} />
+          <SatoriAvatar state={phase === "loading" ? "greeting" : phase === "speaking" ? "speaking" : "idle"} audioLevel={level} size={170} />
         </div>
         <div style={{ fontSize: 16, fontWeight: 800, color: COLORS.textPrimary, marginBottom: 8 }}>
           {phase === "loading" ? "Preparing your briefing…" : phase === "error" ? "Briefing unavailable" : "Today's briefing"}

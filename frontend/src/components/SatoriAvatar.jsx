@@ -1,22 +1,30 @@
 /*
  * SatoriAvatar.jsx
  * ----------------------------------------------------------------------------
- * Video + still voice-agent avatar inside a TMC-green circular frame.
+ * Video persona inside a TMC-green circular frame, driven by four Veo clips
+ * that share one framing + flat-grey background:
  *
- *   speaking  -> looping talking clip (real lip movement)
- *   otherwise -> a STATIC resting picture (not a frozen video frame), kept
- *                alive with gentle breathing and a periodic natural blink
- *                (an eyes-lowered frame flashed over the open frame; both come
- *                from the same source so they align perfectly).
+ *   speaking / done -> looping talking clip (real lip movement)
+ *   thinking        -> looping pondering clip (eyes glance aside, head tilt)
+ *   greeting        -> welcome nod, plays ONCE then settles into the idle loop
+ *   idle / listening / anything else -> gentle breathing idle loop
  *
- * All three assets share one flat-grey background so the circle reads uniform.
+ * All four <video> layers stay mounted (preloaded) and we cross-fade by
+ * opacity, so state changes never flash a loading frame. If a clip fails to
+ * load, that state falls back to the original still photo kept alive with a
+ * breathing transform + periodic blink overlay.
+ *
  * A green ring pulses while listening and brightens with the live voice while
- * speaking. Falls back to the idle still if the video can't load.
+ * speaking.
  *
- * Props: state, audioLevel (0..1), size (px).
+ * Props: state ('idle'|'listening'|'thinking'|'speaking'|'done'|'greeting'),
+ *        audioLevel (0..1), size (px), ariaLabel.
  */
 import React, { useEffect, useRef, useState } from "react";
 import videoSpeaking from "../assets/voice/satori-speaking.mp4";
+import videoThinking from "../assets/voice/satori-thinking.mp4";
+import videoGreeting from "../assets/voice/satori-greeting.mp4";
+import videoIdleLoop from "../assets/voice/satori-idle-loop.mp4";
 import idleImg from "../assets/voice/satori-idle.png";
 import blinkImg from "../assets/voice/satori-blink.png";
 
@@ -25,6 +33,20 @@ const GREEN_LT = "#a6d65f";
 const GREEN_DK = "#5f8a2c";
 const GREY_BG  = "#bebebc";
 const AV_STYLE_ID = "satori-avatar-keyframes";
+
+const CLIPS = [
+  { key: "idle",     src: videoIdleLoop, loop: true  },
+  { key: "thinking", src: videoThinking, loop: true  },
+  { key: "speaking", src: videoSpeaking, loop: true  },
+  { key: "greeting", src: videoGreeting, loop: false },
+];
+
+const clipForState = (state, greetEnded) => {
+  if (state === "speaking" || state === "done") return "speaking";
+  if (state === "thinking") return "thinking";
+  if (state === "greeting") return greetEnded ? "idle" : "greeting";
+  return "idle"; // idle, listening, connecting, closing, …
+};
 
 function ensureAvatarKeyframes() {
   if (typeof document === "undefined" || document.getElementById(AV_STYLE_ID)) return;
@@ -43,26 +65,43 @@ function ensureAvatarKeyframes() {
 
 const SatoriAvatar = ({ state = "idle", audioLevel = 0, size = 232, ariaLabel = "Satori" }) => {
   useEffect(() => { ensureAvatarKeyframes(); }, []);
-  const videoRef = useRef(null);
-  const [broken, setBroken] = useState(false);
+  const videoRefs = useRef({});
+  const [brokenKeys, setBrokenKeys] = useState(() => new Set());
+  const [greetEnded, setGreetEnded] = useState(false);
+
+  // A fresh "greeting" state replays the welcome nod from the top.
+  useEffect(() => {
+    if (state === "greeting") {
+      setGreetEnded(false);
+      const v = videoRefs.current.greeting;
+      if (v) { try { v.currentTime = 0; } catch { /* noop */ } }
+    }
+  }, [state]);
 
   const lvl = Math.max(0, Math.min(1, audioLevel));
   const speaking = state === "speaking" || state === "done";
   const listening = state === "listening";
+  const thinking = state === "thinking";
 
-  // Play the clip while speaking; otherwise pause + reset to the resting frame.
+  const activeKey = clipForState(state, greetEnded);
+  const activeBroken = brokenKeys.has(activeKey);
+
+  // Play only the visible layer; pause the rest (greeting is reset so the
+  // next play starts from the nod, loops just resume where they were).
   useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    if (speaking) {
-      const p = v.play();
-      if (p && p.catch) p.catch(() => {});
-    } else {
-      try { v.pause(); v.currentTime = 0; } catch {}
+    for (const { key } of CLIPS) {
+      const v = videoRefs.current[key];
+      if (!v) continue;
+      if (key === activeKey && !activeBroken) {
+        const p = v.play();
+        if (p && p.catch) p.catch(() => {});
+      } else {
+        try { v.pause(); } catch { /* noop */ }
+      }
     }
-  }, [speaking]);
+  }, [activeKey, activeBroken]);
 
-  const ringOpacity = speaking ? Math.min(1, 0.4 + lvl * 0.6) : (listening ? 0.65 : 0.3);
+  const ringOpacity = speaking ? Math.min(1, 0.4 + lvl * 0.6) : (listening ? 0.65 : thinking ? 0.45 : 0.3);
   const media = {
     position: "absolute", inset: 0, width: "100%", height: "100%",
     objectFit: "cover", objectPosition: "center top", pointerEvents: "none",
@@ -75,21 +114,25 @@ const SatoriAvatar = ({ state = "idle", audioLevel = 0, size = 232, ariaLabel = 
         background: GREY_BG, border: `3px solid ${GREEN_DK}`,
         boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
       }}>
-        {/* Speaking clip — visible only while speaking */}
-        <video
-          ref={videoRef}
-          src={videoSpeaking}
-          muted loop playsInline preload="auto"
-          onError={() => setBroken(true)}
-          style={{ ...media, opacity: speaking && !broken ? 1 : 0, transition: "opacity 0.18s ease" }}
-        />
-        {/* Idle still — breathing + periodic blink — visible when not speaking */}
+        {/* Video layers — all mounted, the active one faded in */}
+        {CLIPS.map(({ key, src, loop }) => (
+          <video
+            key={key}
+            ref={(el) => { videoRefs.current[key] = el; }}
+            src={src}
+            muted loop={loop} playsInline preload="auto"
+            onEnded={key === "greeting" ? () => setGreetEnded(true) : undefined}
+            onError={() => setBrokenKeys(prev => { const n = new Set(prev); n.add(key); return n; })}
+            style={{ ...media, opacity: key === activeKey && !brokenKeys.has(key) ? 1 : 0, transition: "opacity 0.18s ease" }}
+          />
+        ))}
+        {/* Still-photo fallback — breathing + periodic blink — shown only when
+            the active clip failed to load */}
         <div className="satori-av-breath"
-             style={{ position: "absolute", inset: 0, opacity: speaking && !broken ? 0 : 1, transition: "opacity 0.18s ease" }}>
+             style={{ position: "absolute", inset: 0, opacity: activeBroken ? 1 : 0, transition: "opacity 0.18s ease" }}>
           <img src={idleImg} alt={ariaLabel} draggable={false} style={media} />
-          {/* blink frame flashed over the open eyes */}
           <img src={blinkImg} alt="" aria-hidden draggable={false}
-               className={!speaking ? "satori-av-blink" : ""}
+               className={activeBroken ? "satori-av-blink" : ""}
                style={{ ...media, opacity: 0 }} />
         </div>
         {/* Green ring — pulses listening / brightens with the voice speaking */}
