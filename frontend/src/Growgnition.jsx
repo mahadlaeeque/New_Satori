@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from "react";
 import {
   BarChart, Bar, LineChart, Line, AreaChart, Area, PieChart, Pie, Cell,
   RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
@@ -16,7 +16,10 @@ import {
   HelpCircle, Calendar, Command, CreditCard, Star, MoreHorizontal, Copy, Share2, Link as LinkIcon, UserPlus,
   Filter, Sun, Moon, ThumbsUp, ThumbsDown, RefreshCw, Check
 } from "lucide-react";
-import AvailabilityEnginePage from "./AvailabilityEngine.jsx";
+// Lazy-loaded: the Availability Engine is a big self-contained page (cards,
+// heatmap, radar, modals, jspdf export) most sessions never open first —
+// splitting it keeps login/first-paint lean.
+const AvailabilityEnginePage = lazy(() => import("./AvailabilityEngine.jsx"));
 import SatoriAvatar from "./components/SatoriAvatar.jsx";
 
 // ─── TMC Brand Color Palette ───
@@ -3922,6 +3925,7 @@ const ReportsPage = () => {
   const [activeCanEdit, setActiveCanEdit] = useState(false); // editor-role recipients
   const [chatOpen, setChatOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   const [saveState, setSaveState] = useState("idle");
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -4262,6 +4266,14 @@ const ReportsPage = () => {
                 }}>
                   <Share2 size={14} /> Share
                 </button>
+                <button onClick={() => setScheduleOpen(true)} title="Email this to me on a schedule" style={{
+                  background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
+                  padding: "8px 14px", cursor: "pointer", color: COLORS.textPrimary,
+                  fontSize: 13, fontWeight: 600,
+                  display: "flex", alignItems: "center", gap: 6
+                }}>
+                  <Calendar size={14} /> Schedule
+                </button>
                 <button
                   onClick={() => setChatOpen((v) => !v)}
                   title={chatOpen ? "Close AI editor" : "Open AI editor"}
@@ -4363,6 +4375,14 @@ const ReportsPage = () => {
             itemId={activeId}
             itemName={activeName}
             onClose={() => setShareOpen(false)}
+          />
+        )}
+        {scheduleOpen && activeId && (
+          <ScheduleModal
+            kind="report"
+            itemId={activeId}
+            itemName={activeName}
+            onClose={() => setScheduleOpen(false)}
           />
         )}
       </div>
@@ -6887,6 +6907,136 @@ const MenuItem = ({ children, onClick, danger, icon: Icon }) => (
 // /api/{kind}s/{id}/shares for list/add/remove and /api/users/search for the
 // autocomplete. Owner-only — the parent should only render this modal when
 // the current user owns the item.
+// ─── Schedule modal — email me this dashboard/report on a cadence ──────────
+// One subscription per user × item (saving replaces). Delivery is handled by
+// /api/subscriptions/run-due (Cloud Scheduler, hourly); times are Pakistan
+// time. Reports arrive as an inline table, dashboards as their KPI values.
+const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const ScheduleModal = ({ kind, itemId, itemName, onClose }) => {
+  const [cadence, setCadence] = useState("weekly");
+  const [dayOfWeek, setDayOfWeek] = useState(0);
+  const [hour, setHour] = useState(9);
+  const [recipients, setRecipients] = useState("");
+  const [existing, setExisting] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const headers = { Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/subscriptions?kind=${kind}&item_id=${itemId}`, { headers });
+        if (!r.ok) return;
+        const j = await r.json();
+        const s = (j.subscriptions || [])[0];
+        if (s && !cancelled) {
+          setExisting(s);
+          setCadence(s.cadence || "weekly");
+          setDayOfWeek(Number(s.day_of_week || 0));
+          setHour(Number(s.hour ?? 9));
+          setRecipients(s.recipients || "");
+        }
+      } catch { /* fresh form */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, itemId]);
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(`${API_BASE}/api/subscriptions`, {
+        method: "POST", headers,
+        body: JSON.stringify({ kind, item_id: itemId, cadence, day_of_week: dayOfWeek, hour, recipients }),
+      });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.detail || `HTTP ${r.status}`); }
+      setMsg("Scheduled ✓ — first email arrives at the next matching time.");
+      setExisting({ id: -1 });
+    } catch (e) { setMsg(`Couldn't save: ${e.message || e}`); }
+    finally { setBusy(false); }
+  };
+
+  const unsubscribe = async () => {
+    if (!existing?.id || existing.id === -1) {
+      // Saved this session — refetch to get the id.
+      const r = await fetch(`${API_BASE}/api/subscriptions?kind=${kind}&item_id=${itemId}`, { headers });
+      const j = await r.json().catch(() => ({}));
+      existing.id = (j.subscriptions || [])[0]?.id;
+    }
+    if (!existing?.id) return;
+    setBusy(true); setMsg(null);
+    try {
+      await fetch(`${API_BASE}/api/subscriptions/${existing.id}`, { method: "DELETE", headers });
+      setExisting(null);
+      setMsg("Subscription removed.");
+    } finally { setBusy(false); }
+  };
+
+  const sel = {
+    padding: "9px 12px", borderRadius: 8, border: `1px solid ${COLORS.border}`,
+    background: COLORS.surface, color: COLORS.textPrimary, fontSize: 13, fontWeight: 600, width: "100%",
+  };
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 1400, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: COLORS.surface, borderRadius: 16, width: "100%", maxWidth: 460, padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+          <div style={{ fontSize: 17, fontWeight: 800, color: COLORS.textPrimary, display: "flex", alignItems: "center", gap: 8 }}>
+            <Calendar size={18} color={COLORS.accent} /> Schedule by email
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted }}><X size={18} /></button>
+        </div>
+        <div style={{ fontSize: 12.5, color: COLORS.textMuted, marginBottom: 16 }}>
+          "{itemName}" will be emailed {kind === "report" ? "as a table" : "with its KPI values"} on the schedule below (Pakistan time).
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: cadence === "weekly" ? "1fr 1fr 1fr" : "1fr 1fr", gap: 10, marginBottom: 12 }}>
+          <div>
+            <label style={{ fontSize: 10.5, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase" }}>Cadence</label>
+            <select value={cadence} onChange={e => setCadence(e.target.value)} style={{ ...sel, marginTop: 4 }}>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly (1st)</option>
+            </select>
+          </div>
+          {cadence === "weekly" && (
+            <div>
+              <label style={{ fontSize: 10.5, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase" }}>Day</label>
+              <select value={dayOfWeek} onChange={e => setDayOfWeek(Number(e.target.value))} style={{ ...sel, marginTop: 4 }}>
+                {WEEKDAYS.map((d, i) => <option key={d} value={i}>{d}</option>)}
+              </select>
+            </div>
+          )}
+          <div>
+            <label style={{ fontSize: 10.5, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase" }}>From (hour)</label>
+            <select value={hour} onChange={e => setHour(Number(e.target.value))} style={{ ...sel, marginTop: 4 }}>
+              {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
+            </select>
+          </div>
+        </div>
+
+        <label style={{ fontSize: 10.5, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase" }}>Recipients</label>
+        <input value={recipients} onChange={e => setRecipients(e.target.value)}
+          placeholder="Leave blank to send to yourself, or comma-separate emails"
+          style={{ ...sel, marginTop: 4, marginBottom: 14, boxSizing: "border-box" }} />
+
+        {msg && <div style={{ fontSize: 12.5, color: msg.startsWith("Couldn't") ? "#B91C1C" : COLORS.accentDark || COLORS.accent, fontWeight: 600, marginBottom: 10 }}>{msg}</div>}
+
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+          {existing ? (
+            <button onClick={unsubscribe} disabled={busy} style={{ padding: "9px 14px", borderRadius: 8, border: `1px solid ${COLORS.border}`, background: COLORS.surface, color: "#B91C1C", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+              Unsubscribe
+            </button>
+          ) : <span />}
+          <button onClick={save} disabled={busy} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: COLORS.accent, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            {busy ? "Saving…" : existing ? "Update schedule" : "Schedule"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const ShareModal = ({ kind, itemId, itemName, onClose }) => {
   const baseUrl = (kind === "report" ? "/api/reports" : "/api/dashboards") + `/${itemId}/shares`;
   const [shares, setShares] = useState([]);
@@ -7313,6 +7463,7 @@ const DashboardsPage = () => {
   const [activeCanEdit, setActiveCanEdit] = useState(false); // editor-role recipients
   const [chatOpen, setChatOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   const [saveState, setSaveState] = useState("idle");
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -7625,6 +7776,14 @@ const DashboardsPage = () => {
                 }}>
                   <Share2 size={14} /> Share
                 </button>
+                <button onClick={() => setScheduleOpen(true)} title="Email this to me on a schedule" style={{
+                  background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
+                  padding: "8px 14px", cursor: "pointer", color: COLORS.textPrimary,
+                  fontSize: 13, fontWeight: 600,
+                  display: "flex", alignItems: "center", gap: 6
+                }}>
+                  <Calendar size={14} /> Schedule
+                </button>
                 <button
                   onClick={() => setChatOpen((v) => !v)}
                   title={chatOpen ? "Close AI editor" : "Open AI editor"}
@@ -7719,6 +7878,14 @@ const DashboardsPage = () => {
             itemId={activeId}
             itemName={activeName}
             onClose={() => setShareOpen(false)}
+          />
+        )}
+        {scheduleOpen && activeId && (
+          <ScheduleModal
+            kind="dashboard"
+            itemId={activeId}
+            itemName={activeName}
+            onClose={() => setScheduleOpen(false)}
           />
         )}
       </div>
@@ -9809,6 +9976,122 @@ const SystemSettingsPage = () => {
   );
 };
 
+// ─── Usage Analytics (superadmin-only: superadmin, Mahad, Numair) ──────────
+// Adoption pulse for the platform owners: who's using Satori, how much, what
+// they use, and how the AI answers are being rated. Backed by the audit
+// trail; the endpoint is require_superadmin so the data never leaks wider.
+const UsageAnalyticsPage = () => {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/admin/usage-analytics?days=30`, {
+          headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json();
+        if (!cancelled) setData(j);
+      } catch (e) { if (!cancelled) setError(String(e.message || e)); }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  if (error) return <div style={{ padding: 32, color: "#B91C1C", fontSize: 14 }}>Couldn't load usage analytics: {error}</div>;
+  if (!data) return <div style={{ padding: 32, color: COLORS.textMuted, fontSize: 14 }}>Loading usage analytics…</div>;
+
+  const t = data.totals || {};
+  const fb = data.feedback || { up: 0, down: 0 };
+  const fbTotal = fb.up + fb.down;
+  const fbRate = fbTotal ? Math.round((fb.up / fbTotal) * 100) : null;
+  const cards = [
+    { label: "Active today", value: t.active_today, sub: "distinct users" },
+    { label: "Active / 7 days", value: t.active_7d, sub: "weekly actives" },
+    { label: `Active / ${data.days} days`, value: t.active_users, sub: "monthly actives" },
+    { label: "AI questions", value: t.ai_questions, sub: `last ${data.days} days` },
+    { label: "Total events", value: t.events, sub: "all activity" },
+    { label: "Answer rating", value: fbRate != null ? `${fbRate}%` : "—", sub: `👍 ${fb.up} · 👎 ${fb.down}`, color: fbRate == null ? undefined : fbRate >= 80 ? "#0E7E3E" : fbRate >= 60 ? "#B45309" : "#B91C1C" },
+  ];
+  const maxAction = Math.max(1, ...(data.top_actions || []).map(a => a.count));
+
+  return (
+    <div style={{ padding: 24, maxWidth: 1400, margin: "0 auto" }}>
+      <div style={{ marginBottom: 18 }}>
+        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: COLORS.textPrimary }}>Usage Analytics</h1>
+        <p style={{ margin: "4px 0 0", fontSize: 13, color: COLORS.textMuted }}>
+          Platform adoption over the last {data.days} days · visible to superadmins only
+          {data.pulse?.avg != null && <> · pulse score <b>{data.pulse.avg}/5</b> ({data.pulse.count} responses)</>}
+          {data.support && <> · support tickets {data.support.open} open / {data.support.total} total</>}
+        </p>
+      </div>
+
+      {/* KPI strip */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 14, marginBottom: 20 }}>
+        {cards.map((c, i) => (
+          <div key={i} style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: "14px 16px" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>{c.label}</div>
+            <div style={{ fontSize: 24, fontWeight: 800, color: c.color || COLORS.textPrimary, marginTop: 5, fontVariantNumeric: "tabular-nums" }}>{c.value ?? "—"}</div>
+            <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 3 }}>{c.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Daily actives + AI questions trend */}
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 20, marginBottom: 20 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+          <TrendingUp size={16} color={COLORS.accent} /> Daily active users & AI questions
+        </div>
+        <ResponsiveContainer width="100%" height={240}>
+          <LineChart data={data.daily || []} margin={{ top: 4, right: 16, bottom: 0, left: -16 }}>
+            <CartesianGrid stroke={COLORS.border} strokeDasharray="3 3" />
+            <XAxis dataKey="day" tick={{ fontSize: 10, fill: COLORS.textMuted }} tickFormatter={(d) => String(d).slice(5)} />
+            <YAxis tick={{ fontSize: 10, fill: COLORS.textMuted }} allowDecimals={false} />
+            <Tooltip />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Line type="monotone" dataKey="users" name="Active users" stroke={COLORS.accent} strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="questions" name="AI questions" stroke="#0A5F89" strokeWidth={2} dot={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+        {/* Feature usage */}
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 20 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+            <BarChart3 size={16} color={COLORS.accent} /> Most-used actions
+          </div>
+          {(data.top_actions || []).map((a) => (
+            <div key={a.action} style={{ display: "grid", gridTemplateColumns: "180px 1fr 56px", gap: 10, alignItems: "center", padding: "6px 0" }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.textSecondary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={a.action}>{a.action}</div>
+              <div style={{ height: 8, background: COLORS.surfaceAlt, borderRadius: 999, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${Math.round((a.count / maxAction) * 100)}%`, background: COLORS.accent }} />
+              </div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.textSecondary, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{a.count.toLocaleString()}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Top users */}
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 20 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+            <Users size={16} color={COLORS.accent} /> Most active users
+          </div>
+          {(data.top_users || []).map((u, i) => (
+            <div key={u.email} style={{ display: "grid", gridTemplateColumns: "20px 1fr 70px 130px", gap: 10, alignItems: "center", padding: "7px 0", borderTop: i === 0 ? "none" : `1px solid ${COLORS.border}` }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.textMuted }}>{i + 1}</span>
+              <span style={{ fontSize: 12.5, fontWeight: 600, color: COLORS.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.email}</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: COLORS.textSecondary, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{u.events.toLocaleString()}</span>
+              <span style={{ fontSize: 11, color: COLORS.textMuted, textAlign: "right" }}>{String(u.last_seen).slice(0, 16)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const NAV_ITEMS = [
   { id: "_divider_workspace", label: "WORKSPACE", isDivider: true },
   { id: "agent", label: "Ask Me Anything", icon: Bot, component: AgentPage, requiresFeature: "agent" },
@@ -9819,6 +10102,7 @@ const NAV_ITEMS = [
   { id: "_divider_admin", label: "ADMIN", isDivider: true, superAdminOnly: true },
   { id: "users", label: "User Management", icon: Users, component: UserManagementPage, superAdminOnly: true },
   { id: "audit", label: "Audit Log", icon: Shield, component: AuditLogPage, superAdminOnly: true },
+  { id: "usage", label: "Usage Analytics", icon: BarChart3, component: UsageAnalyticsPage, superAdminOnly: true },
   { id: "support", label: "Support Tickets", icon: MessageSquare, component: SupportTicketsPage, superAdminOnly: true },
   { id: "settings", label: "System Settings", icon: Settings, component: SystemSettingsPage, superAdminOnly: true },
 ];
@@ -11459,9 +11743,11 @@ export default function App() {
             {onPrivacy ? (
               <PrivacyPage onBack={() => { window.location.hash = ""; }} />
             ) : DashboardContent && (
-              activePage === "users"
-                ? <DashboardContent currentUserId={currentUser?.id} onPermissionsChanged={refreshPermissions} />
-                : <DashboardContent />
+              <Suspense fallback={<div style={{ padding: 40, textAlign: "center", color: COLORS.textMuted, fontSize: 14 }}>Loading…</div>}>
+                {activePage === "users"
+                  ? <DashboardContent currentUserId={currentUser?.id} onPermissionsChanged={refreshPermissions} />
+                  : <DashboardContent />}
+              </Suspense>
             )}
           </div>
 

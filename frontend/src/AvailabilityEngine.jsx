@@ -244,7 +244,7 @@ const SkillDropdown = ({ skills, active, onChange }) => (
 );
 
 // ─── Create Task Modal ───
-const CreateTaskModal = ({ open, onClose, onSubmit, locations, loading, error }) => {
+const CreateTaskModal = ({ open, onClose, onSubmit, locations, loading, error, initial }) => {
   const [name, setName] = useState("");
   const [location, setLocation] = useState("");
   const [description, setDescription] = useState("");
@@ -253,8 +253,14 @@ const CreateTaskModal = ({ open, onClose, onSubmit, locations, loading, error })
   useEffect(() => {
     if (!open) {
       setName(""); setLocation(""); setDescription(""); setSkills("");
+    } else if (initial) {
+      // Prefilled launch (e.g. Bench Radar's "Find work" for a roll-off).
+      setName(initial.name || "");
+      setLocation(initial.location || "");
+      setDescription(initial.description || "");
+      setSkills(initial.skills || "");
     }
-  }, [open]);
+  }, [open, initial]);
 
   if (!open) return null;
   const canSubmit = name.trim() && !loading;
@@ -1585,7 +1591,7 @@ const TaskDetailModal = ({ task, onClose, onOpenEmployee, onToggleStatus, onDele
 // forward-planned allocation drops to <=50% within the horizon. This is the
 // early-warning view the flat bench list can't give: capacity you can plan
 // for BEFORE it sits idle. Clicking a row opens the employee detail modal.
-const BenchRadarPanel = ({ onOpen, department }) => {
+const BenchRadarPanel = ({ onOpen, onFindWork, department }) => {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [open, setOpen] = useState(false);
@@ -1644,7 +1650,7 @@ const BenchRadarPanel = ({ onOpen, department }) => {
               onClick={() => onOpen && onOpen({ code: it.code, name: it.name, department: it.dept, position: it.position })}
               style={{
                 padding: 12, border: `1px solid ${C.border}`, borderRadius: 10, cursor: "pointer",
-                display: "grid", gridTemplateColumns: "1fr auto auto", gap: 12, alignItems: "center",
+                display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: 12, alignItems: "center",
                 transition: "box-shadow 0.15s, transform 0.15s",
               }}
               onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.06)"; e.currentTarget.style.transform = "translateY(-1px)"; }}
@@ -1671,6 +1677,14 @@ const BenchRadarPanel = ({ onOpen, department }) => {
               }}>
                 {it.full_free ? "fully free" : "partially free"} in {it.weeks_until}w · wk of {fmtWk(it.rolloff_week)}
               </span>
+              <button onClick={(e) => { e.stopPropagation(); onFindWork && onFindWork(it); }}
+                title={`Find the next assignment for ${cleanName(it)}`} style={{
+                  padding: "6px 11px", borderRadius: 8, border: "none", cursor: "pointer", whiteSpace: "nowrap",
+                  background: `linear-gradient(135deg, ${C.accent}, ${C.accentDark})`, color: "#fff",
+                  fontSize: 11.5, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 5,
+                }}>
+                <Sparkles size={12} /> Find work
+              </button>
             </div>
           ))}
         </div>
@@ -1693,7 +1707,7 @@ const heatCell = (pct) => {
   return { bg: "#E11D48", fg: "#FFFFFF" };                    // overallocated
 };
 
-const CapacityHeatmap = ({ department, searchTerm, onOpen }) => {
+const CapacityHeatmap = ({ department, allowedCodes, onOpen }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -1723,9 +1737,10 @@ const CapacityHeatmap = ({ department, searchTerm, onOpen }) => {
   const weekNos = data.week_nos || [];
   const cur = data.current_week;
   const firstFuture = weeks.findIndex(w => cur && w > cur);
-  const term = (searchTerm || "").trim().toLowerCase();
+  // Membership in the page's filtered card list = the single filter truth
+  // (covers search, status, skill; department is already applied server-side).
   const people = (data.people || []).filter(p =>
-    !term || `${p.name} ${p.code} ${p.dept}`.toLowerCase().includes(term));
+    !allowedCodes || allowedCodes.has(String(p.code)));
 
   const legend = [
     ["Free", heatCell(0)], ["Partial", heatCell(60)],
@@ -1813,6 +1828,7 @@ const AvailabilityEnginePage = () => {
 
   // Modal state
   const [createOpen, setCreateOpen] = useState(false);
+  const [createPrefill, setCreatePrefill] = useState(null);
   const [bestFitOpen, setBestFitOpen] = useState(false);
   const [bestFitLoading, setBestFitLoading] = useState(false);
   const [bestFitError, setBestFitError] = useState(null);
@@ -1987,6 +2003,32 @@ const AvailabilityEnginePage = () => {
     { label: "No Timesheet",    key: "no_timesheet",    accent: C.danger,      subtitle: "0 hrs logged" },
   ]), []);
 
+  // FILTER COHERENCE: once the workforce list is loaded, the KPI strip is
+  // computed from the FILTERED list so search/status/department/skill all
+  // flow through every number on the page (the server KPIs are only the
+  // pre-load placeholder). Same fields the cards use, so they always agree.
+  const anyFilterActive = !!(searchTerm.trim() || statusFilter || deptFilter || skillFilter);
+  const filteredKpis = useMemo(() => {
+    if (loadingList || employees.length === 0) return null;
+    const k = { total_employees: filteredEmployees.length, on_bench: 0, partial: 0, allocated: 0, high_activity: 0, no_timesheet: 0 };
+    for (const e of filteredEmployees) {
+      const s = e.status || "";
+      if (s === "Bench") k.on_bench++;
+      else if (s === "Partial") k.partial++;
+      else if (s === "Allocated") k.allocated++;
+      const h = Number(e.hrs_90d || 0);
+      if (h >= 120) k.high_activity++;
+      if (h === 0) k.no_timesheet++;
+    }
+    return k;
+  }, [filteredEmployees, loadingList, employees.length]);
+
+  // FILTER COHERENCE: the heatmap obeys status/skill/search too — membership
+  // in the filtered card list is the single source of truth for who shows.
+  const filteredCodeSet = useMemo(
+    () => new Set(filteredEmployees.map(e => String(e.code))),
+    [filteredEmployees]);
+
   return (
     <div style={{ padding: 24, maxWidth: 1600, margin: "0 auto" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
@@ -2003,15 +2045,34 @@ const AvailabilityEnginePage = () => {
       </div>
       <p style={{ margin: "4px 0 20px", fontSize: 13, color: C.textMuted }}>Capacity, skills and engagement across the active workforce — backed by live BigQuery data.</p>
 
-      {/* KPI strip */}
+      {/* KPI strip — reflects the active filters once the list is loaded */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 16, marginBottom: 20 }}>
         {kpiBlocks.map(b => (
-          <KPICard key={b.key} label={b.label} value={kpis?.[b.key]} accent={b.accent} subtitle={b.subtitle} />
+          <KPICard key={b.key} label={b.label} value={(filteredKpis ?? kpis)?.[b.key]} accent={b.accent}
+            subtitle={anyFilterActive && filteredKpis ? "matching filters" : b.subtitle} />
         ))}
       </div>
 
       {/* Bench Radar — upcoming roll-offs (collapsible, follows the dept filter) */}
-      <BenchRadarPanel onOpen={(e) => setDetailEmp(e)} department={deptFilter} />
+      <BenchRadarPanel onOpen={(e) => setDetailEmp(e)} department={deptFilter}
+        onFindWork={async (it) => {
+          // Prefill Find Best Fit with the roll-off person's skills + context
+          // so the radar's early warning becomes a one-click staffing action.
+          let personSkills = [];
+          try {
+            const r = await fetchJson(`/api/availability/employees/${encodeURIComponent(it.code)}/skills`);
+            personSkills = r.skills || [];
+          } catch { /* skills are optional */ }
+          const offOf = (it.current_projects || []).slice(0, 2).join(", ");
+          setCreatePrefill({
+            name: `Next assignment for ${cleanName(it)}`,
+            skills: personSkills.join(", "),
+            description: `${cleanName(it)} (${it.code}${it.dept ? `, ${it.dept}` : ""}${it.position ? `, ${it.position}` : ""}) `
+              + `rolls off ${offOf || "their current project"} around the week of ${it.rolloff_week} `
+              + `(${it.current_pct}% → ${it.pct_at_rolloff}% allocated). Find suitable work for them to pick up from then.`,
+          });
+          setCreateOpen(true);
+        }} />
 
       {/* Tasks panel (collapsible) */}
       <SavedTasksPanel tasks={tasks} onDelete={handleDeleteTask} onToggleStatus={handleToggleStatus} onOpen={setSelectedTask} />
@@ -2048,7 +2109,7 @@ const AvailabilityEnginePage = () => {
           {(departments || []).map(d => <option key={d} value={d}>{d}</option>)}
         </select>
         <SkillDropdown skills={skills} active={skillFilter} onChange={setSkillFilter} />
-        <button onClick={() => setCreateOpen(true)} style={{
+        <button onClick={() => { setCreatePrefill(null); setCreateOpen(true); }} style={{
           padding: "12px 18px", borderRadius: 10, border: "none",
           background: `linear-gradient(135deg, ${C.accent}, ${C.accentDark})`,
           color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer",
@@ -2083,9 +2144,9 @@ const AvailabilityEnginePage = () => {
       )}
       {viewMode === "heatmap" ? (
         <>
-          <CapacityHeatmap department={deptFilter} searchTerm={searchTerm} onOpen={(e) => setDetailEmp(e)} />
+          <CapacityHeatmap department={deptFilter} allowedCodes={anyFilterActive ? filteredCodeSet : null} onOpen={(e) => setDetailEmp(e)} />
           <div style={{ marginTop: 16, fontSize: 12, color: C.textMuted, textAlign: "center" }}>
-            Weekly allocated % per person, past and forward-planned weeks · click a name to drill in · status and skill filters apply to the card view
+            Weekly allocated % per person, past and forward-planned weeks · click a name to drill in · follows all filters above
           </div>
         </>
       ) : loadingList ? (
@@ -2116,6 +2177,7 @@ const AvailabilityEnginePage = () => {
         locations={locations}
         loading={bestFitLoading}
         error={bestFitError}
+        initial={createPrefill}
       />
       <BestFitResultsModal
         open={bestFitOpen}
