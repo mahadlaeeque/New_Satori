@@ -811,7 +811,7 @@ const ChatAgent = ({ isOpen, onClose, dashboardContext }) => {
     }}>
       {/* Header */}
       <div style={{
-        background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})`,
+        background: "var(--g-brand-deep)",
         padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between"
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -873,7 +873,7 @@ const ChatAgent = ({ isOpen, onClose, dashboardContext }) => {
         />
         <button onClick={handleSend} style={{
           width: 40, height: 40, borderRadius: 12, border: "none",
-          background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`,
+          background: "var(--g-brand)",
           color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center"
         }}>
           <Send size={16} />
@@ -1484,7 +1484,7 @@ const FabButtons = ({ pageLabel } = {}) => {
                 onClick={() => askHelp(helpQuestion.trim())}
                 style={{
                   padding: "8px 12px", borderRadius: 8, border: "none",
-                  background: helpBusy || !helpQuestion.trim() ? "#E2E8F0" : COLORS.accent,
+                  background: helpBusy || !helpQuestion.trim() ? "var(--c-disabled)" : COLORS.accent,
                   color: helpBusy || !helpQuestion.trim() ? COLORS.textMuted : "#fff",
                   fontSize: 12, fontWeight: 600, cursor: helpBusy ? "default" : "pointer",
                 }}
@@ -1608,7 +1608,7 @@ const FabButtons = ({ pageLabel } = {}) => {
                   }}>Cancel</button>
                   <button onClick={submitReport} disabled={reportBusy || !reportMsg.trim()} style={{
                     padding: "8px 16px", borderRadius: 8, border: "none",
-                    background: reportBusy || !reportMsg.trim() ? "#E2E8F0" : COLORS.accent,
+                    background: reportBusy || !reportMsg.trim() ? "var(--c-disabled)" : COLORS.accent,
                     color: reportBusy || !reportMsg.trim() ? COLORS.textMuted : "#fff",
                     fontSize: 12.5, fontWeight: 600, cursor: reportBusy || !reportMsg.trim() ? "default" : "pointer",
                   }}>{reportBusy ? "Sending…" : "Send report"}</button>
@@ -2068,7 +2068,7 @@ const QualityDashboard = () => (
       <ChartCard title="Quality Scorecard" subtitle="Multi-dimensional assessment">
         <ResponsiveContainer width="100%" height={260}>
           <RadarChart cx="50%" cy="50%" outerRadius={90} data={qualityData.metrics}>
-            <PolarGrid stroke="#E2E8F0" />
+            <PolarGrid stroke="var(--c-disabled)" />
             <PolarAngleAxis dataKey="subject" tick={{ fontSize: 10, fill: COLORS.textMuted }} />
             <PolarRadiusAxis angle={30} domain={[0, 100]} tick={{ fontSize: 10 }} />
             <Radar name="Score" dataKey="A" stroke={COLORS.primary} fill={COLORS.primary} fillOpacity={0.2} />
@@ -2854,7 +2854,7 @@ const AgentPage = () => {
         <div style={{ flex: 1, overflowY: "auto", padding: "24px 32px" }}>
           {!hasMessages && (
             <div style={{ textAlign: "center", paddingTop: 40 }}>
-              <div style={{ width: 64, height: 64, borderRadius: 20, background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
+              <div style={{ width: 64, height: 64, borderRadius: 20, background: "var(--g-brand)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
                 <Sparkles size={32} color="#fff" />
               </div>
               <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 8 }}>How can I help you today?</div>
@@ -2898,7 +2898,7 @@ const AgentPage = () => {
             }}>
               <div style={{
                 maxWidth: "70%", padding: "14px 18px", borderRadius: msg.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
-                background: msg.role === "user" ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})` : COLORS.surface,
+                background: msg.role === "user" ? "var(--g-brand-deep)" : COLORS.surface,
                 color: msg.role === "user" ? "#fff" : COLORS.textPrimary,
                 border: msg.role === "assistant" ? `1px solid ${COLORS.border}` : "none",
                 boxShadow: "0 1px 3px rgba(0,0,0,0.06)"
@@ -2971,7 +2971,7 @@ const AgentPage = () => {
             {/* Send button */}
             <button onClick={handleSend} disabled={!input.trim()} style={{
               width: 46, height: 46, borderRadius: 14, border: "none", cursor: input.trim() ? "pointer" : "default",
-              background: input.trim() ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})` : "#E2E8F0",
+              background: input.trim() ? "var(--g-brand)" : "var(--c-disabled)",
               display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.2s", flexShrink: 0,
               alignSelf: "flex-end", marginBottom: 0
             }}>
@@ -2999,7 +2999,7 @@ const AgentPage = () => {
                 <div style={{
                   width: 44, height: 44, borderRadius: "50%", flexShrink: 0,
                   background: voiceStatus === "listening"
-                    ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`
+                    ? "var(--g-brand)"
                     : `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentLight})`,
                   display: "flex", alignItems: "center", justifyContent: "center",
                   animation: voiceStatus === "listening" ? "pulse 2s infinite" : "none",
@@ -3456,7 +3456,7 @@ const ReportChatPanel = ({
                 borderRadius: msg.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
                 background: msg.isScopeNotice
                   ? "#FEF9E7"
-                  : (msg.role === "user" ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})` : COLORS.surface),
+                  : (msg.role === "user" ? "var(--g-brand-deep)" : COLORS.surface),
                 color: msg.role === "user" ? "#fff" : COLORS.textPrimary,
                 border: msg.isScopeNotice
                   ? `1px solid ${COLORS.warning}`
@@ -4860,14 +4860,14 @@ const RulesEnginePage = () => {
                     <div style={{
                       width: 26, height: 26, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
                       fontSize: 11, fontWeight: 600,
-                      background: modalStep > i + 1 ? COLORS.success : modalStep === i + 1 ? amber.primary : "#E5E7EB",
+                      background: modalStep > i + 1 ? COLORS.success : modalStep === i + 1 ? amber.primary : "var(--c-disabled)",
                       color: modalStep >= i + 1 ? "#fff" : COLORS.textMuted
                     }}>
                       {modalStep > i + 1 ? <CheckCircle size={14} /> : i + 1}
                     </div>
                     <span style={{ fontSize: 11, fontWeight: modalStep === i + 1 ? 600 : 400, color: modalStep === i + 1 ? amber.deep : COLORS.textMuted }}>{label}</span>
                   </div>
-                  {i < 3 && <div style={{ width: 24, height: 1, background: modalStep > i + 1 ? COLORS.success : "#E5E7EB" }} />}
+                  {i < 3 && <div style={{ width: 24, height: 1, background: modalStep > i + 1 ? COLORS.success : "var(--c-disabled)" }} />}
                 </div>
               ))}
             </div>
@@ -5057,7 +5057,7 @@ const RulesEnginePage = () => {
                 style={{
                   padding: "10px 24px", borderRadius: 10, border: "none", cursor: "pointer",
                   background: (modalStep === 1 && (!newRule.metric || !newRule.value)) || (modalStep === 2 && newRule.channels.length === 0)
-                    ? "#E5E7EB" : `linear-gradient(135deg, ${amber.primary}, ${amber.deep})`,
+                    ? "var(--c-disabled)" : `linear-gradient(135deg, ${amber.primary}, ${amber.deep})`,
                   color: "#fff", fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6,
                   boxShadow: (modalStep === 1 && (!newRule.metric || !newRule.value)) || (modalStep === 2 && newRule.channels.length === 0)
                     ? "none" : "0 2px 8px rgba(245,158,11,0.3)"
@@ -6781,7 +6781,7 @@ const DashboardChatPanel = ({
                 borderRadius: msg.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
                 background: msg.isScopeNotice
                   ? "#FEF9E7"
-                  : (msg.role === "user" ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})` : COLORS.surface),
+                  : (msg.role === "user" ? "var(--g-brand-deep)" : COLORS.surface),
                 color: msg.role === "user" ? "#fff" : COLORS.textPrimary,
                 border: msg.isScopeNotice
                   ? `1px solid ${COLORS.warning}`
@@ -7245,7 +7245,7 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
                     <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
                       <div style={{
                         width: 30, height: 30, borderRadius: 8,
-                        background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})`,
+                        background: "var(--g-brand-deep)",
                         color: "#fff", fontSize: 12, fontWeight: 700,
                         display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
                       }}>
@@ -8123,7 +8123,7 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
             style={{
               display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 18px",
               border: "none", borderRadius: 10,
-              background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})`,
+              background: "var(--g-brand-deep)",
               color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
               boxShadow: "0 2px 8px rgba(51,51,51,0.18)"
             }}
@@ -8635,7 +8635,7 @@ const ImportPracticeHeadsModal = ({ onClose, onImported }) => {
             disabled={readyToCreateCount === 0 || importing || loading}
             style={{
               padding: "10px 20px", borderRadius: 8, border: "none",
-              background: readyToCreateCount > 0 && !importing ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})` : "#E5E7EB",
+              background: readyToCreateCount > 0 && !importing ? "var(--g-brand)" : "var(--c-disabled)",
               color: "#fff", fontWeight: 700, fontSize: 14,
               cursor: readyToCreateCount > 0 && !importing ? "pointer" : "not-allowed",
               opacity: readyToCreateCount > 0 && !importing ? 1 : 0.6,
@@ -8722,7 +8722,7 @@ const ImportResultOverlay = ({ result, onClose }) => {
         <div style={{ padding: "12px 22px", borderTop: `1px solid ${COLORS.border}`, display: "flex", justifyContent: "flex-end", background: COLORS.surfaceAlt }}>
           <button onClick={onClose} style={{
             padding: "9px 18px", borderRadius: 8, border: "none",
-            background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`,
+            background: "var(--g-brand)",
             color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer",
           }}>Done</button>
         </div>
@@ -9697,7 +9697,7 @@ const SchemaSettingsCard = () => {
                 disabled={!addPicker}
                 style={{
                   padding: "8px 14px", borderRadius: 8, border: "none",
-                  background: addPicker ? COLORS.accent : "#E2E8F0",
+                  background: addPicker ? COLORS.accent : "var(--c-disabled)",
                   color: addPicker ? "#fff" : COLORS.textMuted,
                   fontSize: 12.5, fontWeight: 600, cursor: addPicker ? "pointer" : "default",
                 }}
@@ -9949,7 +9949,7 @@ const SystemSettingsPage = () => {
                 disabled={bypassSaving || bypassOtpDraft === bypassOtp}
                 style={{
                   padding: "10px 16px", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 600,
-                  background: (bypassSaving || bypassOtpDraft === bypassOtp) ? "#E2E8F0" : COLORS.primary,
+                  background: (bypassSaving || bypassOtpDraft === bypassOtp) ? "var(--c-disabled)" : COLORS.primary,
                   color: (bypassSaving || bypassOtpDraft === bypassOtp) ? COLORS.textMuted : "#fff",
                   cursor: (bypassSaving || bypassOtpDraft === bypassOtp) ? "default" : "pointer",
                   transition: "all 0.15s", whiteSpace: "nowrap",
@@ -10445,7 +10445,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                       transition: "all 0.2s", boxSizing: "border-box"
                     }}
                     onFocus={e => { e.target.style.borderColor = COLORS.primary; e.target.style.background = COLORS.surface; }}
-                    onBlur={e => { e.target.style.borderColor = "#E2E8F0"; e.target.style.background = COLORS.surfaceAlt; }}
+                    onBlur={e => { e.target.style.borderColor = "var(--c-disabled)"; e.target.style.background = COLORS.surfaceAlt; }}
                   />
                 </div>
               </div>
@@ -10462,7 +10462,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                       transition: "all 0.2s", boxSizing: "border-box"
                     }}
                     onFocus={e => { e.target.style.borderColor = COLORS.primary; e.target.style.background = COLORS.surface; }}
-                    onBlur={e => { e.target.style.borderColor = "#E2E8F0"; e.target.style.background = COLORS.surfaceAlt; }}
+                    onBlur={e => { e.target.style.borderColor = "var(--c-disabled)"; e.target.style.background = COLORS.surfaceAlt; }}
                   />
                 </div>
               </div>
@@ -10473,7 +10473,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
               )}
               <button type="submit" disabled={isLoading} style={{
                 width: "100%", padding: "14px", border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600,
-                background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`,
+                background: "var(--g-brand)",
                 color: "#fff", cursor: "pointer", transition: "all 0.2s",
                 fontFamily: "'Poppins', 'Red Hat Display', sans-serif",
                 opacity: isLoading ? 0.7 : 1, marginTop: 8,
@@ -10532,7 +10532,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                 </div>
                 <button type="submit" disabled={forgotBusy} style={{
                   width: "100%", padding: "14px", border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600,
-                  background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`, color: "#fff",
+                  background: "var(--g-brand)", color: "#fff",
                   cursor: forgotBusy ? "default" : "pointer", opacity: forgotBusy ? 0.7 : 1,
                 }}>
                   {forgotBusy ? "Sending…" : "Send reset link"}
@@ -10588,7 +10588,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
                   }}
                   onFocus={e => { e.target.style.borderColor = COLORS.primary; e.target.style.background = COLORS.surface; }}
-                  onBlur={e => { e.target.style.borderColor = "#E2E8F0"; e.target.style.background = COLORS.surfaceAlt; }}
+                  onBlur={e => { e.target.style.borderColor = "var(--c-disabled)"; e.target.style.background = COLORS.surfaceAlt; }}
                 />
               </div>
               <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: COLORS.textSecondary, cursor: "pointer" }}>
@@ -10602,7 +10602,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
               )}
               <button type="submit" disabled={isLoading || code.length !== 6} style={{
                 width: "100%", padding: "14px", border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600,
-                background: code.length === 6 ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})` : "#E2E8F0",
+                background: code.length === 6 ? "var(--g-brand)" : "var(--c-disabled)",
                 color: "#fff", cursor: code.length === 6 && !isLoading ? "pointer" : "default",
                 opacity: isLoading ? 0.7 : 1, boxShadow: code.length === 6 ? "0 4px 12px rgba(51,51,51,0.3)" : "none"
               }}>
@@ -10646,7 +10646,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
             </button>
             <button onClick={handleEnterApp} style={{
               width: "100%", padding: "14px", border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600,
-              background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`,
+              background: "var(--g-brand)",
               color: "#fff", cursor: "pointer",
               boxShadow: "0 4px 12px rgba(51,51,51,0.3)"
             }}>
@@ -10685,7 +10685,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                   textTransform: useBackupCode ? "uppercase" : "none",
                 }}
                 onFocus={e => { e.target.style.borderColor = COLORS.primary; e.target.style.background = COLORS.surface; }}
-                onBlur={e => { e.target.style.borderColor = "#E2E8F0"; e.target.style.background = COLORS.surfaceAlt; }}
+                onBlur={e => { e.target.style.borderColor = "var(--c-disabled)"; e.target.style.background = COLORS.surfaceAlt; }}
               />
               <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: COLORS.textSecondary, cursor: "pointer" }}>
                 <input type="checkbox" checked={trustDevice} onChange={(e) => setTrustDevice(e.target.checked)} style={{ accentColor: COLORS.primary }} />
@@ -10698,7 +10698,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
               )}
               <button type="submit" disabled={isLoading || (useBackupCode ? code.length < 9 : code.length !== 6)} style={{
                 width: "100%", padding: "14px", border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600,
-                background: (useBackupCode ? code.length >= 9 : code.length === 6) ? `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})` : "#E2E8F0",
+                background: (useBackupCode ? code.length >= 9 : code.length === 6) ? "var(--g-brand)" : "var(--c-disabled)",
                 color: "#fff",
                 cursor: (useBackupCode ? code.length >= 9 : code.length === 6) && !isLoading ? "pointer" : "default",
                 opacity: isLoading ? 0.7 : 1, boxShadow: (useBackupCode ? code.length >= 9 : code.length === 6) ? "0 4px 12px rgba(51,51,51,0.3)" : "none"
@@ -10766,6 +10766,13 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           --sem-rose-bg:     #FFE4E6;  --sem-rose-fg:    #9F1239;  --sem-rose-border: #FDA4AF;
           --sem-amber2-bg:   #FDE68A;  --sem-amber2-fg:  #92400E;
           --sem-amber3-bg:   #FEF9C3;  --sem-amber3-fg:  #854D0E;
+          /* Brand gradients + disabled state. In light mode the brand sweep is
+             charcoal→green; in dark, --c-primary flips to near-white so that
+             mix washes out — the dark overrides keep the sweep deep green so
+             white text/icons on it always hold contrast. */
+          --g-brand:      linear-gradient(135deg, #333333, #8AC441);
+          --g-brand-deep: linear-gradient(135deg, #333333, #68933F);
+          --c-disabled:   #E2E8F0;
         }
         html[data-satori-theme="dark"] {
           --c-primary:         #F1F5F9;
@@ -10774,9 +10781,9 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           --c-surface:         #151C2C;
           --c-surface-alt:     #0E1422;
           --c-border:          rgba(148,163,184,0.16);
-          --c-text-primary:    #EDF2F9;
-          --c-text-secondary:  #B9C4D6;
-          --c-text-muted:      #7E8CA3;
+          --c-text-primary:    #F2F6FC;
+          --c-text-secondary:  #C5D0E2;
+          --c-text-muted:      #93A1B8;
           --c-page-bg:         #0A0F1B;
           --c-input-bg:        #101727;
           /* Dark semantic tints: low-alpha color washes + bright readable
@@ -10789,6 +10796,9 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           --sem-rose-bg:     rgba(244,63,94,0.17);   --sem-rose-fg:    #FDA4AF;  --sem-rose-border: rgba(244,63,94,0.45);
           --sem-amber2-bg:   rgba(245,158,11,0.30);  --sem-amber2-fg:  #FDE68A;
           --sem-amber3-bg:   rgba(245,158,11,0.10);  --sem-amber3-fg:  #FCD34D;
+          --g-brand:      linear-gradient(135deg, #5E8B33, #8AC441);
+          --g-brand-deep: linear-gradient(135deg, #46682A, #74A93A);
+          --c-disabled:   #243049;
         }
         html[data-satori-theme="dark"] body { background: var(--c-page-bg); color: var(--c-text-primary); }
 
@@ -11185,7 +11195,7 @@ const ResetPasswordPage = () => {
             <div style={{ padding: "12px 14px", background: "var(--sem-ok-bg)", border: "1px solid #6EE7B7", borderRadius: 10, color: "var(--sem-ok-fg)", fontSize: 13.5, lineHeight: 1.5 }}>
               Your password has been updated. You can now sign in with your new password.
             </div>
-            <button onClick={goLogin} style={{ marginTop: 20, width: "100%", padding: 14, border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600, background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`, color: "#fff", cursor: "pointer" }}>Go to sign in</button>
+            <button onClick={goLogin} style={{ marginTop: 20, width: "100%", padding: 14, border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600, background: "var(--g-brand)", color: "#fff", cursor: "pointer" }}>Go to sign in</button>
           </>
         ) : (
           <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 8 }}>
@@ -11201,7 +11211,7 @@ const ResetPasswordPage = () => {
                 style={{ width: "100%", padding: "12px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 12, fontSize: 14, outline: "none", background: COLORS.surfaceAlt, boxSizing: "border-box" }} />
             </div>
             {err && <div style={{ padding: "10px 14px", background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13 }}>{err}</div>}
-            <button type="submit" disabled={busy} style={{ width: "100%", padding: 14, border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600, background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`, color: "#fff", cursor: busy ? "default" : "pointer", opacity: busy ? 0.7 : 1 }}>
+            <button type="submit" disabled={busy} style={{ width: "100%", padding: 14, border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600, background: "var(--g-brand)", color: "#fff", cursor: busy ? "default" : "pointer", opacity: busy ? 0.7 : 1 }}>
               {busy ? "Updating…" : "Update password"}
             </button>
             <button type="button" onClick={goLogin} style={{ background: "none", border: "none", color: COLORS.textSecondary, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
@@ -11584,7 +11594,7 @@ export default function App() {
           gap: 12, height: 64
         }}>
           {sidebarCollapsed ? (
-            <div style={{ width: 30, height: 30, borderRadius: 8, background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ width: 30, height: 30, borderRadius: 8, background: "var(--g-brand)", display: "flex", alignItems: "center", justifyContent: "center" }}>
               <span style={{ color: "#fff", fontSize: 15, fontWeight: 800, fontFamily: "'Red Hat Display', sans-serif" }}>S</span>
             </div>
           ) : (
@@ -11692,7 +11702,7 @@ export default function App() {
                 color: darkMode ? "#FBBF24" : "#475569", transition: "all 0.15s",
               }}
               onMouseEnter={(e) => (e.currentTarget.style.borderColor = "#8AC441")}
-              onMouseLeave={(e) => (e.currentTarget.style.borderColor = "#E2E8F0")}
+              onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--c-disabled)")}
             >
               {darkMode ? <Sun size={17} /> : <Moon size={17} />}
             </button>
@@ -11705,7 +11715,7 @@ export default function App() {
               }}>
                 <div style={{
                   width: 32, height: 32, borderRadius: 8,
-                  background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accentDark})`,
+                  background: "var(--g-brand-deep)",
                   display: "flex", alignItems: "center", justifyContent: "center",
                   color: "#fff", fontSize: 13, fontWeight: 600
                 }}>{currentUser?.full_name?.[0] || "U"}</div>
