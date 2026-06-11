@@ -53,9 +53,9 @@ const C = {
 
 // Status band colours — same vocabulary as the backend (_avail_employees_sql).
 const STATUS_COLOR = {
-  Bench:     { fg: "#0E7E3E", bg: "#DCFCE7", border: "#86EFAC" },
-  Partial:   { fg: "#B45309", bg: "#FEF3C7", border: "#FCD34D" },
-  Allocated: { fg: "#9F1239", bg: "#FFE4E6", border: "#FDA4AF" },
+  Bench:     { fg: "var(--sem-ok-fg)", bg: "var(--sem-ok-bg)", border: "var(--sem-ok-border)" },
+  Partial:   { fg: "var(--sem-warn-fg)", bg: "var(--sem-warn-bg)", border: "var(--sem-warn-border)" },
+  Allocated: { fg: "var(--sem-rose-fg)", bg: "var(--sem-rose-bg)", border: "var(--sem-rose-border)" },
 };
 
 // ─── Token + fetch helpers ───
@@ -327,7 +327,7 @@ const CreateTaskModal = ({ open, onClose, onSubmit, locations, loading, error, i
         </div>
 
         {error && (
-          <div style={{ margin: "0 24px 16px", padding: "10px 14px", background: "#FEE2E2", color: "#991B1B", borderRadius: 8, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ margin: "0 24px 16px", padding: "10px 14px", background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)", borderRadius: 8, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
             <AlertCircle size={16} /> {error}
           </div>
         )}
@@ -657,11 +657,11 @@ const WeeklyTimeline = ({ data, loading }) => {
 // agent) so this tab and Ask-Me-Anything can never disagree on working days.
 const attPill = (statusRaw) => {
   const s = (statusRaw || "").toLowerCase();
-  if (s.includes("present")) return { fg: "#0E7E3E", bg: "#DCFCE7" };
-  if (s.includes("remote"))  return { fg: "#0A5F89", bg: "#E0F2FE" };
-  if (s.includes("leave"))   return { fg: "#B45309", bg: "#FEF3C7" };
-  if (s.includes("absent"))  return { fg: "#B91C1C", bg: "#FEE2E2" };
-  if (s.includes("missing")) return { fg: "#C2410C", bg: "#FFEDD5" };
+  if (s.includes("present")) return { fg: "var(--sem-ok-fg)", bg: "var(--sem-ok-bg)" };
+  if (s.includes("remote"))  return { fg: "var(--sem-info-fg)", bg: "var(--sem-info-bg)" };
+  if (s.includes("leave"))   return { fg: "var(--sem-warn-fg)", bg: "var(--sem-warn-bg)" };
+  if (s.includes("absent"))  return { fg: "var(--sem-danger-fg)", bg: "var(--sem-danger-bg)" };
+  if (s.includes("missing")) return { fg: "var(--sem-orange-fg)", bg: "var(--sem-orange-bg)" };
   return { fg: "var(--c-text-muted)", bg: "var(--c-surface-alt)" };
 };
 
@@ -674,7 +674,7 @@ const fmtAttDay = (iso) => {
 const AttendanceTab = ({ data, loading, error }) => {
   if (loading && !data) return <div style={{ padding: 20, color: C.textMuted, fontSize: 13 }}>Loading attendance…</div>;
   if (error) return (
-    <div style={{ padding: "10px 14px", background: "#FEE2E2", color: "#991B1B", borderRadius: 8, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+    <div style={{ padding: "10px 14px", background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)", borderRadius: 8, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
       <AlertCircle size={16} /> {error}
     </div>
   );
@@ -686,11 +686,11 @@ const AttendanceTab = ({ data, loading, error }) => {
       label: "Attendance rate",
       value: rate != null ? `${rate}%` : "—",
       sub: `${s.attended || 0} of ${s.working_days || 0} working days`,
-      color: rate == null ? C.textPrimary : rate >= 90 ? "#0E7E3E" : rate >= 70 ? "#B45309" : C.danger,
+      color: rate == null ? C.textPrimary : rate >= 90 ? "var(--sem-ok-fg)" : rate >= 70 ? "var(--sem-warn-fg)" : C.danger,
     },
     { label: "Present / Remote", value: `${s.present || 0} / ${s.remote || 0}`, sub: `${s.missing_punch || 0} missing punch` },
     { label: "Leave / Absent", value: `${s.on_leave || 0} / ${s.absent || 0}`, sub: "days", color: (s.absent || 0) > 0 ? C.danger : C.textPrimary },
-    { label: "Late arrivals", value: `${s.late_arrivals || 0}`, sub: s.avg_checkin ? `avg in ${s.avg_checkin} · out ${s.avg_checkout || "—"}` : "no punches", color: (s.late_arrivals || 0) > 0 ? "#C2410C" : C.textPrimary },
+    { label: "Late arrivals", value: `${s.late_arrivals || 0}`, sub: s.avg_checkin ? `avg in ${s.avg_checkin} · out ${s.avg_checkout || "—"}` : "no punches", color: (s.late_arrivals || 0) > 0 ? "var(--sem-orange-fg)" : C.textPrimary },
   ];
   const detail = data.days_detail || [];
   return (
@@ -729,7 +729,7 @@ const AttendanceTab = ({ data, loading, error }) => {
                   </span>
                   {d.leave_type && <span style={{ fontSize: 11, color: C.textMuted }}>{d.leave_type}</span>}
                   {d.late && (
-                    <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: "#FEE2E2", color: "#B91C1C" }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)" }}>
                       Late
                     </span>
                   )}
@@ -1113,7 +1113,7 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
           </div>
 
           {error && (
-            <div style={{ padding: "10px 14px", background: "#FEE2E2", color: "#991B1B", borderRadius: 8, fontSize: 13, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ padding: "10px 14px", background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)", borderRadius: 8, fontSize: 13, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
               <AlertCircle size={16} /> {error}
             </div>
           )}
@@ -1191,7 +1191,7 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
                 </>
               );
             })()}
-            {skillErr && <div style={{ fontSize: 12, color: "#991B1B", marginTop: 6 }}>{skillErr}</div>}
+            {skillErr && <div style={{ fontSize: 12, color: "var(--sem-danger-fg)", marginTop: 6 }}>{skillErr}</div>}
           </div>
 
           {/* Weekly allocation timeline (past → planned) */}
@@ -1249,7 +1249,7 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
                 <TrendingUp size={14} /> Plan vs actuals
               </h3>
               {(detail.plan_vs_actual.not_logging > 0 || detail.plan_vs_actual.unplanned > 0) && (
-                <div style={{ fontSize: 12, color: "#B45309", fontWeight: 600, marginBottom: 8 }}>
+                <div style={{ fontSize: 12, color: "var(--sem-warn-fg)", fontWeight: 600, marginBottom: 8 }}>
                   {[
                     detail.plan_vs_actual.not_logging > 0 ? `${detail.plan_vs_actual.not_logging} allocated project${detail.plan_vs_actual.not_logging > 1 ? "s" : ""} with no logged hours` : null,
                     detail.plan_vs_actual.unplanned > 0 ? `${detail.plan_vs_actual.unplanned} project${detail.plan_vs_actual.unplanned > 1 ? "s" : ""} logged without an allocation` : null,
@@ -1274,10 +1274,10 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
                       <div style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 6 }}>
                         <span style={{ fontSize: 13, fontWeight: 600, color: C.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.project_name}</span>
                         {r.flag === "not_logging" && (
-                          <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: "#FEF3C7", color: "#B45309" }}>Not logging</span>
+                          <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: "var(--sem-warn-bg)", color: "var(--sem-warn-fg)" }}>Not logging</span>
                         )}
                         {r.flag === "unplanned" && (
-                          <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: "#E0F2FE", color: "#0A5F89" }}>Unplanned</span>
+                          <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: "var(--sem-info-bg)", color: "var(--sem-info-fg)" }}>Unplanned</span>
                         )}
                       </div>
                       <div>
@@ -1388,8 +1388,8 @@ const TaskDetailModal = ({ task, onClose, onOpenEmployee, onToggleStatus, onDele
   const status = task.status || "open";
   const STATUS_BADGE = {
     open:        { fg: "#1D4ED8", bg: "#DBEAFE" },
-    in_progress: { fg: "#B45309", bg: "#FEF3C7" },
-    done:        { fg: "#0E7E3E", bg: "#DCFCE7" },
+    in_progress: { fg: "var(--sem-warn-fg)", bg: "var(--sem-warn-bg)" },
+    done:        { fg: "var(--sem-ok-fg)", bg: "var(--sem-ok-bg)" },
   };
   const sb = STATUS_BADGE[status] || STATUS_BADGE.open;
   const statusLabel = status === "in_progress" ? "In progress" : status.charAt(0).toUpperCase() + status.slice(1);
@@ -1690,7 +1690,7 @@ const SuggestWorkModal = ({ item, onClose, onSaved }) => {
             </div>
           )}
           {error && (
-            <div style={{ padding: "10px 14px", background: "#FEE2E2", color: "#991B1B", borderRadius: 8, fontSize: 13, marginBottom: 12 }}>
+            <div style={{ padding: "10px 14px", background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)", borderRadius: 8, fontSize: 13, marginBottom: 12 }}>
               {error} — you can still write your own task below.
             </div>
           )}
@@ -1708,7 +1708,7 @@ const SuggestWorkModal = ({ item, onClose, onSaved }) => {
                   ))}
                 </div>
                 {savedIdx.has(i) ? (
-                  <span style={{ fontSize: 11.5, fontWeight: 700, color: "#0E7E3E", display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: "var(--sem-ok-fg)", display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
                     <CheckCircle size={13} /> Saved to tasks
                   </span>
                 ) : (
@@ -1790,7 +1790,7 @@ const BenchRadarPanel = ({ onOpen, onFindWork, department }) => {
       }}>
         <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Radar size={16} style={{ color: C.accentDark }} /> Bench Radar
-          <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999, background: items.length ? "#FEF3C7" : C.surfaceAlt, color: items.length ? "#B45309" : C.textMuted }}>
+          <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999, background: items.length ? "var(--sem-warn-bg)" : C.surfaceAlt, color: items.length ? "var(--sem-warn-fg)" : C.textMuted }}>
             {items.length ? `${items.length} rolling off in the next ${data.weeks_horizon} weeks` : `no roll-offs in the next ${data.weeks_horizon} weeks`}{department ? ` · ${department}` : ""}
           </span>
         </span>
@@ -1830,8 +1830,8 @@ const BenchRadarPanel = ({ onOpen, onFindWork, department }) => {
               </span>
               <span style={{
                 fontSize: 11, fontWeight: 700, padding: "4px 10px", borderRadius: 999, whiteSpace: "nowrap",
-                background: it.full_free ? "#DCFCE7" : "#FEF3C7",
-                color: it.full_free ? "#0E7E3E" : "#B45309",
+                background: it.full_free ? "var(--sem-ok-bg)" : "var(--sem-warn-bg)",
+                color: it.full_free ? "var(--sem-ok-fg)" : "var(--sem-warn-fg)",
               }}>
                 {it.full_free ? "fully free" : "partially free"} in {it.weeks_until}w · wk of {fmtWk(it.rolloff_week)}
               </span>
@@ -1858,10 +1858,10 @@ const BenchRadarPanel = ({ onOpen, onFindWork, department }) => {
 // engine's existing bench=green / allocated=red vocabulary. Semantic status
 // tints are intentionally literal hex (same rule as the status badges).
 const heatCell = (pct) => {
-  if (pct <= 0)   return { bg: "#DCFCE7", fg: "#0E7E3E" };   // free
-  if (pct < 50)   return { bg: "#FEF9C3", fg: "#854D0E" };   // lightly loaded
-  if (pct < 100)  return { bg: "#FDE68A", fg: "#92400E" };   // partial
-  if (pct <= 110) return { bg: "#FECACA", fg: "#9F1239" };   // fully booked
+  if (pct <= 0)   return { bg: "var(--sem-ok-bg)", fg: "var(--sem-ok-fg)" };   // free
+  if (pct < 50)   return { bg: "var(--sem-amber3-bg)", fg: "var(--sem-amber3-fg)" };   // lightly loaded
+  if (pct < 100)  return { bg: "var(--sem-amber2-bg)", fg: "var(--sem-amber2-fg)" };   // partial
+  if (pct <= 110) return { bg: "var(--sem-rose-bg)", fg: "var(--sem-rose-fg)" };   // fully booked
   return { bg: "#E11D48", fg: "#FFFFFF" };                    // overallocated
 };
 
@@ -1887,7 +1887,7 @@ const CapacityHeatmap = ({ department, allowedCodes, onOpen }) => {
     return <div style={{ padding: 40, textAlign: "center", color: C.textMuted }}><Loader2 size={24} className="spin" /><div style={{ marginTop: 8 }}>Loading capacity grid…</div></div>;
   }
   if (error) {
-    return <div style={{ padding: "10px 14px", background: "#FEE2E2", color: "#991B1B", borderRadius: 8, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}><AlertCircle size={16} /> {error}</div>;
+    return <div style={{ padding: "10px 14px", background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)", borderRadius: 8, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}><AlertCircle size={16} /> {error}</div>;
   }
   if (!data) return null;
 
@@ -1919,7 +1919,7 @@ const CapacityHeatmap = ({ department, allowedCodes, onOpen }) => {
         <span style={{ fontSize: 11, color: C.accent, fontWeight: 600 }}>← past · now (dashed) · planned →</span>
       </div>
       {data.truncated && (
-        <div style={{ fontSize: 12, color: "#B45309", fontWeight: 600, marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: "var(--sem-warn-fg)", fontWeight: 600, marginBottom: 10 }}>
           Showing {people.length} of {data.total_people} people — pick a department to see everyone.
         </div>
       )}
@@ -2281,7 +2281,7 @@ const AvailabilityEnginePage = () => {
 
       {/* Employee grid / heatmap */}
       {errorList && (
-        <div style={{ padding: "10px 14px", background: "#FEE2E2", color: "#991B1B", borderRadius: 8, fontSize: 13, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ padding: "10px 14px", background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)", borderRadius: 8, fontSize: 13, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
           <AlertCircle size={16} /> {errorList}
         </div>
       )}

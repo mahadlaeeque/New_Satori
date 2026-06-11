@@ -81,7 +81,7 @@ const KPICard = ({ title, value, change, changeType, icon: Icon, color, subtitle
         <div style={{
           display: "flex", alignItems: "center", gap: 2, fontSize: 13, fontWeight: 600,
           color: changeType === "up" ? COLORS.success : COLORS.danger,
-          background: changeType === "up" ? "#ECFDF5" : "#FEF2F2",
+          background: changeType === "up" ? "var(--sem-ok-bg)" : "var(--sem-danger-bg)",
           padding: "2px 8px", borderRadius: 20
         }}>
           {changeType === "up" ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
@@ -601,9 +601,9 @@ const EngagementPrompts = () => {
 
 const StatusBadge = ({ status }) => {
   const config = {
-    healthy: { bg: "#ECFDF5", color: "#059669", label: "Healthy" },
-    warning: { bg: "#FFFBEB", color: "#D97706", label: "Warning" },
-    critical: { bg: "#FEF2F2", color: "#DC2626", label: "Critical" },
+    healthy: { bg: "var(--sem-ok-bg)", color: "#059669", label: "Healthy" },
+    warning: { bg: "var(--sem-warn-bg)", color: "#D97706", label: "Warning" },
+    critical: { bg: "var(--sem-danger-bg)", color: "#DC2626", label: "Critical" },
     ontrack: { bg: "#EFF6FF", color: "#2563EB", label: "On Track" },
   };
   const c = config[status] || config.healthy;
@@ -2229,9 +2229,9 @@ const renderMarkdown = (text) => {
 // question into the chat input; the Briefing button has the avatar read a
 // composed summary aloud (script from /api/briefing, voice from /api/tts).
 const INSIGHT_SEV = {
-  critical: { bg: "#FEE2E2", fg: "#B91C1C", label: "Critical" },
-  warn:     { bg: "#FEF3C7", fg: "#B45309", label: "Heads-up" },
-  info:     { bg: "#E0F2FE", fg: "#0A5F89", label: "FYI" },
+  critical: { bg: "var(--sem-danger-bg)", fg: "var(--sem-danger-fg)", label: "Critical" },
+  warn:     { bg: "var(--sem-warn-bg)", fg: "var(--sem-warn-fg)", label: "Heads-up" },
+  info:     { bg: "var(--sem-info-bg)", fg: "var(--sem-info-fg)", label: "FYI" },
 };
 
 const BriefingPlayer = ({ onClose }) => {
@@ -2289,7 +2289,7 @@ const BriefingPlayer = ({ onClose }) => {
           {phase === "loading" ? "Preparing your briefing…" : phase === "error" ? "Briefing unavailable" : "Today's briefing"}
         </div>
         {phase === "error" ? (
-          <div style={{ fontSize: 13, color: "#B91C1C" }}>{err}</div>
+          <div style={{ fontSize: 13, color: "var(--sem-danger-fg)" }}>{err}</div>
         ) : (
           <div style={{ fontSize: 13, lineHeight: 1.65, color: COLORS.textSecondary, maxHeight: 190, overflowY: "auto", textAlign: "left", padding: "0 6px" }}>
             {script || "…"}
@@ -3049,12 +3049,12 @@ const AgentPage = () => {
                 {/* End button */}
                 <button onClick={stopVoice} style={{
                   width: 36, height: 36, borderRadius: 10, border: "none",
-                  background: "#FEF2F2", cursor: "pointer",
+                  background: "var(--sem-danger-bg)", cursor: "pointer",
                   display: "flex", alignItems: "center", justifyContent: "center",
                   transition: "all 0.15s", flexShrink: 0
                 }}
-                onMouseEnter={e => { e.currentTarget.style.background = "#FEE2E2"; }}
-                onMouseLeave={e => { e.currentTarget.style.background = "#FEF2F2"; }}
+                onMouseEnter={e => { e.currentTarget.style.background = "var(--sem-danger-bg)"; }}
+                onMouseLeave={e => { e.currentTarget.style.background = "var(--sem-danger-bg)"; }}
                 title={voiceLang === "ur" ? "بات ختم کریں" : "End conversation"}
                 >
                   <X size={16} color="#EF4444" />
@@ -3161,7 +3161,7 @@ const AgentPage = () => {
                         display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
                         opacity: 0.6, transition: "all 0.15s",
                       }}
-                      onMouseEnter={e => { e.stopPropagation(); e.currentTarget.style.background = "#FEE2E2"; e.currentTarget.style.color = COLORS.danger; e.currentTarget.style.opacity = 1; }}
+                      onMouseEnter={e => { e.stopPropagation(); e.currentTarget.style.background = "var(--sem-danger-bg)"; e.currentTarget.style.color = COLORS.danger; e.currentTarget.style.opacity = 1; }}
                       onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = COLORS.textMuted; e.currentTarget.style.opacity = 0.6; }}
                     >
                       <Trash2 size={12} />
@@ -4575,11 +4575,11 @@ const RULE_OPERATORS = [
 
 const RULES_TEMPLATES = [
   { id: "rt1", title: "High Receivables Alert", category: "Finance", description: "Alert when outstanding receivables exceed threshold", metric: "Receivables Balance", operator: "gt", value: "500000", unit: "$", channels: ["email", "whatsapp"], schedule: "hourly", icon: DollarSign, color: "#F59E0B" },
-  { id: "rt2", title: "Low Inventory Warning", category: "Supply Chain", description: "Notify when stock drops below minimum level", metric: "Inventory Level", operator: "lt", value: "100", unit: "units", channels: ["email", "slack"], schedule: "realtime", icon: Package, color: "#0A5F89" },
+  { id: "rt2", title: "Low Inventory Warning", category: "Supply Chain", description: "Notify when stock drops below minimum level", metric: "Inventory Level", operator: "lt", value: "100", unit: "units", channels: ["email", "slack"], schedule: "realtime", icon: Package, color: "var(--sem-info-fg)" },
   { id: "rt3", title: "Quality Defect Spike", category: "Manufacturing", description: "Alert on sudden increase in defect rate", metric: "Defect Rate", operator: "gt", value: "2", unit: "%", channels: ["email", "sms"], schedule: "realtime", icon: Shield, color: "#EF4444" },
   { id: "rt4", title: "Pipeline Drop Alert", category: "Sales", description: "Notify when pipeline value drops significantly", metric: "Pipeline Value", operator: "chg", value: "-15", unit: "%", channels: ["slack"], schedule: "daily", icon: TrendingDown, color: "#353085" },
   { id: "rt5", title: "Cash Flow Warning", category: "Finance", description: "Critical alert for low cash flow situations", metric: "Cash Flow", operator: "lt", value: "200000", unit: "$", channels: ["email", "whatsapp", "sms"], schedule: "daily", icon: AlertTriangle, color: "#D97706" },
-  { id: "rt6", title: "Delivery Delay Alert", category: "Supply Chain", description: "Alert when lead times exceed SLA", metric: "Lead Time", operator: "gt", value: "5", unit: "days", channels: ["email"], schedule: "hourly", icon: Truck, color: "#0A5F89" },
+  { id: "rt6", title: "Delivery Delay Alert", category: "Supply Chain", description: "Alert when lead times exceed SLA", metric: "Lead Time", operator: "gt", value: "5", unit: "days", channels: ["email"], schedule: "hourly", icon: Truck, color: "var(--sem-info-fg)" },
   { id: "rt7", title: "High Turnover Alert", category: "HR", description: "Notify HR when turnover rate exceeds target", metric: "Turnover Rate", operator: "gt", value: "8", unit: "%", channels: ["email", "slack"], schedule: "weekly", icon: Users, color: "#8B5CF6" },
   { id: "rt8", title: "Production Downtime", category: "Manufacturing", description: "Alert on extended unplanned downtime", metric: "Downtime Hours", operator: "gt", value: "4", unit: "hrs", channels: ["email", "sms", "slack"], schedule: "realtime", icon: Factory, color: "#EF4444" },
 ];
@@ -4621,7 +4621,7 @@ const RulesEnginePage = () => {
   const [newRule, setNewRule] = useState({ name: "", metric: "", operator: "gt", value: "", unit: "", channels: [], recipients: {}, schedule: "realtime", message: "" });
   const [metricDropdownOpen, setMetricDropdownOpen] = useState(false);
 
-  const amber = { primary: "#F59E0B", deep: "#D97706", light: "#FFFBEB", badge: "#FEF3C7" };
+  const amber = { primary: "#F59E0B", deep: "#D97706", light: "var(--sem-warn-bg)", badge: "var(--sem-warn-bg)" };
 
   const toggleRule = (id) => setRules(prev => prev.map(r => r.id === id ? { ...r, enabled: !r.enabled } : r));
 
@@ -4799,7 +4799,7 @@ const RulesEnginePage = () => {
             {[{ id: "all", label: "All" }, { id: "success", label: "Success" }, { id: "failed", label: "Failed" }].map(f => (
               <button key={f.id} onClick={() => setExecFilter(f.id)} style={{
                 padding: "3px 10px", borderRadius: 12, border: `1px solid ${execFilter === f.id ? (f.id === "failed" ? COLORS.danger : f.id === "success" ? COLORS.success : amber.primary) : COLORS.border}`,
-                background: execFilter === f.id ? (f.id === "failed" ? "#FEF2F2" : f.id === "success" ? "#F0FDF4" : amber.badge) : "#fff",
+                background: execFilter === f.id ? (f.id === "failed" ? "var(--sem-danger-bg)" : f.id === "success" ? "#F0FDF4" : amber.badge) : "#fff",
                 color: execFilter === f.id ? (f.id === "failed" ? COLORS.danger : f.id === "success" ? "#16A34A" : amber.deep) : COLORS.textMuted,
                 fontSize: 10, fontWeight: 500, cursor: "pointer"
               }}>{f.label}</button>
@@ -6313,13 +6313,13 @@ const DashboardRenderer = ({ spec, onBack }) => {
             <div style={{
               display: "inline-flex", alignItems: "center", gap: 6,
               padding: "5px 12px", borderRadius: 20, marginBottom: 16,
-              background: "#FFFBEB", border: "1px solid #FCD34D",
-              fontSize: 12, fontWeight: 600, color: "#92400E",
+              background: "var(--sem-warn-bg)", border: "1px solid #FCD34D",
+              fontSize: 12, fontWeight: 600, color: "var(--sem-amber2-fg)",
             }}>
               <Filter size={12} />
               Filtered to your plant access
               {data.scope_plants?.length > 0 && (
-                <span style={{ fontWeight: 400, color: "#B45309" }}>
+                <span style={{ fontWeight: 400, color: "var(--sem-warn-fg)" }}>
                   ({data.scope_plants.join(", ")})
                 </span>
               )}
@@ -6354,7 +6354,7 @@ const DashboardRenderer = ({ spec, onBack }) => {
             return (
               <details style={{
                 marginBottom: 16, padding: "10px 14px", borderRadius: 10,
-                background: "#FEF3C7", border: "1px solid #FCD34D", fontSize: 12.5, color: "#92400E"
+                background: "var(--sem-warn-bg)", border: "1px solid #FCD34D", fontSize: 12.5, color: "var(--sem-amber2-fg)"
               }}>
                 <summary style={{ cursor: "pointer", fontWeight: 600 }}>
                   <AlertTriangle size={13} style={{ verticalAlign: "middle", marginRight: 6 }} />
@@ -6891,7 +6891,7 @@ const MenuItem = ({ children, onClick, danger, icon: Icon }) => (
     padding: "10px 14px", fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 10,
     color: danger ? COLORS.danger : COLORS.textPrimary, fontWeight: 500
   }}
-    onMouseEnter={(e) => e.currentTarget.style.background = danger ? "#FEF2F2" : COLORS.surfaceAlt}
+    onMouseEnter={(e) => e.currentTarget.style.background = danger ? "var(--sem-danger-bg)" : COLORS.surfaceAlt}
     onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
   >
     {Icon && <Icon size={14} />} {children}
@@ -7020,11 +7020,11 @@ const ScheduleModal = ({ kind, itemId, itemName, onClose }) => {
           placeholder="Leave blank to send to yourself, or comma-separate emails"
           style={{ ...sel, marginTop: 4, marginBottom: 14, boxSizing: "border-box" }} />
 
-        {msg && <div style={{ fontSize: 12.5, color: msg.startsWith("Couldn't") ? "#B91C1C" : COLORS.accentDark || COLORS.accent, fontWeight: 600, marginBottom: 10 }}>{msg}</div>}
+        {msg && <div style={{ fontSize: 12.5, color: msg.startsWith("Couldn't") ? "var(--sem-danger-fg)" : COLORS.accentDark || COLORS.accent, fontWeight: 600, marginBottom: 10 }}>{msg}</div>}
 
         <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
           {existing ? (
-            <button onClick={unsubscribe} disabled={busy} style={{ padding: "9px 14px", borderRadius: 8, border: `1px solid ${COLORS.border}`, background: COLORS.surface, color: "#B91C1C", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+            <button onClick={unsubscribe} disabled={busy} style={{ padding: "9px 14px", borderRadius: 8, border: `1px solid ${COLORS.border}`, background: COLORS.surface, color: "var(--sem-danger-fg)", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
               Unsubscribe
             </button>
           ) : <span />}
@@ -7330,7 +7330,7 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
                   background: "none", border: "none", padding: 4, borderRadius: 6, cursor: "pointer",
                   color: COLORS.textMuted, display: "flex", alignItems: "center"
                 }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = "#FEF2F2"; e.currentTarget.style.color = COLORS.danger; }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--sem-danger-bg)"; e.currentTarget.style.color = COLORS.danger; }}
                   onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = COLORS.textMuted; }}
                 >
                   <X size={15} />
@@ -7342,7 +7342,7 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
           {error && (
             <div style={{
               marginTop: 10, padding: "8px 12px", borderRadius: 8, fontSize: 12,
-              background: "#FEF2F2", color: COLORS.danger, fontWeight: 500
+              background: "var(--sem-danger-bg)", color: COLORS.danger, fontWeight: 500
             }}>
               {error}
             </div>
@@ -8134,7 +8134,7 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
       </div>
 
       {error && (
-        <div style={{ padding: 12, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13, marginBottom: 16 }}>
+        <div style={{ padding: 12, background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13, marginBottom: 16 }}>
           {error}
         </div>
       )}
@@ -8220,7 +8220,7 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
                 <span style={{
                   fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20,
                   color: u.is_active ? "#059669" : "#9CA3AF",
-                  background: u.is_active ? "#ECFDF5" : "#F3F4F6",
+                  background: u.is_active ? "var(--sem-ok-bg)" : "#F3F4F6",
                 }}>
                   {u.is_active ? "Active" : "Disabled"}
                 </span>
@@ -8540,12 +8540,12 @@ const ImportPracticeHeadsModal = ({ onClose, onImported }) => {
 
         <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
           {error && (
-            <div style={{ padding: "10px 14px", background: "#FEE2E2", color: "#991B1B", borderRadius: 8, fontSize: 13, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ padding: "10px 14px", background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)", borderRadius: 8, fontSize: 13, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
               <AlertTriangle size={16} /> {error}
             </div>
           )}
           {warning && (
-            <div style={{ padding: "10px 14px", background: "#FEF3C7", color: "#92400E", borderRadius: 8, fontSize: 13, marginBottom: 16 }}>
+            <div style={{ padding: "10px 14px", background: "var(--sem-warn-bg)", color: "var(--sem-amber2-fg)", borderRadius: 8, fontSize: 13, marginBottom: 16 }}>
               {warning}
             </div>
           )}
@@ -8609,7 +8609,7 @@ const ImportPracticeHeadsModal = ({ onClose, onImported }) => {
                       <div style={{ color: COLORS.textMuted, fontSize: 12 }}>{r.position || "—"}</div>
                       <div>
                         {isReady ? (
-                          <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 999, background: "#DCFCE7", color: "#0E7E3E" }}>Ready</span>
+                          <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 999, background: "var(--sem-ok-bg)", color: "var(--sem-ok-fg)" }}>Ready</span>
                         ) : (
                           <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 999, background: COLORS.surfaceAlt, color: COLORS.textMuted }}>Exists</span>
                         )}
@@ -8712,8 +8712,8 @@ const ImportResultOverlay = ({ result, onClose }) => {
           )}
           {errored.length > 0 && (
             <>
-              <h4 style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 700, color: "#991B1B", textTransform: "uppercase", letterSpacing: "0.5px" }}>Errors</h4>
-              <div style={{ fontSize: 13, color: "#991B1B" }}>
+              <h4 style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 700, color: "var(--sem-danger-fg)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Errors</h4>
+              <div style={{ fontSize: 13, color: "var(--sem-danger-fg)" }}>
                 {errored.map(r => <div key={r.email}>{r.email}: {r.message}</div>)}
               </div>
             </>
@@ -8813,7 +8813,7 @@ const AddUserModal = ({ features, onClose, onCreated }) => {
           </label>
           <FeaturePicker features={features} selected={role === "admin" ? features.map((f) => f.id) : granted} onChange={setGranted} disabled={role === "admin"} />
         </div>
-        {err && <div style={{ padding: 10, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, color: "#DC2626", fontSize: 13 }}>{err}</div>}
+        {err && <div style={{ padding: 10, background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 8, color: "#DC2626", fontSize: 13 }}>{err}</div>}
       </div>
     </ModalShell>
   );
@@ -8873,7 +8873,7 @@ const ManageFeaturesModal = ({ user, features, onClose, onSaved }) => {
       ) : (
         <FeaturePicker features={features} selected={granted} onChange={setGranted} />
       )}
-      {err && <div style={{ marginTop: 12, padding: 10, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, color: "#DC2626", fontSize: 13 }}>{err}</div>}
+      {err && <div style={{ marginTop: 12, padding: 10, background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 8, color: "#DC2626", fontSize: 13 }}>{err}</div>}
     </ModalShell>
   );
 };
@@ -9013,7 +9013,7 @@ const ManageScopeModal = ({ user, onClose, onSaved }) => {
                   </div>
                 )}
                 {enforced && selectedDepts.length === 0 && (
-                  <div style={{ marginTop: 8, padding: "8px 12px", background: "#FEF9E7", border: "1px solid #FCD34D", borderRadius: 8, fontSize: 12, color: "#92400E" }}>
+                  <div style={{ marginTop: 8, padding: "8px 12px", background: "#FEF9E7", border: "1px solid #FCD34D", borderRadius: 8, fontSize: 12, color: "var(--sem-amber2-fg)" }}>
                     ⚠ No departments selected — this user will see no workforce data.
                   </div>
                 )}
@@ -9026,7 +9026,7 @@ const ManageScopeModal = ({ user, onClose, onSaved }) => {
           </div>
         </div>
       )}
-      {err && <div style={{ marginTop: 12, padding: 10, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, color: "#DC2626", fontSize: 13 }}>{err}</div>}
+      {err && <div style={{ marginTop: 12, padding: 10, background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 8, color: "#DC2626", fontSize: 13 }}>{err}</div>}
     </ModalShell>
   );
 };
@@ -9086,7 +9086,7 @@ const EditUserModal = ({ user, isSelf, onClose, onSaved }) => {
           <input type="checkbox" checked={active} disabled={isSelf} onChange={(e) => setActive(e.target.checked)} style={{ accentColor: COLORS.accent }} />
           Account active {isSelf && <span style={{ color: COLORS.textMuted, fontStyle: "italic" }}>(you can't deactivate yourself)</span>}
         </label>
-        {err && <div style={{ padding: 10, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, color: "#DC2626", fontSize: 13 }}>{err}</div>}
+        {err && <div style={{ padding: 10, background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 8, color: "#DC2626", fontSize: 13 }}>{err}</div>}
       </div>
     </ModalShell>
   );
@@ -9132,7 +9132,7 @@ const ResetPasswordModal = ({ user, onClose, onSaved }) => {
       </div>
       <label style={_labelStyle}>New password</label>
       <input type="text" value={pw} onChange={(e) => setPw(e.target.value)} style={_inputStyle} placeholder="At least 4 characters" />
-      {err && <div style={{ marginTop: 10, padding: 10, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, color: "#DC2626", fontSize: 13 }}>{err}</div>}
+      {err && <div style={{ marginTop: 10, padding: 10, background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 8, color: "#DC2626", fontSize: 13 }}>{err}</div>}
     </ModalShell>
   );
 };
@@ -9313,7 +9313,7 @@ const AuditLogPage = () => {
         </div>
       )}
       {error && (
-        <div style={{ padding: 14, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, color: COLORS.danger, fontSize: 13 }}>
+        <div style={{ padding: 14, background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 10, color: COLORS.danger, fontSize: 13 }}>
           {error}
         </div>
       )}
@@ -9425,7 +9425,7 @@ const SupportTicketsPage = () => {
         </div>
       )}
       {error && (
-        <div style={{ padding: 14, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, color: COLORS.danger, fontSize: 13 }}>
+        <div style={{ padding: 14, background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 10, color: COLORS.danger, fontSize: 13 }}>
           {error}
         </div>
       )}
@@ -9455,8 +9455,8 @@ const SupportTicketsPage = () => {
                   <td style={{ padding: "8px 14px", whiteSpace: "nowrap" }}>
                     <span style={{
                       padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 600,
-                      background: t.status === "resolved" ? "#ECFDF5" : "#FFFBEB",
-                      color: t.status === "resolved" ? "#059669" : "#B45309",
+                      background: t.status === "resolved" ? "var(--sem-ok-bg)" : "var(--sem-warn-bg)",
+                      color: t.status === "resolved" ? "#059669" : "var(--sem-warn-fg)",
                     }}>{t.status === "resolved" ? "Resolved" : "Open"}</span>
                   </td>
                   <td style={{ padding: "8px 14px", whiteSpace: "nowrap" }}>
@@ -9608,10 +9608,10 @@ const SchemaSettingsCard = () => {
       </div>
 
       {error && (
-        <div style={{ margin: 14, padding: "10px 14px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13 }}>{error}</div>
+        <div style={{ margin: 14, padding: "10px 14px", background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13 }}>{error}</div>
       )}
       {success && (
-        <div style={{ margin: 14, padding: "10px 14px", background: "#ECFDF5", border: "1px solid #6EE7B7", borderRadius: 10, color: "#065F46", fontSize: 13 }}>✓ {success}</div>
+        <div style={{ margin: 14, padding: "10px 14px", background: "var(--sem-ok-bg)", border: "1px solid #6EE7B7", borderRadius: 10, color: "var(--sem-ok-fg)", fontSize: 13 }}>✓ {success}</div>
       )}
 
       <div style={{ padding: 18 }}>
@@ -9641,7 +9641,7 @@ const SchemaSettingsCard = () => {
                     disabled={autoBusy === row.table_name || !row.table_name}
                     style={{
                       padding: "9px 14px", borderRadius: 8, border: "none",
-                      background: autoBusy === row.table_name ? "#D1FAE5" : "#ECFDF5",
+                      background: autoBusy === row.table_name ? "#D1FAE5" : "var(--sem-ok-bg)",
                       color: "#15803D", fontSize: 12.5, fontWeight: 600,
                       cursor: autoBusy === row.table_name ? "default" : "pointer", whiteSpace: "nowrap",
                     }}
@@ -9653,7 +9653,7 @@ const SchemaSettingsCard = () => {
                     title="Remove this table"
                     style={{
                       width: 32, height: 32, borderRadius: 8, border: "none",
-                      background: "#FEE2E2", color: "#DC2626", cursor: "pointer",
+                      background: "var(--sem-danger-bg)", color: "#DC2626", cursor: "pointer",
                       display: "flex", alignItems: "center", justifyContent: "center",
                     }}
                   >
@@ -9717,7 +9717,7 @@ const SchemaSettingsCard = () => {
           disabled={resetting}
           style={{
             padding: "10px 18px", borderRadius: 9, border: "1px solid #FECACA",
-            background: "#FEF2F2", color: "#DC2626", fontSize: 13, fontWeight: 600,
+            background: "var(--sem-danger-bg)", color: "#DC2626", fontSize: 13, fontWeight: 600,
             cursor: resetting ? "default" : "pointer",
           }}
         >{resetting ? "Resetting…" : "Reset to Defaults"}</button>
@@ -9820,12 +9820,12 @@ const SystemSettingsPage = () => {
       </div>
 
       {error && (
-        <div style={{ padding: "10px 14px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13, marginBottom: 16 }}>
+        <div style={{ padding: "10px 14px", background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13, marginBottom: 16 }}>
           {error}
         </div>
       )}
       {success && (
-        <div style={{ padding: "10px 14px", background: "#ECFDF5", border: "1px solid #6EE7B7", borderRadius: 10, color: "#065F46", fontSize: 13, marginBottom: 16 }}>
+        <div style={{ padding: "10px 14px", background: "var(--sem-ok-bg)", border: "1px solid #6EE7B7", borderRadius: 10, color: "var(--sem-ok-fg)", fontSize: 13, marginBottom: 16 }}>
           ✓ {success}
         </div>
       )}
@@ -9867,7 +9867,7 @@ const SystemSettingsPage = () => {
                         </span>
                       )}
                       {!info.locked && info.enabled && (
-                        <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 20, background: "#ECFDF5", color: "#065F46", textTransform: "uppercase", letterSpacing: "0.4px" }}>
+                        <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 20, background: "var(--sem-ok-bg)", color: "var(--sem-ok-fg)", textTransform: "uppercase", letterSpacing: "0.4px" }}>
                           Active
                         </span>
                       )}
@@ -9999,7 +9999,7 @@ const UsageAnalyticsPage = () => {
     return () => { cancelled = true; };
   }, []);
 
-  if (error) return <div style={{ padding: 32, color: "#B91C1C", fontSize: 14 }}>Couldn't load usage analytics: {error}</div>;
+  if (error) return <div style={{ padding: 32, color: "var(--sem-danger-fg)", fontSize: 14 }}>Couldn't load usage analytics: {error}</div>;
   if (!data) return <div style={{ padding: 32, color: COLORS.textMuted, fontSize: 14 }}>Loading usage analytics…</div>;
 
   const t = data.totals || {};
@@ -10012,7 +10012,7 @@ const UsageAnalyticsPage = () => {
     { label: `Active / ${data.days} days`, value: t.active_users, sub: "monthly actives" },
     { label: "AI questions", value: t.ai_questions, sub: `last ${data.days} days` },
     { label: "Total events", value: t.events, sub: "all activity" },
-    { label: "Answer rating", value: fbRate != null ? `${fbRate}%` : "—", sub: `👍 ${fb.up} · 👎 ${fb.down}`, color: fbRate == null ? undefined : fbRate >= 80 ? "#0E7E3E" : fbRate >= 60 ? "#B45309" : "#B91C1C" },
+    { label: "Answer rating", value: fbRate != null ? `${fbRate}%` : "—", sub: `👍 ${fb.up} · 👎 ${fb.down}`, color: fbRate == null ? undefined : fbRate >= 80 ? "var(--sem-ok-fg)" : fbRate >= 60 ? "var(--sem-warn-fg)" : "var(--sem-danger-fg)" },
   ];
   const maxAction = Math.max(1, ...(data.top_actions || []).map(a => a.count));
 
@@ -10420,8 +10420,8 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
               <div style={{
                 display: "flex", alignItems: "center", gap: 10,
                 padding: "11px 14px", marginBottom: 20,
-                background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 10,
-                fontSize: 13, fontWeight: 500, color: "#92400E",
+                background: "var(--sem-warn-bg)", border: "1px solid #FCD34D", borderRadius: 10,
+                fontSize: 13, fontWeight: 500, color: "var(--sem-amber2-fg)",
               }}>
                 <AlertTriangle size={15} style={{ flexShrink: 0 }} />
                 {expiredMsg}
@@ -10467,7 +10467,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                 </div>
               </div>
               {error && (
-                <div style={{ padding: "10px 14px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13, fontWeight: 500 }}>
+                <div style={{ padding: "10px 14px", background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13, fontWeight: 500 }}>
                   {error}
                 </div>
               )}
@@ -10510,7 +10510,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
             </div>
             {forgotSent ? (
               <>
-                <div style={{ padding: "12px 14px", background: "#ECFDF5", border: "1px solid #6EE7B7", borderRadius: 10, color: "#065F46", fontSize: 13.5, lineHeight: 1.5 }}>
+                <div style={{ padding: "12px 14px", background: "var(--sem-ok-bg)", border: "1px solid #6EE7B7", borderRadius: 10, color: "var(--sem-ok-fg)", fontSize: 13.5, lineHeight: 1.5 }}>
                   If <strong>{forgotEmail}</strong> is registered, a password-reset link is on its way. The link expires in 30 minutes — check your inbox (and spam).
                 </div>
                 <button type="button" onClick={() => resetTo("credentials")} style={{ marginTop: 18, width: "100%", padding: "12px", border: `1px solid ${COLORS.border}`, borderRadius: 12, fontSize: 14, fontWeight: 600, background: COLORS.surface, color: COLORS.textPrimary, cursor: "pointer" }}>
@@ -10596,7 +10596,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                 Trust this device for 30 days
               </label>
               {error && (
-                <div style={{ padding: "10px 14px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13, fontWeight: 500 }}>
+                <div style={{ padding: "10px 14px", background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13, fontWeight: 500 }}>
                   {error}
                 </div>
               )}
@@ -10692,7 +10692,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
                 Trust this device for 30 days
               </label>
               {error && (
-                <div style={{ padding: "10px 14px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13, fontWeight: 500 }}>
+                <div style={{ padding: "10px 14px", background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13, fontWeight: 500 }}>
                   {error}
                 </div>
               )}
@@ -10755,21 +10755,54 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           --c-text-muted:      #B3B2B3;
           --c-page-bg:         #F7F9FA;
           --c-input-bg:        #FFFFFF;
+          /* Semantic status tints — light pastels in light mode. JSX uses
+             these via var(--sem-…) so dark mode swaps them for translucent
+             glows instead of glaring light chips. */
+          --sem-danger-bg:   #FEE2E2;  --sem-danger-fg:  #B91C1C;
+          --sem-warn-bg:     #FEF3C7;  --sem-warn-fg:    #B45309;  --sem-warn-border: #FCD34D;
+          --sem-ok-bg:       #DCFCE7;  --sem-ok-fg:      #0E7E3E;  --sem-ok-border:   #86EFAC;
+          --sem-info-bg:     #E0F2FE;  --sem-info-fg:    #0A5F89;
+          --sem-orange-bg:   #FFEDD5;  --sem-orange-fg:  #C2410C;
+          --sem-rose-bg:     #FFE4E6;  --sem-rose-fg:    #9F1239;  --sem-rose-border: #FDA4AF;
+          --sem-amber2-bg:   #FDE68A;  --sem-amber2-fg:  #92400E;
+          --sem-amber3-bg:   #FEF9C3;  --sem-amber3-fg:  #854D0E;
         }
         html[data-satori-theme="dark"] {
           --c-primary:         #F1F5F9;
           --c-primary-light:   #CBD5E1;
           --c-primary-dark:    #FFFFFF;
-          --c-surface:         #1E293B;
-          --c-surface-alt:     #0F172A;
-          --c-border:          #334155;
-          --c-text-primary:    #F1F5F9;
-          --c-text-secondary:  #CBD5E1;
-          --c-text-muted:      #94A3B8;
-          --c-page-bg:         #0B1220;
-          --c-input-bg:        #1E293B;
+          --c-surface:         #151C2C;
+          --c-surface-alt:     #0E1422;
+          --c-border:          rgba(148,163,184,0.16);
+          --c-text-primary:    #EDF2F9;
+          --c-text-secondary:  #B9C4D6;
+          --c-text-muted:      #7E8CA3;
+          --c-page-bg:         #0A0F1B;
+          --c-input-bg:        #101727;
+          /* Dark semantic tints: low-alpha color washes + bright readable
+             foregrounds — chips glow softly instead of flash-banging. */
+          --sem-danger-bg:   rgba(239,68,68,0.16);   --sem-danger-fg:  #FCA5A5;
+          --sem-warn-bg:     rgba(245,158,11,0.15);  --sem-warn-fg:    #FCD34D;  --sem-warn-border: rgba(245,158,11,0.45);
+          --sem-ok-bg:       rgba(34,197,94,0.15);   --sem-ok-fg:      #6EE7A0;  --sem-ok-border:   rgba(34,197,94,0.45);
+          --sem-info-bg:     rgba(14,165,233,0.15);  --sem-info-fg:    #7DD3FC;
+          --sem-orange-bg:   rgba(249,115,22,0.16);  --sem-orange-fg:  #FDBA74;
+          --sem-rose-bg:     rgba(244,63,94,0.17);   --sem-rose-fg:    #FDA4AF;  --sem-rose-border: rgba(244,63,94,0.45);
+          --sem-amber2-bg:   rgba(245,158,11,0.30);  --sem-amber2-fg:  #FDE68A;
+          --sem-amber3-bg:   rgba(245,158,11,0.10);  --sem-amber3-fg:  #FCD34D;
         }
         html[data-satori-theme="dark"] body { background: var(--c-page-bg); color: var(--c-text-primary); }
+
+        /* Dark-mode chrome polish: tinted scrollbars, brand selection color,
+           softer imagery, and depth via ring-borders (shadows are invisible
+           on dark surfaces, a subtle inset ring reads as elevation instead). */
+        html[data-satori-theme="dark"] ::-webkit-scrollbar-thumb { background: #2B3850; }
+        html[data-satori-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: #3D4D6B; }
+        html[data-satori-theme="dark"] ::selection { background: rgba(138,196,65,0.35); }
+        html[data-satori-theme="dark"] img { filter: brightness(0.94); }
+        html[data-satori-theme="dark"] input, html[data-satori-theme="dark"] select, html[data-satori-theme="dark"] textarea {
+          background-color: var(--c-input-bg); color: var(--c-text-primary); border-color: var(--c-border);
+        }
+        html[data-satori-theme="dark"] input::placeholder, html[data-satori-theme="dark"] textarea::placeholder { color: #5B6B85; }
 
         /* Override hardcoded hex backgrounds via attribute selector. Inline
            styles use rgb(...) serialization on most browsers, so we target
@@ -10873,7 +10906,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
         /* Pale status/info tints (green/amber/red/blue/purple) glow white on a
            dark page. Re-tint them to subtle dark-appropriate fills so colored
            cards (success/warning/error/info banners, KPI chips) look right. */
-        html[data-satori-theme="dark"] [style*="#ECFDF5"],
+        html[data-satori-theme="dark"] [style*="var(--sem-ok-bg)"],
         html[data-satori-theme="dark"] [style*="#F0FDF4"],
         html[data-satori-theme="dark"] [style*="#D1FAE5"],
         html[data-satori-theme="dark"] [style*="rgb(236, 253, 245)"],
@@ -10881,15 +10914,15 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
         html[data-satori-theme="dark"] [style*="rgb(220, 252, 231)"] {
           background-color: rgba(34, 197, 94, 0.13) !important;
         }
-        html[data-satori-theme="dark"] [style*="#FEF2F2"],
-        html[data-satori-theme="dark"] [style*="#FEE2E2"],
+        html[data-satori-theme="dark"] [style*="var(--sem-danger-bg)"],
+        html[data-satori-theme="dark"] [style*="var(--sem-danger-bg)"],
         html[data-satori-theme="dark"] [style*="rgb(254, 242, 242)"],
         html[data-satori-theme="dark"] [style*="rgb(254, 226, 226)"] {
           background-color: rgba(239, 68, 68, 0.13) !important;
         }
         html[data-satori-theme="dark"] [style*="#FEF9E7"],
-        html[data-satori-theme="dark"] [style*="#FEF3C7"],
-        html[data-satori-theme="dark"] [style*="#FFFBEB"],
+        html[data-satori-theme="dark"] [style*="var(--sem-warn-bg)"],
+        html[data-satori-theme="dark"] [style*="var(--sem-warn-bg)"],
         html[data-satori-theme="dark"] [style*="rgb(254, 243, 199)"],
         html[data-satori-theme="dark"] [style*="rgb(255, 251, 235)"] {
           background-color: rgba(245, 158, 11, 0.14) !important;
@@ -11149,7 +11182,7 @@ const ResetPasswordPage = () => {
           </>
         ) : done ? (
           <>
-            <div style={{ padding: "12px 14px", background: "#ECFDF5", border: "1px solid #6EE7B7", borderRadius: 10, color: "#065F46", fontSize: 13.5, lineHeight: 1.5 }}>
+            <div style={{ padding: "12px 14px", background: "var(--sem-ok-bg)", border: "1px solid #6EE7B7", borderRadius: 10, color: "var(--sem-ok-fg)", fontSize: 13.5, lineHeight: 1.5 }}>
               Your password has been updated. You can now sign in with your new password.
             </div>
             <button onClick={goLogin} style={{ marginTop: 20, width: "100%", padding: 14, border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600, background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`, color: "#fff", cursor: "pointer" }}>Go to sign in</button>
@@ -11167,7 +11200,7 @@ const ResetPasswordPage = () => {
               <input type="password" value={pw2} onChange={e => setPw2(e.target.value)} placeholder="Re-enter your new password" autoComplete="new-password" required
                 style={{ width: "100%", padding: "12px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 12, fontSize: 14, outline: "none", background: COLORS.surfaceAlt, boxSizing: "border-box" }} />
             </div>
-            {err && <div style={{ padding: "10px 14px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13 }}>{err}</div>}
+            {err && <div style={{ padding: "10px 14px", background: "var(--sem-danger-bg)", border: "1px solid #FECACA", borderRadius: 10, color: "#DC2626", fontSize: 13 }}>{err}</div>}
             <button type="submit" disabled={busy} style={{ width: "100%", padding: 14, border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600, background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.accent})`, color: "#fff", cursor: busy ? "default" : "pointer", opacity: busy ? 0.7 : 1 }}>
               {busy ? "Updating…" : "Update password"}
             </button>
@@ -11724,7 +11757,7 @@ export default function App() {
                         border: "none", background: "transparent", cursor: "pointer", fontSize: 13,
                         color: COLORS.danger, transition: "all 0.1s", textAlign: "left"
                       }}
-                      onMouseEnter={e => { e.currentTarget.style.background = "#FEF2F2"; }}
+                      onMouseEnter={e => { e.currentTarget.style.background = "var(--sem-danger-bg)"; }}
                       onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}
                       >
                         <LogOut size={15} /> Sign out
