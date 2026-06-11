@@ -11373,18 +11373,36 @@ export default function App() {
     // declaration so even if our injected <style> CSS doesn't apply for some
     // reason (e.g. cached old build, specificity issue), the variables still
     // resolve. var(--c-…) inline styles will pick these up.
+    // ⚠️ This map is the SINGLE SOURCE OF TRUTH for theme tokens after login.
+    // The CSS copies of these definitions live in LoginPage's <style> tag,
+    // which UNMOUNTS after sign-in — and these inline root properties override
+    // the CSS anyway. Every token the app uses (base palette, semantic status
+    // tints, brand gradients, disabled state) MUST be in BOTH maps here, or
+    // any element using it silently loses its styling post-login (that's how
+    // the weekly-allocation bars and status pills once vanished).
     const tokens = darkMode ? {
       "--c-primary":         "#F1F5F9",
       "--c-primary-light":   "#CBD5E1",
       "--c-primary-dark":    "#FFFFFF",
-      "--c-surface":         "#1E293B",
-      "--c-surface-alt":     "#0F172A",
-      "--c-border":          "#334155",
-      "--c-text-primary":    "#F1F5F9",
-      "--c-text-secondary":  "#CBD5E1",
-      "--c-text-muted":      "#94A3B8",
-      "--c-page-bg":         "#0B1220",
-      "--c-input-bg":        "#1E293B",
+      "--c-surface":         "#151C2C",
+      "--c-surface-alt":     "#0E1422",
+      "--c-border":          "rgba(148,163,184,0.16)",
+      "--c-text-primary":    "#F2F6FC",
+      "--c-text-secondary":  "#C5D0E2",
+      "--c-text-muted":      "#93A1B8",
+      "--c-page-bg":         "#0A0F1B",
+      "--c-input-bg":        "#101727",
+      "--sem-danger-bg":     "rgba(239,68,68,0.16)",  "--sem-danger-fg": "#FCA5A5",
+      "--sem-warn-bg":       "rgba(245,158,11,0.15)", "--sem-warn-fg":   "#FCD34D", "--sem-warn-border": "rgba(245,158,11,0.45)",
+      "--sem-ok-bg":         "rgba(34,197,94,0.15)",  "--sem-ok-fg":     "#6EE7A0", "--sem-ok-border":   "rgba(34,197,94,0.45)",
+      "--sem-info-bg":       "rgba(14,165,233,0.15)", "--sem-info-fg":   "#7DD3FC",
+      "--sem-orange-bg":     "rgba(249,115,22,0.16)", "--sem-orange-fg": "#FDBA74",
+      "--sem-rose-bg":       "rgba(244,63,94,0.17)",  "--sem-rose-fg":   "#FDA4AF", "--sem-rose-border": "rgba(244,63,94,0.45)",
+      "--sem-amber2-bg":     "rgba(245,158,11,0.30)", "--sem-amber2-fg": "#FDE68A",
+      "--sem-amber3-bg":     "rgba(245,158,11,0.10)", "--sem-amber3-fg": "#FCD34D",
+      "--g-brand":           "linear-gradient(135deg, #5E8B33, #8AC441)",
+      "--g-brand-deep":      "linear-gradient(135deg, #46682A, #74A93A)",
+      "--c-disabled":        "#243049",
     } : {
       "--c-primary":         "#333333",
       "--c-primary-light":   "#676767",
@@ -11397,12 +11415,23 @@ export default function App() {
       "--c-text-muted":      "#B3B2B3",
       "--c-page-bg":         "#F7F9FA",
       "--c-input-bg":        "#FFFFFF",
+      "--sem-danger-bg":     "#FEE2E2", "--sem-danger-fg": "#B91C1C",
+      "--sem-warn-bg":       "#FEF3C7", "--sem-warn-fg":   "#B45309", "--sem-warn-border": "#FCD34D",
+      "--sem-ok-bg":         "#DCFCE7", "--sem-ok-fg":     "#0E7E3E", "--sem-ok-border":   "#86EFAC",
+      "--sem-info-bg":       "#E0F2FE", "--sem-info-fg":   "#0A5F89",
+      "--sem-orange-bg":     "#FFEDD5", "--sem-orange-fg": "#C2410C",
+      "--sem-rose-bg":       "#FFE4E6", "--sem-rose-fg":   "#9F1239", "--sem-rose-border": "#FDA4AF",
+      "--sem-amber2-bg":     "#FDE68A", "--sem-amber2-fg": "#92400E",
+      "--sem-amber3-bg":     "#FEF9C3", "--sem-amber3-fg": "#854D0E",
+      "--g-brand":           "linear-gradient(135deg, #333333, #8AC441)",
+      "--g-brand-deep":      "linear-gradient(135deg, #333333, #68933F)",
+      "--c-disabled":        "#E2E8F0",
     };
     for (const [k, v] of Object.entries(tokens)) root.style.setProperty(k, v);
     // Final fallback: directly mutate the body background + color so the
     // page never gets stuck on white when dark mode is on.
-    document.body.style.background = darkMode ? "#0B1220" : "";
-    document.body.style.color      = darkMode ? "#F1F5F9" : "";
+    document.body.style.background = darkMode ? "#0A0F1B" : "";
+    document.body.style.color      = darkMode ? "#F2F6FC" : "";
   }, [darkMode]);
   // Shown on the login page when redirected due to token expiry
   const [sessionExpiredMsg, setSessionExpiredMsg] = useState("");

@@ -35,3 +35,21 @@ body {
 .satori-chartcard:fullscreen .recharts-responsive-container {
   min-height: 60vh;
 }
+
+/* ─── Dark-mode chrome (GLOBAL — must live here, not in a component <style>:
+   LoginPage's style tag unmounts after sign-in and takes its rules with it).
+   Theme tokens themselves are set as inline root properties from JS. ─── */
+html[data-satori-theme="dark"] body { background-color: #0A0F1B; }
+html[data-satori-theme="dark"] ::-webkit-scrollbar-thumb { background: #2B3850; }
+html[data-satori-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: #3D4D6B; }
+html[data-satori-theme="dark"] ::selection { background: rgba(138, 196, 65, 0.35); }
+html[data-satori-theme="dark"] img { filter: brightness(0.94); }
+html[data-satori-theme="dark"] input,
+html[data-satori-theme="dark"] select,
+html[data-satori-theme="dark"] textarea {
+  background-color: var(--c-input-bg);
+  color: var(--c-text-primary);
+  border-color: var(--c-border);
+}
+html[data-satori-theme="dark"] input::placeholder,
+html[data-satori-theme="dark"] textarea::placeholder { color: #5B6B85; }
