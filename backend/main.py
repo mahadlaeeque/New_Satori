@@ -2691,7 +2691,7 @@ WORKFORCE TABLES
 2. `Attendance_Data` — Daily attendance per employee. Cols: attendance_date (DATE), personal_no (STRING, 'E-902' format — JOIN to Employee_Data on this), employee_id (INT64 sequence, NOT a JOIN key), employee_name, employee_email, checkin_time (STRING — FULL datetime '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'; clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time))), checkout_time (STRING — same format), attendance_status_text ('Present'/'Absent'/'On Leave'/'Holiday'/'Weekend'/'Missing Punch'/'Remote Work' + 'Submitted …' variants; no 'Late' value — a late arrival = check-in after 09:30: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00'), is_present (0/1), is_absent (0/1), is_on_leave (0/1), is_remote (0/1), is_holiday (0/1), is_weekend (0/1), leave_type_name, checkin_is_permitted_location / checkout_is_permitted_location (STRING '1'/'0' — was the punch from an approved location: IF(SAFE_CAST(checkin_is_permitted_location AS INT64)=1,'Permitted','Not Permitted') AS PunchInLocationStatus; same for checkout).
 3. `Allocation_Data` — Weekly project allocation (one row per employee × project × week). Cols: project_id (**JOIN to Project_Master.Project_Code for the project NAME**), employee_id (STRING "E-1234" — JOIN to Employee_Data.employee_code, digit-normalised), allocation_percent (0-100 — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Allocated' = real billable project / 'Bench' = bench project), Forecast_Flag (0 = ACTUAL, 1 = forecast — for CURRENT state ALWAYS filter Forecast_Flag=0), Date (DATE), Week/Year/Month. **Bench logic:** an employee is ON BENCH when they have NO Flag='Allocated' row with allocation_percent>0 in the recent actual weeks — a bench-project row can show allocation_percent=100 yet means they're benched, so NEVER classify on raw allocation_percent alone. Allocated = has a Flag='Allocated' row ≥100%; Partial = 1-99%.
 4. `Timesheet_Data` — Logged ticket/project hours. Cols: EMPLOYEE_CODE (the 'E-1571' code — **JOIN to Employee_Data.employee_code, digit-normalised; this is the employee link, NOT TICKET_USER_ID** which is a different internal numeric id), TICKET_USER_ID (internal id — do NOT join on it), TICKET_PROJECT_CODE (**JOIN to Project_Master.Project_Code for the project name**), TICKET_PROJECT_LABEL, TICKET_HOURS (FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT.
-5. `Project_Master` — Project reference (everyone can see it). Cols: Project_Code (the key that allocation.project_id AND timesheet.TICKET_PROJECT_CODE join to), Project_Name (e.g. '1245 - TMC Project Matrix'), Client_Name, Project_Type, Project_Status, Competency, PM_ID (project manager's employee_code), Project_Start_Date, Project_EndDate. ALWAYS join here to report project NAMES rather than bare codes.
+5. `Project_Master` — Project reference (everyone can see it). Cols: Project_Code (the key that allocation.project_id AND timesheet.TICKET_PROJECT_CODE join to), Project_Name (e.g. '1245 - TMC Project Matrix'), Client_Name, Project_Type, Project_Status, Competency, PM_ID (project manager's employee_code), Project_Start_Date, Project_EndDate, Location (STRING — the PROJECT's delivery location/city: Karachi, Lahore, Islamabad, International, …; COALESCE empties to 'Unspecified' when grouping). ALWAYS join here to report project NAMES rather than bare codes. "Projects in <city>" / "projects by location" = filter/group Project_Master.Location — do NOT confuse it with the EMPLOYEE's city (Employee_Data.EmployeeLocation) or the sales-account Location: a Lahore-based employee can be allocated to a Karachi project.
 
 SALES TABLES
 5. `Sales_Accounts` (~359 rows) — Customer accounts. Cols: VP, AM, Location, Account, Tier ('A'/'B'/'C'), Dormant ('Yes'/'No'), Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits, Zero_Visit ('Yes'/'No').
@@ -5133,6 +5133,7 @@ WORKFORCE TABLES:
 - `Attendance_Data` — daily attendance per employee. Cols: attendance_date (DATE), personal_no (STRING "E-902" — THIS is the JOIN KEY to Employee_Code, digit-normalised), employee_id (INT64 — an unrelated sequence number, NOT a join key), employee_name (STRING), checkin_time / checkout_time (STRING — FULL datetime '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'; clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time))), attendance_status_text (STRING — 'Present'/'Absent'/'On Leave'/'Holiday'/'Weekend'/'Missing Punch'/'Remote Work'; no 'Late' value — late arrival = check-in after 09:30: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00'), is_present/is_absent/is_on_leave/is_remote/is_holiday/is_weekend (INT64 — 0/1), checkin_is_permitted_location / checkout_is_permitted_location (STRING '1'/'0' — approved-location punch: IF(SAFE_CAST(checkin_is_permitted_location AS INT64)=1,'Permitted','Not Permitted') AS PunchInLocationStatus; same for checkout).
 - `Allocation_Data` — weekly project allocation. Cols: project_id (STRING), employee_id (STRING — "E-1234"), allocation_percent (INT64 — compare directly), emp_competency (STRING), Flag (STRING — 'Allocated'/'Bench'), Forecast_Flag (INT64 0/1), Date (DATE), Year (INT64), Month (INT64 1-12), Week (INT64). NO year_id/week_id. Filter Year/Month with integers, not strings. Real/billable allocation = MAX(allocation_percent) over Flag='Allocated' rows; Bench = no Flag='Allocated' row with pct>0.
 - `Timesheet_Data` — ticket/project hours. Cols: EMPLOYEE_CODE (STRING "E-1571" — THIS is the employee who logged the hours; JOIN/filter on this, digit-normalised), TICKET_USER_ID (an unrelated internal numeric id — NEVER join or filter on it; it matches no employee), TICKET_NUMBER, TICKET_PROJECT_CODE (JOIN to Project_Master.Project_Code for the project name), TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT. For DATE_KEY filters use the type-agnostic form: COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))).
+- `Project_Master` — project reference. Cols: Project_Code (STRING — the key allocation.project_id and timesheet.TICKET_PROJECT_CODE join to), Project_Name (STRING, e.g. '1245 - TMC Project Matrix'), Client_Name (STRING), Project_Type (STRING — AMC/SLA/Internal/Admin/…), Project_Status (STRING — 'Active'/…), Competency (STRING), PM_ID (STRING — project manager's employee code), Project_Start_Date / Project_EndDate (STRING dates — SAFE parse), Location (STRING — the PROJECT's delivery city: Karachi/Lahore/Islamabad/International; COALESCE(NULLIF(TRIM(Location),''),'Unspecified') when grouping). Join here for project names AND for "projects in <city>" questions — the project Location is DISTINCT from the employee's EmployeeLocation.
 
 SALES TABLES:
 - `Sales_Accounts` (~359 rows) — Customer accounts. Cols: VP, AM, Location, Account, Tier ('A'/'B'/'C'), Dormant ('Yes'/'No'), Jan_Visits/Feb_Visits/Mar_Visits/Q1_Visits (STRING — SAFE_CAST AS INT64), Zero_Visit.
@@ -5255,6 +5256,11 @@ DEFAULT FILTERS — apply automatically without asking:
      person as the conversation subject — don't re-ask on follow-ups.
 6. Department, location, position, AM, VP, city, tier — these are STRINGs.
    Always TRIM and COALESCE empties to 'Unspecified' when grouping.
+   THREE different "location" columns exist — pick the right one:
+   Project_Master.Location = where the PROJECT is delivered ("projects in
+   Karachi"); Employee_Data.EmployeeLocation = where the EMPLOYEE sits;
+   Sales_Accounts.Location = the customer account's city. A Lahore employee
+   can be on a Karachi project — never substitute one for another.
 7. Sales currency — USD values are STRING; SAFE_CAST AS FLOAT64 before sums.
    Coverage_Ratio, Hist_Win_Rate and Win_Rate_by are ALSO STRING (decimals) —
    SAFE_CAST AS FLOAT64 before any AVG/SUM or `* 100`; never aggregate them raw.
@@ -6947,6 +6953,13 @@ _FILTER_REGISTRY = {
     # allocation
     "competency":             ("Allocation_Data", "emp_competency", "emp_competency"),
     "emp_competency":         ("Allocation_Data", "emp_competency", "emp_competency"),
+    # project reference (Project_Master.Location = where the PROJECT is
+    # delivered — distinct from the employee's EmployeeLocation above)
+    "project_location":       ("Project_Master", "COALESCE(NULLIF(TRIM(Location),''),'Unspecified')", "COALESCE(NULLIF(TRIM(Location),''),'Unspecified')"),
+    "project_type":           ("Project_Master", "Project_Type", "Project_Type"),
+    "project_status":         ("Project_Master", "Project_Status", "Project_Status"),
+    "client":                 ("Project_Master", "Client_Name", "Client_Name"),
+    "client_name":            ("Project_Master", "Client_Name", "Client_Name"),
     # sales
     "am": ("Sales_AM_Scorecard", "AM", "AM"),
     "vp": ("Sales_AM_Scorecard", "VP", "VP"),
@@ -8086,6 +8099,7 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
           COALESCE(NULLIF(TRIM(p.Client_Name), ''), '') AS client_name,
           COALESCE(NULLIF(TRIM(p.Project_Type), ''), '') AS project_type,
           COALESCE(NULLIF(TRIM(p.Project_Status), ''), '') AS project_status,
+          COALESCE(NULLIF(TRIM(p.Location), ''), '') AS project_location,
           COALESCE(NULLIF(TRIM(a.emp_competency), ''), '') AS competency,
           MAX(SAFE_CAST(a.allocation_percent AS FLOAT64)) AS allocation_pct,
           MAX(IF(a.Flag = 'Allocated', SAFE_CAST(a.allocation_percent AS FLOAT64), 0)) AS real_pct,
@@ -8095,7 +8109,7 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
         LEFT JOIN {_bq_avail('Project_Master')} p
           ON CAST(a.project_id AS STRING) = CAST(p.Project_Code AS STRING)
         WHERE {_norm_emp_id('a.employee_id')} = {norm_target}
-        GROUP BY project_id, project_name, client_name, project_type, project_status, competency
+        GROUP BY project_id, project_name, client_name, project_type, project_status, project_location, competency
         HAVING allocation_pct > 0
         ORDER BY allocation_pct DESC, records DESC
         LIMIT 50
@@ -8112,6 +8126,7 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
             "client_name":    row.get("client_name") or "",
             "project_type":   row.get("project_type") or "",
             "project_status": row.get("project_status") or "",
+            "location":       row.get("project_location") or "",
             "competency":     row.get("competency") or "",
             "allocation_pct": float(row.get("allocation_pct") or 0),
             "on_bench":       float(row.get("real_pct") or 0) == 0,
@@ -10953,6 +10968,21 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "SLA PROJECTS / SUPPORT: an SLA (support) project is one whose TICKET_PROJECT_LABEL contains 'SLA' (case-insensitive) — e.g. '931 - OGDCL SAP SLA', '743 - CGA SLA', '1250 - Packages Qlik Support SLA', '839 - SAP Support SLA Internal'. Filter SLA work with WHERE UPPER(TICKET_PROJECT_LABEL) LIKE '%SLA%'; segregate SLA (support) vs non-SLA (implementation/project) work this way. SLA hours = SUM(TICKET_HOURS) on matching labels; per-SLA-project = GROUP BY TICKET_PROJECT_LABEL; who works on SLAs = GROUP BY EMPLOYEE_CODE. 'SLA projects' / 'support SLAs' / 'on SLA' = these.\n"
             "To attribute hours/tickets to a person/department, JOIN Employee_Data on "
             "norm(EMPLOYEE_CODE)=norm(Employee_Code) where norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0')."
+        ),
+    },
+    {
+        "table_name": "Project_Master",
+        "sort_order": 45,
+        "description": (
+            "Project reference table — one row per project; everyone can see it.\n"
+            "Columns: Project_Code (STRING — THE join key: Allocation_Data.project_id and Timesheet_Data.TICKET_PROJECT_CODE both join to it), "
+            "Project_Name (STRING, e.g. '1245 - TMC Project Matrix'), Client_Name (STRING), Project_Type (STRING — AMC / SLA / Internal / Admin / Sales / Education / Hosting …), "
+            "Project_Status (STRING — 'Active' etc.), Competency (STRING), PM_ID (STRING — the project manager's employee code, digit-norm join to Employee_Data), "
+            "Project_Start_Date / Project_EndDate (STRING dates — SAFE parse before comparing), "
+            "Location (STRING — the PROJECT's delivery location/city: Karachi, Lahore, Islamabad, International, …; COALESCE(NULLIF(TRIM(Location),''),'Unspecified') when grouping; may be blank on rows the feed hasn't refreshed).\n"
+            "ALWAYS join here to show project NAMES instead of bare codes. 'Projects in <city>' / 'projects by location' / 'where is project X delivered' = Project_Master.Location. "
+            "⚠️ Three DIFFERENT location columns exist — never conflate: Project_Master.Location = where the PROJECT is delivered; Employee_Data.EmployeeLocation = where the EMPLOYEE sits; Sales_Accounts.Location = the customer account's city. "
+            "A Lahore employee can be allocated to a Karachi project — 'people working on Karachi projects' joins Allocation→Project_Master and filters the PROJECT location."
         ),
     },
     {

@@ -839,7 +839,7 @@ const ResourceOnePager = ({ emp, detail, att, innerRef }) => {
               <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 0", borderBottom: i < projects.length - 1 ? `1px solid ${OP.line}` : "none" }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 12.5, fontWeight: 700 }}>{p.project_name || p.project_id}</div>
-                  <div style={{ fontSize: 10.5, color: OP.muted }}>{[p.client_name, p.project_type, p.competency].filter(Boolean).join(" · ") || " "}</div>
+                  <div style={{ fontSize: 10.5, color: OP.muted }}>{[p.client_name, p.project_type, p.location, p.competency].filter(Boolean).join(" · ") || " "}</div>
                 </div>
                 <div style={{ width: 130 }}>
                   <div style={{ height: 6, background: OP.panel, border: `1px solid ${OP.line}`, borderRadius: 999, overflow: "hidden" }}>
@@ -1222,7 +1222,7 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
                       <div style={{ minWidth: 0 }}>
                         <div style={{ fontSize: 13, fontWeight: 600, color: C.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.project_name || p.project_id}</div>
                         <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {[p.client_name, p.project_type, p.competency].filter(Boolean).join(" · ") || "—"}
+                          {[p.client_name, p.project_type, p.location, p.competency].filter(Boolean).join(" · ") || "—"}
                         </div>
                       </div>
                       <div>
