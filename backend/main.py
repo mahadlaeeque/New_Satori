@@ -8917,6 +8917,220 @@ def availability_bench_radar(weeks: int = 8, department: str = "",
     }
 
 
+# ─── Projects intelligence (project drill-down page) ────────────────────────
+# Project_Master is shared data (everyone sees it, same as the scope policy
+# for sales tables), so these endpoints are not dept-scoped. Health rollups
+# come from WP_Report; effort/team from Timesheet; staffing from Allocation.
+
+
+@app.get("/api/projects")
+def projects_list(user: dict = Depends(get_current_user)):
+    """All projects with a WP-health + activity rollup for the list page."""
+    sql = f"""
+        WITH wp AS (
+          SELECT CAST(PROJECT_ID AS STRING) AS pid,
+                 COUNT(DISTINCT WP_CODE) AS wp_total,
+                 COUNT(DISTINCT IF(COALESCE(Progress_Status,'') != 'Completed', WP_CODE, NULL)) AS wp_active,
+                 COUNT(DISTINCT IF(Performance_Status = 'Behind' AND COALESCE(Progress_Status,'') != 'Completed', WP_CODE, NULL)) AS wp_behind,
+                 COUNT(DISTINCT IF(WP_END_DATE < CURRENT_DATE() AND COALESCE(Progress_Status,'') != 'Completed', WP_CODE, NULL)) AS wp_overdue
+          FROM {_bq_avail('WP_Report')}
+          GROUP BY pid
+        ),
+        tmax AS (
+          SELECT MAX(COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),
+                               SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))) AS m
+          FROM {_bq_avail('Timesheet_Data')}
+        ),
+        ts AS (
+          SELECT CAST(TICKET_PROJECT_CODE AS STRING) AS pid,
+                 ROUND(SUM(TICKET_HOURS), 0) AS hrs_90d,
+                 COUNT(DISTINCT {_norm_emp_id('EMPLOYEE_CODE')}) AS team_90d
+          FROM {_bq_avail('Timesheet_Data')} t, tmax
+          WHERE COALESCE(SAFE_CAST(CAST(t.DATE_KEY AS STRING) AS DATE),
+                         SAFE.PARSE_DATE('%Y%m%d', CAST(t.DATE_KEY AS STRING))) > DATE_SUB(tmax.m, INTERVAL 90 DAY)
+          GROUP BY pid
+        )
+        SELECT CAST(p.Project_Code AS STRING) AS code,
+               COALESCE(NULLIF(TRIM(p.Project_Name), ''), CAST(p.Project_Code AS STRING)) AS name,
+               COALESCE(NULLIF(TRIM(p.Client_Name), ''), '') AS client,
+               COALESCE(NULLIF(TRIM(p.Project_Type), ''), '') AS type,
+               COALESCE(NULLIF(TRIM(p.Project_Status), ''), '') AS status,
+               COALESCE(NULLIF(TRIM(p.Location), ''), '') AS location,
+               COALESCE(NULLIF(TRIM(p.Competency), ''), '') AS competency,
+               COALESCE(wp.wp_total, 0) AS wp_total,
+               COALESCE(wp.wp_active, 0) AS wp_active,
+               COALESCE(wp.wp_behind, 0) AS wp_behind,
+               COALESCE(wp.wp_overdue, 0) AS wp_overdue,
+               COALESCE(ts.hrs_90d, 0) AS hrs_90d,
+               COALESCE(ts.team_90d, 0) AS team_90d
+        FROM {_bq_avail('Project_Master')} p
+        LEFT JOIN wp ON CAST(p.Project_Code AS STRING) = wp.pid
+        LEFT JOIN ts ON CAST(p.Project_Code AS STRING) = ts.pid
+        ORDER BY wp_active DESC, hrs_90d DESC, name
+    """
+    r = bq_run_query(normalize_bq_project(_autofix_dashboard_sql(sql)), max_rows=2000)
+    if "error" in r:
+        print(f"[/api/projects] BQ error: {r['error']}")
+        raise HTTPException(status_code=500, detail=r["error"])
+    out = []
+    for row in (r.get("rows") or []):
+        out.append({
+            "code": row.get("code") or "",
+            "name": row.get("name") or "",
+            "client": row.get("client") or "",
+            "type": row.get("type") or "",
+            "status": row.get("status") or "",
+            "location": row.get("location") or "",
+            "competency": row.get("competency") or "",
+            "wp_total": int(float(row.get("wp_total") or 0)),
+            "wp_active": int(float(row.get("wp_active") or 0)),
+            "wp_behind": int(float(row.get("wp_behind") or 0)),
+            "wp_overdue": int(float(row.get("wp_overdue") or 0)),
+            "hrs_90d": float(row.get("hrs_90d") or 0),
+            "team_90d": int(float(row.get("team_90d") or 0)),
+        })
+    return {"projects": out}
+
+
+@app.get("/api/projects/{code}")
+def project_detail(code: str, user: dict = Depends(get_current_user)):
+    """One project's drill-down: WP status mix, active WP list (overdue
+    flagged), deliverable-type mix, and the team (90d hours + current
+    allocation plan)."""
+    pid = (code or "").strip().replace("'", "''")
+    if not pid:
+        raise HTTPException(status_code=400, detail="Project code is required.")
+
+    wp_sql = f"""
+        SELECT WP_CODE,
+               ANY_VALUE(WP_DESCRIPTION) AS descr,
+               ANY_VALUE(WP_OWNER_NAME) AS owner,
+               ANY_VALUE(WP_RESOURCE_ASSIGNED) AS resource,
+               ANY_VALUE(Progress_Status) AS progress,
+               ANY_VALUE(Performance_Status) AS performance,
+               MAX(PLAN) AS plan_pct,
+               MAX(WP_END_DATE) AS end_date,
+               (MAX(WP_END_DATE) < CURRENT_DATE() AND COALESCE(ANY_VALUE(Progress_Status), '') != 'Completed') AS overdue
+        FROM {_bq_avail('WP_Report')}
+        WHERE CAST(PROJECT_ID AS STRING) = '{pid}'
+        GROUP BY WP_CODE
+        ORDER BY (COALESCE(progress, '') = 'Completed'), end_date IS NULL, end_date
+        LIMIT 200
+    """
+    mix_sql = f"""
+        SELECT COALESCE(Progress_Status, 'Unknown') AS k, COUNT(DISTINCT WP_CODE) AS n
+        FROM {_bq_avail('WP_Report')} WHERE CAST(PROJECT_ID AS STRING) = '{pid}' GROUP BY k
+        UNION ALL
+        SELECT CONCAT('type:', COALESCE(NULLIF(TRIM(DELIVERABLE_TYPE), ''), 'Unspecified')), COUNT(DISTINCT WP_CODE)
+        FROM {_bq_avail('WP_Report')} WHERE CAST(PROJECT_ID AS STRING) = '{pid}' GROUP BY 1
+    """
+    team_sql = f"""
+        WITH tmax AS (
+          SELECT MAX(COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),
+                               SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))) AS m
+          FROM {_bq_avail('Timesheet_Data')}
+        ),
+        hrs AS (
+          SELECT {_norm_emp_id('t.EMPLOYEE_CODE')} AS nid, ROUND(SUM(t.TICKET_HOURS), 0) AS hrs
+          FROM {_bq_avail('Timesheet_Data')} t, tmax
+          WHERE CAST(t.TICKET_PROJECT_CODE AS STRING) = '{pid}'
+            AND COALESCE(SAFE_CAST(CAST(t.DATE_KEY AS STRING) AS DATE),
+                         SAFE.PARSE_DATE('%Y%m%d', CAST(t.DATE_KEY AS STRING))) > DATE_SUB(tmax.m, INTERVAL 90 DAY)
+          GROUP BY nid
+        ),
+        cur AS (SELECT MAX(Date) AS d FROM {_bq_avail('Allocation_Data')} WHERE Date <= CURRENT_DATE()),
+        alloc AS (
+          SELECT {_norm_emp_id('a.employee_id')} AS nid, MAX(SAFE_CAST(a.allocation_percent AS FLOAT64)) AS pct
+          FROM {_bq_avail('Allocation_Data')} a JOIN cur ON a.Date = cur.d
+          WHERE CAST(a.project_id AS STRING) = '{pid}' AND a.Flag = 'Allocated'
+          GROUP BY nid HAVING pct > 0
+        ),
+        ids AS (SELECT nid FROM hrs UNION DISTINCT SELECT nid FROM alloc)
+        SELECT ids.nid,
+               ANY_VALUE(e.Resource_Name) AS name,
+               ANY_VALUE(CAST(e.Employee_Code AS STRING)) AS code,
+               ANY_VALUE(COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), '')) AS dept,
+               MAX(hrs.hrs) AS hrs_90d,
+               MAX(alloc.pct) AS alloc_pct
+        FROM ids
+        LEFT JOIN hrs USING (nid)
+        LEFT JOIN alloc USING (nid)
+        LEFT JOIN {_bq_avail('Employee_Data')} e ON {_norm_emp_id('e.Employee_Code')} = ids.nid
+        GROUP BY ids.nid
+        ORDER BY hrs_90d DESC NULLS LAST, alloc_pct DESC NULLS LAST
+        LIMIT 30
+    """
+    head_sql = f"""
+        SELECT COALESCE(NULLIF(TRIM(Project_Name), ''), CAST(Project_Code AS STRING)) AS name,
+               COALESCE(NULLIF(TRIM(Client_Name), ''), '') AS client,
+               COALESCE(NULLIF(TRIM(Project_Type), ''), '') AS type,
+               COALESCE(NULLIF(TRIM(Project_Status), ''), '') AS status,
+               COALESCE(NULLIF(TRIM(Location), ''), '') AS location,
+               COALESCE(NULLIF(TRIM(Competency), ''), '') AS competency
+        FROM {_bq_avail('Project_Master')}
+        WHERE CAST(Project_Code AS STRING) = '{pid}' LIMIT 1
+    """
+
+    rh = bq_run_query(normalize_bq_project(_autofix_dashboard_sql(head_sql)), max_rows=1)
+    head = (rh.get("rows") or [{}])[0] if "error" not in rh else {}
+
+    rw = bq_run_query(normalize_bq_project(_autofix_dashboard_sql(wp_sql)), max_rows=220)
+    wps = []
+    if "error" in rw:
+        print(f"[/api/projects/detail] WP BQ error: {rw['error']}")
+    else:
+        for row in (rw.get("rows") or []):
+            wps.append({
+                "code": row.get("WP_CODE") or "",
+                "description": row.get("descr") or "",
+                "owner": row.get("owner") or "",
+                "resource": row.get("resource") or "",
+                "progress": row.get("progress") or "",
+                "performance": row.get("performance") or "",
+                "plan_pct": int(float(row.get("plan_pct") or 0)),
+                "end_date": str(row.get("end_date")) if row.get("end_date") else None,
+                "overdue": str(row.get("overdue")).strip().lower() == "true",
+            })
+
+    rm = bq_run_query(normalize_bq_project(_autofix_dashboard_sql(mix_sql)), max_rows=60)
+    status_mix, type_mix = {}, {}
+    if "error" not in rm:
+        for row in (rm.get("rows") or []):
+            k, n = str(row.get("k") or ""), int(float(row.get("n") or 0))
+            if k.startswith("type:"):
+                type_mix[k[5:]] = n
+            else:
+                status_mix[k] = n
+
+    rt = bq_run_query(normalize_bq_project(_autofix_dashboard_sql(team_sql)), max_rows=40)
+    team = []
+    if "error" in rt:
+        print(f"[/api/projects/detail] team BQ error: {rt['error']}")
+    else:
+        for row in (rt.get("rows") or []):
+            team.append({
+                "code": row.get("code") or "",
+                "name": row.get("name") or "",
+                "dept": row.get("dept") or "",
+                "hrs_90d": float(row.get("hrs_90d")) if row.get("hrs_90d") not in (None, "") else 0.0,
+                "alloc_pct": float(row.get("alloc_pct")) if row.get("alloc_pct") not in (None, "") else 0.0,
+            })
+
+    return {
+        "code": (code or "").strip(),
+        "name": head.get("name") or (code or "").strip(),
+        "client": head.get("client") or "",
+        "type": head.get("type") or "",
+        "status": head.get("status") or "",
+        "location": head.get("location") or "",
+        "competency": head.get("competency") or "",
+        "status_mix": status_mix,
+        "type_mix": type_mix,
+        "wps": wps,
+        "team": team,
+    }
+
+
 # ─── Suggest work for a roll-off person (Bench Radar → "Find work") ─────────
 # Skill-anchored task ideas for one consultant, generated by Gemini from their
 # tagged skills (department/position/current-projects tailored when no skills
@@ -9647,9 +9861,58 @@ def _generate_insights(day: str):
                           f"{loggers} people — under the 8-hour benchmark. Hours may be going unrecorded.",
                           f"{avg_day:g}h/day")
 
+    # G — work packages that went OVERDUE within the last 7 days (due date
+    # passed, not completed). Project-scoped, so dept '' (visible to
+    # unrestricted users; practice-head scoping is by department).
+    def check_wp_overdue():
+        rows = run(f"""
+            SELECT ANY_VALUE(PROJECT_NAME) AS project,
+                   COUNT(DISTINCT WP_CODE) AS n,
+                   ANY_VALUE(WP_DESCRIPTION) AS sample
+            FROM {_bq_avail('WP_Report')}
+            WHERE COALESCE(Progress_Status, '') NOT IN ('Completed')
+              AND WP_END_DATE BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+                                  AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+            GROUP BY PROJECT_ID
+            ORDER BY n DESC LIMIT 5
+        """)
+        for r in rows:
+            n, project = int(f(r.get("n"))), (r.get("project") or "Unspecified").strip()
+            if n < 1:
+                continue
+            _insight_save(day, "wp_overdue", "warn" if n >= 3 else "info", "",
+                          f"Work packages went overdue in {project}",
+                          f"{n} work package{'s' if n != 1 else ''} in {project} passed their due date this week "
+                          f"without completing — e.g. \"{(r.get('sample') or '')[:80]}\".",
+                          f"{n} overdue")
+
+    # H — projects with several WPs flagged Behind (with the busiest owner).
+    def check_wp_behind():
+        rows = run(f"""
+            WITH b AS (
+              SELECT PROJECT_ID, ANY_VALUE(PROJECT_NAME) AS project,
+                     COUNT(DISTINCT WP_CODE) AS n,
+                     APPROX_TOP_COUNT(WP_OWNER_NAME, 1)[OFFSET(0)].value AS top_owner
+              FROM {_bq_avail('WP_Report')}
+              WHERE Performance_Status = 'Behind'
+                AND COALESCE(Progress_Status, '') NOT IN ('Completed')
+              GROUP BY PROJECT_ID
+            )
+            SELECT * FROM b WHERE n >= 3 ORDER BY n DESC LIMIT 5
+        """)
+        for r in rows:
+            n, project = int(f(r.get("n"))), (r.get("project") or "Unspecified").strip()
+            owner = (r.get("top_owner") or "").strip()
+            _insight_save(day, "wp_behind", "warn", "",
+                          f"Work packages running behind in {project}",
+                          f"{project} has {n} active work packages flagged 'Behind'"
+                          + (f", most owned by {owner}" if owner else "") + ". Worth a delivery check-in.",
+                          f"{n} behind")
+
     for name, chk in [("attendance_dip", check_attendance_dip), ("late_spike", check_late_spike),
                       ("not_logging", check_allocated_not_logging), ("long_bench", check_long_bench),
-                      ("rolloff", check_rolloffs), ("underlogging", check_underlogging)]:
+                      ("rolloff", check_rolloffs), ("underlogging", check_underlogging),
+                      ("wp_overdue", check_wp_overdue), ("wp_behind", check_wp_behind)]:
         try:
             chk()
         except Exception as e:
@@ -9991,6 +10254,37 @@ def delete_employee_skill(code: str, skill: str, user: dict = Depends(get_curren
 
 
 
+def _open_wps_for_codes(codes: list[str]) -> dict:
+    """{normalized_employee_id: open_wp_count} — active (non-Completed) work
+    packages where the person is the ASSIGNED RESOURCE (WP_RESOURCE_ASSIGNED
+    carries the employee code, so the digit-norm join is reliable). Used by
+    find-best-fit as a workload signal. Fails soft to {} if WP_Report is
+    unavailable."""
+    norm_codes = sorted({_norm_code_py(c) for c in (codes or []) if _norm_code_py(c)})
+    if not norm_codes:
+        return {}
+    in_list = ",".join(f"'{d}'" for d in norm_codes)
+    nrm = _norm_emp_id("WP_RESOURCE_ASSIGNED")
+    sql = normalize_bq_project(f"""
+        SELECT {nrm} AS eid, COUNT(DISTINCT WP_CODE) AS n
+        FROM {_bq_avail('WP_Report')}
+        WHERE {nrm} IN ({in_list})
+          AND COALESCE(Progress_Status, '') NOT IN ('Completed')
+        GROUP BY eid
+    """)
+    r = bq_run_query(sql, max_rows=len(norm_codes) + 10)
+    if "error" in r:
+        print(f"[find-best-fit] open-WP probe error: {r['error']}")
+        return {}
+    out = {}
+    for row in (r.get("rows") or []):
+        try:
+            out[str(row.get("eid"))] = int(float(row.get("n") or 0))
+        except Exception:
+            pass
+    return out
+
+
 _FIND_BEST_FIT_PROMPT = """You are Satori AI, a senior staffing analyst at TMC. A project owner is creating a new task / project and you have to recommend the BEST 5 employees for it, ranked.
 
 You will receive:
@@ -10006,6 +10300,7 @@ Rank the candidates against the project using these signals, weighted in this or
 ALWAYS, for EVERY recommendation, write a 1-2 sentence reasoning that:
   (a) says WHY they fit — name the specific matched skill(s)/keyword(s) and how they align with the project description; AND
   (b) states their availability honestly — if `status` is Allocated or `current_projects` is non-empty, say they are "currently allocated to <name the projects from current_projects>" so the requester knows they'd need to be freed up. If Bench, say "available now".
+  (c) weighs `open_wps` (the count of ACTIVE work packages already assigned to them) as a WORKLOAD signal: when two candidates fit equally, prefer the one with fewer open WPs; if a candidate has many (≥5), say so in the reasoning ("already carrying N open work packages") so the requester knows they're loaded. open_wps NEVER overrides skill fit — it is a tie-breaker and transparency note only.
 
 Return EXACTLY this JSON shape (no markdown, no commentary outside the JSON):
 
@@ -10123,6 +10418,7 @@ def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user
     # Each candidate's CURRENT projects (latest-week snapshot) so the model can
     # name what an allocated best-fit is currently on.
     cur_proj_map = _current_projects_for_codes([e.get("code") for e in ranked_pool])
+    open_wp_map = _open_wps_for_codes([e.get("code") for e in ranked_pool])
 
     # 2) Build the compact candidate payload for Gemini.
     compact = [
@@ -10138,6 +10434,7 @@ def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user
             "location":      e.get("location") or "",
             "assigned_skills": e.get("_skills") or [],
             "current_projects": cur_proj_map.get(_norm_code_py(e.get("code")), []),
+            "open_wps":      open_wp_map.get(_norm_code_py(e.get("code")), 0),
         }
         for e in ranked_pool
     ]

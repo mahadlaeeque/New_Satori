@@ -18,8 +18,9 @@ import {
 } from "lucide-react";
 // Lazy-loaded: the Availability Engine is a big self-contained page (cards,
 // heatmap, radar, modals, jspdf export) most sessions never open first —
-// splitting it keeps login/first-paint lean.
+// splitting it keeps login/first-paint lean. Projects gets the same treatment.
 const AvailabilityEnginePage = lazy(() => import("./AvailabilityEngine.jsx"));
+const ProjectsPage = lazy(() => import("./ProjectsPage.jsx"));
 import SatoriAvatar from "./components/SatoriAvatar.jsx";
 
 // ─── TMC Brand Color Palette ───
@@ -10099,6 +10100,7 @@ const NAV_ITEMS = [
   { id: "dashboards", label: "Dashboard Builder", icon: LayoutDashboard, component: DashboardsPage, requiresFeature: "dashboards" },
   { id: "_divider_intelligence", label: "INTELLIGENCE", isDivider: true },
   { id: "availability", label: "Availability Engine", icon: Activity, component: AvailabilityEnginePage, requiresFeature: "availability" },
+  { id: "projects", label: "Projects", icon: Layers, component: ProjectsPage, requiresFeature: "availability" },
   { id: "_divider_admin", label: "ADMIN", isDivider: true, superAdminOnly: true },
   { id: "users", label: "User Management", icon: Users, component: UserManagementPage, superAdminOnly: true },
   { id: "audit", label: "Audit Log", icon: Shield, component: AuditLogPage, superAdminOnly: true },
