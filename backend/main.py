@@ -221,16 +221,17 @@ def require_admin(user: dict = Depends(get_current_user)) -> dict:
 # every user (including other admins) sees data, so we lock them to the
 # single bootstrap account rather than the entire admin role.
 SUPERADMIN_EMAIL = (os.environ.get("SUPERADMIN_EMAIL") or "superadmin@tmc.com").strip().lower()
-# Accept every email shape the superadmin has ever had, so an env-var that
-# still pins the old address or an in-flight migration that hasn't run yet
-# can't lock the superadmin out of System Settings.
+# The ONLY accounts with Super Admin privileges (the Admin tab: User
+# Management, Audit Log, Usage Analytics, Support Tickets, System Settings —
+# and their require_superadmin endpoints).
+#
+# superadmin@tmc.com (the bootstrap account, incl. its legacy address
+# variants and the SUPERADMIN_EMAIL env default) was DEMOTED to a regular
+# admin on 2026-06-12 at the owner's request: it keeps role='admin' — every
+# feature, every department, sales data, no scope restriction — but no
+# longer sees or can call anything superadmin-gated. To re-promote it (or
+# anyone), add the email here.
 _SUPERADMIN_EMAILS = {
-    SUPERADMIN_EMAIL,
-    "superadmin@tmc.com",
-    "superadmin@tmcltd.com",
-    "superadmin@sfml.com",
-    # Additional accounts granted full Super Admin privileges (admin role +
-    # System Settings + unrestricted data), same as the bootstrap superadmin.
     "numair.mazhar@tmcltd.com",
     "mahad.laeeque@tmcltd.com",
 }
