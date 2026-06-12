@@ -36,6 +36,12 @@ body {
   min-height: 60vh;
 }
 
+/* Loader spinner — used as <Loader2 className="spin" /> across the
+   Availability/Delivery pages. Must be global: component <style> blocks
+   (where @keyframes spin also lives) can unmount with their component. */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 1s linear infinite; }
+
 /* ─── Dark-mode chrome (GLOBAL — must live here, not in a component <style>:
    LoginPage's style tag unmounts after sign-in and takes its rules with it).
    Theme tokens themselves are set as inline root properties from JS. ─── */
@@ -53,3 +59,291 @@ html[data-satori-theme="dark"] textarea {
 }
 html[data-satori-theme="dark"] input::placeholder,
 html[data-satori-theme="dark"] textarea::placeholder { color: #5B6B85; }
+
+/* ─── Dark-mode hardcoded-hex overrides (GLOBAL COPY) ───
+   These attribute-selector re-tints also exist in LoginPage's <style>
+   block, which unmounts after sign-in — without this copy, leftover
+   hardcoded '#fff'-style inline styles glare white in dark mode on the
+   post-login pages (e.g. User Management feature cards). */
+/* Override hardcoded hex backgrounds via attribute selector. Inline
+           styles use rgb(...) serialization on most browsers, so we target
+           both spellings. Selectors are intentionally specific. */
+        html[data-satori-theme="dark"] [style*="background: rgb(255, 255, 255)"],
+        html[data-satori-theme="dark"] [style*="background:#fff"],
+        html[data-satori-theme="dark"] [style*='background: #fff'],
+        html[data-satori-theme="dark"] [style*='background: COLORS.surface'] {
+          background: var(--c-surface) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: rgb(248, 250, 252)"],
+        html[data-satori-theme="dark"] [style*="background:#F8FAFC"],
+        html[data-satori-theme="dark"] [style*="background:#f8fafc"] {
+          background: var(--c-surface-alt) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: rgb(250, 251, 252)"],
+        html[data-satori-theme="dark"] [style*="background:#FAFBFC"] {
+          background: var(--c-surface-alt) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: rgb(241, 245, 249)"],
+        html[data-satori-theme="dark"] [style*="background:#F1F5F9"] {
+          background: var(--c-surface-alt) !important;
+        }
+        html[data-satori-theme="dark"] [style*="border: 1px solid rgb(241, 245, 249)"],
+        html[data-satori-theme="dark"] [style*="border-bottom: 1px solid rgb(241, 245, 249)"],
+        html[data-satori-theme="dark"] [style*="borderBottom"][style*="rgb(241, 245, 249)"] {
+          border-color: var(--c-border) !important;
+        }
+        html[data-satori-theme="dark"] [style*="color: rgb(17, 24, 39)"],
+        html[data-satori-theme="dark"] [style*="color: rgb(31, 41, 55)"],
+        html[data-satori-theme="dark"] [style*="color: rgb(15, 23, 42)"] {
+          color: var(--c-text-primary) !important;
+        }
+        html[data-satori-theme="dark"] [style*="color: rgb(100, 116, 139)"],
+        html[data-satori-theme="dark"] [style*="color: rgb(71, 85, 105)"] {
+          color: var(--c-text-secondary) !important;
+        }
+        html[data-satori-theme="dark"] [style*="color: rgb(148, 163, 184)"],
+        html[data-satori-theme="dark"] [style*="color: rgb(156, 163, 175)"] {
+          color: var(--c-text-muted) !important;
+        }
+
+        /* Hex-form text-color overrides — Chrome sometimes preserves the
+           original hex string in inline-style, so attribute selectors keyed
+           on rgb() won't match. Match the hex form too. */
+        html[data-satori-theme="dark"] [style*="color: #0F172A"],
+        html[data-satori-theme="dark"] [style*="color: #0f172a"],
+        html[data-satori-theme="dark"] [style*="color: #111827"],
+        html[data-satori-theme="dark"] [style*="color:#0F172A"],
+        html[data-satori-theme="dark"] [style*="color: #1F2937"],
+        html[data-satori-theme="dark"] [style*="color: #1F1F1F"],
+        html[data-satori-theme="dark"] [style*="color: #1E293B"],
+        html[data-satori-theme="dark"] [style*="color: #1e293b"],
+        html[data-satori-theme="dark"] [style*="color: #0B1220"] {
+          color: var(--c-text-primary) !important;
+        }
+        html[data-satori-theme="dark"] [style*="color: #475569"],
+        html[data-satori-theme="dark"] [style*="color: #4B5563"],
+        html[data-satori-theme="dark"] [style*="color: #374151"],
+        html[data-satori-theme="dark"] [style*="color: #334155"] {
+          color: var(--c-text-secondary) !important;
+        }
+        html[data-satori-theme="dark"] [style*="color: #64748B"],
+        html[data-satori-theme="dark"] [style*="color: #6B7280"],
+        html[data-satori-theme="dark"] [style*="color: #94A3B8"],
+        html[data-satori-theme="dark"] [style*="color: #94a3b8"],
+        html[data-satori-theme="dark"] [style*="color: #9CA3AF"] {
+          color: var(--c-text-muted) !important;
+        }
+
+        /* Catch borders specified with darker hex literals */
+        html[data-satori-theme="dark"] [style*="border: 1px solid #E2E8F0"],
+        html[data-satori-theme="dark"] [style*="border: 1px solid #e2e8f0"],
+        html[data-satori-theme="dark"] [style*="border: 1px solid #E5E7EB"],
+        html[data-satori-theme="dark"] [style*="border: 1px solid #CBD5E1"],
+        html[data-satori-theme="dark"] [style*="1px solid #F1F5F9"] {
+          border-color: var(--c-border) !important;
+        }
+
+        /* Light-grey card surfaces commonly used inside other panels */
+        html[data-satori-theme="dark"] [style*="background: #F8FAFC"],
+        html[data-satori-theme="dark"] [style*="background:#F8FAFC"],
+        html[data-satori-theme="dark"] [style*="background: rgb(248, 250, 252)"],
+        html[data-satori-theme="dark"] [style*="background: #F1F5F9"],
+        html[data-satori-theme="dark"] [style*="background:#F1F5F9"],
+        html[data-satori-theme="dark"] [style*="background: rgb(241, 245, 249)"],
+        html[data-satori-theme="dark"] [style*="background: #FAFBFC"],
+        html[data-satori-theme="dark"] [style*="background:#FAFBFC"],
+        html[data-satori-theme="dark"] [style*="background: rgb(250, 251, 252)"] {
+          background: var(--c-surface-alt) !important;
+        }
+        /* Pure-white card surfaces */
+        html[data-satori-theme="dark"] [style*="background: #FFFFFF"],
+        html[data-satori-theme="dark"] [style*="background:#FFFFFF"],
+        html[data-satori-theme="dark"] [style*="background: #fff"],
+        html[data-satori-theme="dark"] [style*="background:#fff"],
+        html[data-satori-theme="dark"] [style*="background: rgb(255, 255, 255)"] {
+          background: var(--c-surface) !important;
+        }
+
+        /* Pale status/info tints (green/amber/red/blue/purple) glow white on a
+           dark page. Re-tint them to subtle dark-appropriate fills so colored
+           cards (success/warning/error/info banners, KPI chips) look right. */
+        html[data-satori-theme="dark"] [style*="var(--sem-ok-bg)"],
+        html[data-satori-theme="dark"] [style*="#F0FDF4"],
+        html[data-satori-theme="dark"] [style*="#D1FAE5"],
+        html[data-satori-theme="dark"] [style*="rgb(236, 253, 245)"],
+        html[data-satori-theme="dark"] [style*="rgb(240, 253, 244)"],
+        html[data-satori-theme="dark"] [style*="rgb(220, 252, 231)"] {
+          background-color: rgba(34, 197, 94, 0.13) !important;
+        }
+        html[data-satori-theme="dark"] [style*="var(--sem-danger-bg)"],
+        html[data-satori-theme="dark"] [style*="var(--sem-danger-bg)"],
+        html[data-satori-theme="dark"] [style*="rgb(254, 242, 242)"],
+        html[data-satori-theme="dark"] [style*="rgb(254, 226, 226)"] {
+          background-color: rgba(239, 68, 68, 0.13) !important;
+        }
+        html[data-satori-theme="dark"] [style*="#FEF9E7"],
+        html[data-satori-theme="dark"] [style*="var(--sem-warn-bg)"],
+        html[data-satori-theme="dark"] [style*="var(--sem-warn-bg)"],
+        html[data-satori-theme="dark"] [style*="rgb(254, 243, 199)"],
+        html[data-satori-theme="dark"] [style*="rgb(255, 251, 235)"] {
+          background-color: rgba(245, 158, 11, 0.14) !important;
+        }
+        html[data-satori-theme="dark"] [style*="#EFF6FF"],
+        html[data-satori-theme="dark"] [style*="#DBEAFE"],
+        html[data-satori-theme="dark"] [style*="rgb(239, 246, 255)"],
+        html[data-satori-theme="dark"] [style*="rgb(219, 234, 254)"] {
+          background-color: rgba(10, 95, 137, 0.18) !important;
+        }
+        html[data-satori-theme="dark"] [style*="#F5F3FF"],
+        html[data-satori-theme="dark"] [style*="#EDE9FE"],
+        html[data-satori-theme="dark"] [style*="rgb(245, 243, 255)"] {
+          background-color: rgba(53, 48, 133, 0.22) !important;
+        }
+
+        /* The chat / dashboard / report page wrapper often sets background
+           on the outer div via Tailwind-like literals; force the page bg in
+           dark mode so the white sliver behind cards isn't blinding. */
+        html[data-satori-theme="dark"] body,
+        html[data-satori-theme="dark"] #root {
+          background: var(--c-page-bg) !important;
+        }
+
+        /* Default text color for any element that didn't set its own — keeps
+           anything we haven't migrated yet readable. */
+        html[data-satori-theme="dark"] {
+          color-scheme: dark;
+        }
+
+        /* Scrollbar tint per theme */
+        html[data-satori-theme="dark"] ::-webkit-scrollbar-thumb { background: #4B5563; }
+        html[data-satori-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: #6B7280; }
+
+        /* Native form controls — inputs/selects/textareas with no inline bg
+           need to flip too. */
+        html[data-satori-theme="dark"] input[type="text"],
+        html[data-satori-theme="dark"] input[type="search"],
+        html[data-satori-theme="dark"] input[type="number"],
+        html[data-satori-theme="dark"] input[type="email"],
+        html[data-satori-theme="dark"] input[type="password"],
+        html[data-satori-theme="dark"] textarea,
+        html[data-satori-theme="dark"] select {
+          background-color: var(--c-input-bg) !important;
+          color: var(--c-text-primary) !important;
+          border-color: var(--c-border) !important;
+        }
+        html[data-satori-theme="dark"] input::placeholder,
+        html[data-satori-theme="dark"] textarea::placeholder {
+          color: var(--c-text-muted) !important;
+          opacity: 0.7;
+        }
+
+        /* ─── Recharts dark-mode polish ──────────────────────────────────
+           Default recharts tooltips have a white background that glows on
+           a dark page, and the cartesian grid uses #F1F5F9 which is barely
+           visible. Override both. */
+        html[data-satori-theme="dark"] .recharts-default-tooltip {
+          background: var(--c-surface) !important;
+          border: 1px solid var(--c-border) !important;
+          color: var(--c-text-primary) !important;
+          border-radius: 12px !important;
+        }
+        html[data-satori-theme="dark"] .recharts-tooltip-wrapper * {
+          color: var(--c-text-primary) !important;
+        }
+        html[data-satori-theme="dark"] .recharts-cartesian-grid line,
+        html[data-satori-theme="dark"] .recharts-cartesian-grid-horizontal line,
+        html[data-satori-theme="dark"] .recharts-cartesian-grid-vertical line {
+          stroke: var(--c-border) !important;
+          stroke-opacity: 0.6;
+        }
+        html[data-satori-theme="dark"] .recharts-cartesian-axis-line,
+        html[data-satori-theme="dark"] .recharts-cartesian-axis-tick-line {
+          stroke: var(--c-border) !important;
+        }
+        html[data-satori-theme="dark"] .recharts-legend-item-text {
+          color: var(--c-text-secondary) !important;
+          fill: var(--c-text-secondary) !important;
+        }
+
+        /* ─── Status pill chips (KPI cards) ──────────────────────────────
+           Light up/down indicators are tinted on #ECFDF5 / #FEF2F2 which
+           glow white against a dark page. Mute them in dark mode. */
+        html[data-satori-theme="dark"] [style*="background: #ECFDF5"],
+        html[data-satori-theme="dark"] [style*="background:#ECFDF5"],
+        html[data-satori-theme="dark"] [style*="background: rgb(236, 253, 245)"] {
+          background: rgba(138,196,65,0.15) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: #FEF2F2"],
+        html[data-satori-theme="dark"] [style*="background:#FEF2F2"],
+        html[data-satori-theme="dark"] [style*="background: rgb(254, 242, 242)"] {
+          background: rgba(239,68,68,0.18) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: #FEF3C7"],
+        html[data-satori-theme="dark"] [style*="background:#FEF3C7"] {
+          background: rgba(245,158,11,0.18) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: #DBEAFE"],
+        html[data-satori-theme="dark"] [style*="background:#DBEAFE"] {
+          background: rgba(10,95,137,0.22) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: #EFF6FF"],
+        html[data-satori-theme="dark"] [style*="background:#EFF6FF"] {
+          background: rgba(10,95,137,0.18) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: #F3F4F6"],
+        html[data-satori-theme="dark"] [style*="background:#F3F4F6"],
+        html[data-satori-theme="dark"] [style*="background: rgb(243, 244, 246)"] {
+          background: var(--c-surface-alt) !important;
+        }
+        html[data-satori-theme="dark"] [style*="background: #FAFAFA"],
+        html[data-satori-theme="dark"] [style*="background:#FAFAFA"],
+        html[data-satori-theme="dark"] [style*="background: rgb(250, 250, 250)"] {
+          background: var(--c-surface-alt) !important;
+        }
+
+        /* Tables — alternating row backgrounds + th/td borders */
+        html[data-satori-theme="dark"] table { color: var(--c-text-primary); }
+        html[data-satori-theme="dark"] thead th {
+          background: var(--c-surface-alt) !important;
+          color: var(--c-text-secondary) !important;
+          border-bottom: 1px solid var(--c-border) !important;
+        }
+        html[data-satori-theme="dark"] tbody td,
+        html[data-satori-theme="dark"] tbody th {
+          border-bottom: 1px solid var(--c-border) !important;
+        }
+        html[data-satori-theme="dark"] tbody tr:nth-child(even) {
+          background: rgba(255,255,255,0.02);
+        }
+
+        /* Buttons that rely on the lightest brand tints */
+        html[data-satori-theme="dark"] [style*="background: rgba(138, 196, 65, 0.1)"],
+        html[data-satori-theme="dark"] [style*="background:rgba(138,196,65,0.1)"] {
+          background: rgba(138,196,65,0.22) !important;
+        }
+
+        /* Soft shadows look invisible on dark — bump them */
+        html[data-satori-theme="dark"] [style*="box-shadow: 0 1px 3px rgba(0,0,0,0.06)"],
+        html[data-satori-theme="dark"] [style*="box-shadow:0 1px 3px rgba(0,0,0,0.06)"] {
+          box-shadow: 0 1px 3px rgba(0,0,0,0.35), 0 1px 2px rgba(0,0,0,0.25) !important;
+        }
+        html[data-satori-theme="dark"] [style*="box-shadow: 0 4px 12px rgba(0,0,0,0.08)"] {
+          box-shadow: 0 4px 12px rgba(0,0,0,0.45) !important;
+        }
+
+        /* Catch lavender / cream tints used as soft section backgrounds */
+        html[data-satori-theme="dark"] [style*="background: #F5F3FF"],
+        html[data-satori-theme="dark"] [style*="background:#F5F3FF"],
+        html[data-satori-theme="dark"] [style*="background: #EEF2FF"],
+        html[data-satori-theme="dark"] [style*="background:#EEF2FF"],
+        html[data-satori-theme="dark"] [style*="background: #FFFBEB"],
+        html[data-satori-theme="dark"] [style*="background:#FFFBEB"] {
+          background: var(--c-surface-alt) !important;
+        }
+
+        /* Modal / dropdown / floating panel backdrops */
+        html[data-satori-theme="dark"] [style*="background: rgba(0, 0, 0, 0.5)"],
+        html[data-satori-theme="dark"] [style*="background: rgba(0,0,0,0.5)"],
+        html[data-satori-theme="dark"] [style*="background:rgba(0,0,0,0.5)"] {
+          background: rgba(0, 0, 0, 0.72) !important;
+        }

@@ -102,7 +102,7 @@ export const SuggestWorkModal = ({ item, onClose, onSaved }) => {
         body: JSON.stringify({
           name: s.title,
           description: `${s.description} ${rolloffContext(item)}`,
-          skills: s.skills || "",
+          skills_keywords: s.skills || "",
           department: item.dept || "",
           assigned_employee_codes: [item.code],
           ai_reasoning: {

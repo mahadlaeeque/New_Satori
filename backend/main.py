@@ -8043,6 +8043,44 @@ def availability_diag(_: dict = Depends(require_admin)):
     }
 
 
+# Per-process memory of whether Employee_Data carries Joining_Date — probed
+# once by the profile block below instead of failing on every modal open.
+_PROFILE_COLS_CACHE: dict = {}
+
+
+def _require_emp_in_scope(user: dict, emp_code: str):
+    """Shared dept-scope guard for per-employee availability endpoints.
+
+    FAILS CLOSED: a scoped user is allowed through only when the employee's
+    department POSITIVELY matches their scope — lookup errors, missing rows
+    and blank departments all deny (mirrors the SQL-side list filters, which
+    exclude those people anyway). Comparison is case-insensitive because
+    Practice_Heads_List casing differs from EmployeeHierarchyNode for some
+    practices. No-op for unrestricted users."""
+    dept_scope = _get_user_dept_scope(int(user["sub"]))
+    if not dept_scope:
+        return
+    safe_code = (emp_code or "").strip().replace("'", "''")
+    check_sql = normalize_bq_project(f"""
+        SELECT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS dept
+        FROM {_bq_avail('Employee_Data')}
+        WHERE CAST(Employee_Code AS STRING) = '{safe_code}'
+        LIMIT 1
+    """)
+    cr = bq_run_query(check_sql, max_rows=1)
+    allowed = False
+    if "error" not in cr:
+        crows = cr.get("rows") or []
+        if crows:
+            emp_dept = (crows[0].get("dept") or "").strip().lower()
+            allowed = emp_dept in {str(d).strip().lower() for d in dept_scope}
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"You're scoped to {', '.join(dept_scope)} and don't have access to this employee.",
+        )
+
+
 def _parse_joining_date(raw):
     """Joining_Date arrives in whatever shape the source sheet had: ISO date,
     m/d/Y, d-Mon-Y, or an Excel serial. Return a datetime.date or None."""
@@ -8077,27 +8115,8 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
     # Defensive: escape single quotes in the code to prevent SQL injection.
     safe_code = emp_code.replace("'", "''")
 
-    # Honour department scope: a scoped user can only drill into employees
-    # in their own department. One small lookup against Employee_Data to
-    # check; cheap and correct.
-    dept_scope = _get_user_dept_scope(int(user["sub"]))
-    if dept_scope:
-        check_sql = normalize_bq_project(f"""
-            SELECT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS dept
-            FROM {_bq_avail('Employee_Data')}
-            WHERE CAST(Employee_Code AS STRING) = '{safe_code}'
-            LIMIT 1
-        """)
-        cr = bq_run_query(check_sql, max_rows=1)
-        if "error" not in cr:
-            crows = cr.get("rows") or []
-            if crows:
-                emp_dept = (crows[0].get("dept") or "").strip()
-                if emp_dept and emp_dept not in dept_scope:
-                    raise HTTPException(
-                        status_code=403,
-                        detail=f"You're scoped to {', '.join(dept_scope)} and don't have access to this employee.",
-                    )
+    # Honour department scope — shared fail-closed, case-insensitive guard.
+    _require_emp_in_scope(user, emp_code)
 
     # Normalised lookup key: stripped of leading zeros + trailing '.0' so a
     # `1234` code matches `00001234` or `1234.0` in feeder tables.
@@ -8215,12 +8234,17 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
 
     # ── Profile basics — tenure, type, status, email ──
     # Joining_Date existed in the older warehouse upload but the live Drive
-    # CSV feed may not carry it — try with it first, fall back without.
+    # CSV feed doesn't carry it — probe once per process and remember, so we
+    # don't burn a failing BQ roundtrip (and a noisy log line) on every
+    # modal open.
     profile = {}
-    for cols in (
+    variants = [
         "CAST(Joining_Date AS STRING) AS joining_date, employee_type, employee_status, EmployeeEmail AS email",
         "employee_type, employee_status, EmployeeEmail AS email",
-    ):
+    ]
+    if _PROFILE_COLS_CACHE.get("has_joining_date") is False:
+        variants = variants[1:]
+    for cols in variants:
         p_sql = normalize_bq_project(f"""
             SELECT {cols}
             FROM {_bq_avail('Employee_Data')}
@@ -8229,8 +8253,13 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
         """)
         rp = bq_run_query(p_sql, max_rows=1)
         if "error" in rp:
-            print(f"[/api/availability/employees/detail] profile BQ error (cols='{cols[:30]}…'): {rp['error']}")
+            if "Joining_Date" in cols and "Joining_Date" in str(rp["error"]):
+                _PROFILE_COLS_CACHE["has_joining_date"] = False  # remember; stop re-probing
+            else:
+                print(f"[/api/availability/employees/detail] profile BQ error (cols='{cols[:30]}…'): {rp['error']}")
             continue
+        if "Joining_Date" in cols:
+            _PROFILE_COLS_CACHE["has_joining_date"] = True
         prows = rp.get("rows") or []
         if prows:
             pr = prows[0]
@@ -8345,7 +8374,11 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
                      MAX(w.PLAN),
                      MAX(w.WP_END_DATE)
               FROM {_bq_avail('WP_Report')} w, me
-              WHERE UPPER(TRIM(w.WP_OWNER_NAME)) = me.nm AND me.nm != ''
+              -- WP_OWNER_NAME is MIXED format: bare ('Zahid Nasim') or
+              -- code-prefixed ('E-1933 Waqar Anwar') — strip the prefix
+              -- before comparing (me.nm is already prefix-stripped).
+              WHERE UPPER(TRIM(REGEXP_REPLACE(w.WP_OWNER_NAME, r'^[A-Za-z]+-[0-9]+\\s*-*\\s*', ''))) = me.nm
+                AND me.nm != ''
               GROUP BY w.WP_CODE
             )
             SELECT u.*, h.hrs AS my_hrs
@@ -8385,8 +8418,8 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
             SELECT
               COUNT(DISTINCT IF({_norm_emp_id('WP_RESOURCE_ASSIGNED')} = {norm_target}, WP_CODE, NULL)) AS a_total,
               COUNT(DISTINCT IF({_norm_emp_id('WP_RESOURCE_ASSIGNED')} = {norm_target} AND COALESCE(Progress_Status,'') != 'Completed', WP_CODE, NULL)) AS a_active,
-              COUNT(DISTINCT IF(UPPER(TRIM(WP_OWNER_NAME)) = me.nm AND me.nm != '', WP_CODE, NULL)) AS o_total,
-              COUNT(DISTINCT IF(UPPER(TRIM(WP_OWNER_NAME)) = me.nm AND me.nm != '' AND COALESCE(Progress_Status,'') != 'Completed', WP_CODE, NULL)) AS o_active
+              COUNT(DISTINCT IF(UPPER(TRIM(REGEXP_REPLACE(WP_OWNER_NAME, r'^[A-Za-z]+-[0-9]+\\s*-*\\s*', ''))) = me.nm AND me.nm != '', WP_CODE, NULL)) AS o_total,
+              COUNT(DISTINCT IF(UPPER(TRIM(REGEXP_REPLACE(WP_OWNER_NAME, r'^[A-Za-z]+-[0-9]+\\s*-*\\s*', ''))) = me.nm AND me.nm != '' AND COALESCE(Progress_Status,'') != 'Completed', WP_CODE, NULL)) AS o_active
             FROM {_bq_avail('WP_Report')}, me
         """
         rwc = bq_run_query(normalize_bq_project(_autofix_dashboard_sql(wp_counts_sql)), max_rows=1)
@@ -8443,6 +8476,9 @@ def availability_employee_weekly(code: str, weeks_back: int = 8, weeks_fwd: int 
     emp_code = (code or "").strip()
     if not emp_code:
         raise HTTPException(status_code=400, detail="Employee code is required.")
+    # Dept-scope guard (was missing here — a scoped head could read any
+    # employee's weekly allocation by code).
+    _require_emp_in_scope(user, emp_code)
     safe_code = emp_code.replace("'", "''")
     norm_target = _norm_emp_id(f"'{safe_code}'")
     wb = max(0, min(int(weeks_back), 52))
@@ -8542,26 +8578,8 @@ def availability_employee_attendance(code: str, days: int = 30,
     safe_code = emp_code.replace("'", "''")
     nd = max(7, min(int(days or 30), 90))
 
-    # Same dept-scope guard as the detail endpoint: a scoped user can only
-    # view attendance for employees in their own department.
-    dept_scope = _get_user_dept_scope(int(user["sub"]))
-    if dept_scope:
-        check_sql = normalize_bq_project(f"""
-            SELECT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS dept
-            FROM {_bq_avail('Employee_Data')}
-            WHERE CAST(Employee_Code AS STRING) = '{safe_code}'
-            LIMIT 1
-        """)
-        cr = bq_run_query(check_sql, max_rows=1)
-        if "error" not in cr:
-            crows = cr.get("rows") or []
-            if crows:
-                emp_dept = (crows[0].get("dept") or "").strip()
-                if emp_dept and emp_dept not in dept_scope:
-                    raise HTTPException(
-                        status_code=403,
-                        detail=f"You're scoped to {', '.join(dept_scope)} and don't have access to this employee.",
-                    )
+    # Same dept-scope guard as the detail endpoint (shared, fail-closed).
+    _require_emp_in_scope(user, emp_code)
 
     norm_target = _norm_emp_id(f"'{safe_code}'")
     att_sql = f"""
@@ -9091,10 +9109,10 @@ def project_detail(code: str, user: dict = Depends(get_current_user)):
     """
     mix_sql = f"""
         SELECT COALESCE(Progress_Status, 'Unknown') AS k, COUNT(DISTINCT WP_CODE) AS n
-        FROM {_bq_avail('WP_Report')} WHERE CAST(PROJECT_ID AS STRING) = '{pid}' GROUP BY k
+        FROM {_bq_avail('WP_Report')} WHERE REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = '{pid}' GROUP BY k
         UNION ALL
         SELECT CONCAT('type:', COALESCE(NULLIF(TRIM(DELIVERABLE_TYPE), ''), 'Unspecified')), COUNT(DISTINCT WP_CODE)
-        FROM {_bq_avail('WP_Report')} WHERE CAST(PROJECT_ID AS STRING) = '{pid}' GROUP BY 1
+        FROM {_bq_avail('WP_Report')} WHERE REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = '{pid}' GROUP BY 1
     """
     team_sql = f"""
         WITH tmax AS (
@@ -9272,6 +9290,8 @@ def availability_suggest_work(body: SuggestWorkBody, user: dict = Depends(get_cu
     code = (body.code or "").strip()
     if not code:
         raise HTTPException(status_code=400, detail="Employee code is required.")
+    # Dept-scope guard — consistent with the other per-employee endpoints.
+    _require_emp_in_scope(user, code)
     skills = _get_employee_skills(code)
     name = _strip_code_prefix(body.name) or code
     dept = (body.department or "").strip()
@@ -9420,8 +9440,8 @@ def save_subscription(body: SubscriptionBody, user: dict = Depends(get_current_u
             "INSERT INTO item_subscriptions (user_id, kind, item_id, cadence, day_of_week, hour, recipients, active) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
             (uid, kind, int(body.item_id), cadence,
-             max(0, min(int(body.day_of_week or 0), 6)),
-             max(0, min(int(body.hour or 9), 23)),
+             max(0, min(int(body.day_of_week if body.day_of_week is not None else 0), 6)),
+             max(0, min(int(body.hour if body.hour is not None else 9), 23)),
              (body.recipients or "").strip()[:1000]))
         db.commit()
     finally:
@@ -9547,7 +9567,7 @@ def run_due_subscriptions(request: Request):
             if s.get("last_sent_key") == day_key:
                 skipped += 1
                 continue
-            if now_pkt.hour < int(s.get("hour") or 9):
+            if now_pkt.hour < int(s.get("hour") if s.get("hour") is not None else 9):
                 skipped += 1
                 continue
             cadence = (s.get("cadence") or "weekly").lower()
@@ -9561,6 +9581,23 @@ def run_due_subscriptions(request: Request):
             if not item:
                 cur.execute("DELETE FROM item_subscriptions WHERE id = ?", (s["id"],))
                 db.commit()
+                continue
+            # Re-verify ACCESS at send time — a revoked share must stop the
+            # emails, not keep leaking the data on schedule.
+            role, _owner = _share_role(cur, _SHARE_CFG[s["kind"]], int(s["item_id"]), int(s["user_id"]))
+            if role is None:
+                print(f"[subscriptions] sub {s['id']}: share revoked — deactivating")
+                cur.execute("UPDATE item_subscriptions SET active = 0 WHERE id = ?", (s["id"],))
+                db.commit()
+                continue
+            # Sales gate parity with report/dashboard run paths: non-admin
+            # subscribers never get sales data emailed.
+            cur.execute("SELECT role FROM users WHERE id = ?", (s["user_id"],))
+            ur = cur.fetchone()
+            sub_role = ((ur.get("role") if isinstance(ur, dict) else ur[0]) if ur else "") or ""
+            if sub_role.lower() != "admin" and _sql_touches_sales(str(item.get("config") or "")):
+                print(f"[subscriptions] sub {s['id']}: non-admin + sales content — skipped")
+                skipped += 1
                 continue
             # Recipients: explicit csv, else the subscriber's own email.
             recipients = [e.strip() for e in (s.get("recipients") or "").split(",") if e.strip()]
@@ -9974,7 +10011,7 @@ def _generate_insights(day: str):
         """)
         for r in rows:
             n, project = int(f(r.get("n"))), (r.get("project") or "Unspecified").strip()
-            owner = (r.get("top_owner") or "").strip()
+            owner = _strip_code_prefix(r.get("top_owner") or "")
             _insight_save(day, "wp_behind", "warn", "",
                           f"Work packages running behind in {project}",
                           f"{project} has {n} active work packages flagged 'Behind'"
@@ -10266,8 +10303,10 @@ def _can_edit_employee_skills(user: dict, emp_code: str) -> bool:
         return True
     if not scope:            # no scope assigned → can't edit
         return False
-    dept = _employee_department(emp_code)
-    return bool(dept) and dept in scope
+    # Case-insensitive: Practice_Heads_List casing can differ from
+    # EmployeeHierarchyNode (e.g. 'SAP ABAP & FIORI' vs 'SAP ABAP & Fiori').
+    dept = (_employee_department(emp_code) or "").strip().lower()
+    return bool(dept) and dept in {str(d).strip().lower() for d in scope}
 
 
 @app.get("/api/availability/employees/{code}/skills")
@@ -11501,7 +11540,7 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "NEVER join TICKET_WP_ID = WP_CODE directly (0 matches). Canonical join: "
             "UPPER(TRIM(w.WP_CODE)) = REGEXP_REPLACE(UPPER(TRIM(t.TICKET_WP_ID)), r'(-[0-9]{4,})+$', ''). "
             "WP_Report holds what a WP is (owner, dates, statuses, planned %); Timesheet_Data grouped by the stripped code holds hours logged, people, task/ticket counts.\n"
-            "PEOPLE COLUMNS: WP_RESOURCE_ASSIGNED = 'E-938 - Zahid Nasim' (carries the employee CODE — digit-norm join to Employee_Code: norm(WP_RESOURCE_ASSIGNED)=norm(Employee_Code)); WP_OWNER_NAME = bare name only — match UPPER(TRIM(WP_OWNER_NAME)) = UPPER(TRIM(REGEXP_REPLACE(Resource_Name, r'^[A-Za-z]+-[0-9]+\\s*-*\\s*', ''))).\n"
+            "PEOPLE COLUMNS: WP_RESOURCE_ASSIGNED = 'E-938 - Zahid Nasim' (carries the employee CODE — digit-norm join to Employee_Code: norm(WP_RESOURCE_ASSIGNED)=norm(Employee_Code)); WP_OWNER_NAME is MIXED format — sometimes a bare name ('Zahid Nasim'), sometimes code-prefixed ('E-1933 Waqar Anwar') — so STRIP the code prefix from BOTH sides before comparing: UPPER(TRIM(REGEXP_REPLACE(WP_OWNER_NAME, r'^[A-Za-z]+-[0-9]+\\s*-*\\s*', ''))) = UPPER(TRIM(REGEXP_REPLACE(Resource_Name, r'^[A-Za-z]+-[0-9]+\\s*-*\\s*', ''))).\n"
             "PROJECT JOIN (verified 4321/4329 active WPs): the WP's project = the leading number of WP_CODE — REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Master.Project_Code AS STRING). NEVER join on PROJECT_ID (internal id, matches nothing).\n"
             "RECIPES for common questions:\n"
             "• 'WPs in project X' → resolve the project via Project_Master first (LOWER(Project_Name) LIKE '%x%' → Project_Code), then FROM WP_Report WHERE REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(<code> AS STRING) GROUP BY WP_CODE with ANY_VALUE(WP_DESCRIPTION/Progress_Status/Performance_Status/WP_OWNER_NAME/WP_RESOURCE_ASSIGNED), MAX(PLAN), MAX(WP_END_DATE).\n"
@@ -11588,6 +11627,7 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "Use WP_Report for what a work package IS",                         # v1 WP_Report note (pre verified columns/join)
     "WP_Report = what a WP is (owner, dates, statuses, planned %)",     # v2 WP_Report note (pre people-columns + recipes)
     "PROJECT_ID (joins Project_Master.Project_Code)",                   # v3 WP_Report note (pre WP_CODE-prefix project join)
+    "WP_OWNER_NAME = bare name only",                                   # v4 WP_Report note (pre mixed-owner-format match)
     "Hist_Win_Rate (decimal 0-1 — multiply by 100 for %)",      # pre Hist_Win_Rate-is-STRING note
     "Open_Deals, Win_Rate_by (decimal 0-1).",                   # pre Win_Rate_by-is-STRING note
     "CRM_Pipeline, Coverage_Ratio, Status, Action.",            # pre Coverage_Ratio-is-STRING note
