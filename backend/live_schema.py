@@ -102,6 +102,18 @@ _PROBES = {
         "UNION ALL SELECT 'in_employee_only', COUNT(*) FROM e WHERE k NOT IN (SELECT k FROM a) "
         "UNION ALL SELECT 'in_attendance_only', COUNT(*) FROM a WHERE k NOT IN (SELECT k FROM e)"
     ),
+    # WP_Report columns straight from INFORMATION_SCHEMA — the table arrives
+    # as a raw header-derived CSV load, so the LIVE column list is the only
+    # trustworthy source (never hardcode WP column names in prompts). Probe
+    # fails soft until the pipeline has loaded the table the first time.
+    "wp_report_columns": (
+        "SELECT column_name AS v, ordinal_position AS n "
+        "FROM `capability-agent-prod.Satori_Project.INFORMATION_SCHEMA.COLUMNS` "
+        "WHERE table_name = 'WP_Report' ORDER BY ordinal_position LIMIT 80"
+    ),
+    "wp_report_rows": (
+        "SELECT 'WP_Report' AS v, COUNT(*) AS n FROM `capability-agent-prod.Satori_Project.WP_Report`"
+    ),
     "join_compat_attendance_name": (
         "WITH e AS (SELECT DISTINCT UPPER(TRIM(Resource_Name)) AS k "
         "  FROM `capability-agent-prod.Satori_Project.Employee_Data` WHERE Resource_Name IS NOT NULL), "
@@ -181,6 +193,11 @@ def render_context_block() -> str:
     jc_name = get_rows("join_compat_attendance_name")
     jc_name_str = ", ".join(f"{r.get('v')}={r.get('n')}" for r in jc_name) if jc_name else "(unknown)"
 
+    # WP_Report is a raw header-derived load — the live column list is the
+    # only trustworthy source of its column names (empty until first sync).
+    wp_cols = get_rows("wp_report_columns")
+    wp_rows = get_rows("wp_report_rows")
+
     return (
         "=== LIVE WAREHOUSE SNAPSHOT (auto-refreshed hourly - these are the REAL values that exist in BigQuery right now) ===\n\n"
         f"ROW COUNTS - {rc_str}\n\n"
@@ -196,7 +213,19 @@ def render_context_block() -> str:
         f"- Status values (attendance_status_text) - {_format_distinct(get_rows('attendance_statuses'))}\n"
         "  Stored case-sensitive. ALWAYS wrap in LOWER() before comparing. There is NO 'Late' status VALUE - a late arrival = check-in after 09:30 on a worked day: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00'.\n"
         "- Permitted-location punch: checkin_is_permitted_location / checkout_is_permitted_location are STRING '1'/'0'. PunchInLocationStatus = IF(SAFE_CAST(checkin_is_permitted_location AS INT64)=1,'Permitted','Not Permitted'); same for checkout → PunchOutLocationStatus.\n\n"
-        "ALLOCATION DIMENSIONS (Allocation_Data):\n"
+        + (
+            (
+                "WORK PACKAGES (WP_Report) - the PF work-package master/detail report"
+                + (f", {wp_rows[0].get('n')} rows" if wp_rows else "")
+                + ". ALL columns are STRING (raw CSV load) - SAFE_CAST numerics/dates before aggregating.\n"
+                f"- EXACT live columns (the ONLY valid names - NEVER invent WP column names): {_format_distinct(wp_cols, limit=80)}\n"
+                "- Join to Timesheet_Data.TICKET_WP_ID on WP_Report's WP-id column (match as STRING; digit-normalise if formats differ). "
+                "Use WP_Report for WP attributes (name/status/owner/dates/planned effort); hours and task/ticket counts per WP still come from Timesheet_Data GROUP BY TICKET_WP_ID.\n\n"
+            )
+            if wp_cols else
+            "WORK PACKAGES: the WP_Report table has not been loaded yet - if asked about work-package details beyond Timesheet_Data's TICKET_WP_ID, say the WP report isn't available rather than guessing.\n\n"
+        )
+        + "ALLOCATION DIMENSIONS (Allocation_Data):\n"
         f"- Flag values - {_format_distinct(get_rows('allocation_flags'))}  (NOT 'Actual'/'Forecast' - use 'Allocated'/'Bench')\n"
         f"- Competencies (emp_competency) - {_format_distinct(get_rows('competencies'))}\n\n"
         "SALES DIMENSIONS:\n"

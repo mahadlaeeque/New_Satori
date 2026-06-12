@@ -43,6 +43,10 @@ FILE_TARGETS = [
     ("timesheet",        "Timesheet_Data"),
     ("attendancesatori", "Attendance_Data"),
     ("allocation",       "Allocation_Data_Final"),
+    # PF work-package report (~150 MB) — WP master/detail; columns come from
+    # the CSV header like everything else and load as STRING (the app
+    # SAFE_CASTs). Joins to Timesheet_Data.TICKET_WP_ID on its WP-id column.
+    ("pfwpreport",       "WP_Report"),
 ]
 
 # Per-table finalize: recast the columns the app reads as typed. Everything else

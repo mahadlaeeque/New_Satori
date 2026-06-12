@@ -2692,6 +2692,7 @@ WORKFORCE TABLES
 3. `Allocation_Data` — Weekly project allocation (one row per employee × project × week). Cols: project_id (**JOIN to Project_Master.Project_Code for the project NAME**), employee_id (STRING "E-1234" — JOIN to Employee_Data.employee_code, digit-normalised), allocation_percent (0-100 — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Allocated' = real billable project / 'Bench' = bench project), Forecast_Flag (0 = ACTUAL, 1 = forecast — for CURRENT state ALWAYS filter Forecast_Flag=0), Date (DATE), Week/Year/Month. **Bench logic:** an employee is ON BENCH when they have NO Flag='Allocated' row with allocation_percent>0 in the recent actual weeks — a bench-project row can show allocation_percent=100 yet means they're benched, so NEVER classify on raw allocation_percent alone. Allocated = has a Flag='Allocated' row ≥100%; Partial = 1-99%.
 4. `Timesheet_Data` — Logged ticket/project hours. Cols: EMPLOYEE_CODE (the 'E-1571' code — **JOIN to Employee_Data.employee_code, digit-normalised; this is the employee link, NOT TICKET_USER_ID** which is a different internal numeric id), TICKET_USER_ID (internal id — do NOT join on it), TICKET_PROJECT_CODE (**JOIN to Project_Master.Project_Code for the project name**), TICKET_PROJECT_LABEL, TICKET_HOURS (FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT.
 5. `Project_Master` — Project reference (everyone can see it). Cols: Project_Code (the key that allocation.project_id AND timesheet.TICKET_PROJECT_CODE join to), Project_Name (e.g. '1245 - TMC Project Matrix'), Client_Name, Project_Type, Project_Status, Competency, PM_ID (project manager's employee_code), Project_Start_Date, Project_EndDate, Location (STRING — the PROJECT's delivery location/city: Karachi, Lahore, Islamabad, International, …; COALESCE empties to 'Unspecified' when grouping). ALWAYS join here to report project NAMES rather than bare codes. "Projects in <city>" / "projects by location" = filter/group Project_Master.Location — do NOT confuse it with the EMPLOYEE's city (Employee_Data.EmployeeLocation) or the sales-account Location: a Lahore-based employee can be allocated to a Karachi project.
+6. `WP_Report` — the PF work-package master/detail report (WP attributes: names, statuses, owners, dates, planned effort). ⚠️ ALL columns are STRING (raw CSV load — SAFE_CAST numerics/dates) and the EXACT column names are listed ONLY in the LIVE WAREHOUSE SNAPSHOT block — read them from there and NEVER invent WP column names; if the snapshot says the table isn't loaded, tell the user the WP report isn't available yet. Join to Timesheet_Data.TICKET_WP_ID on WP_Report's WP-id column (STRING match; digit-normalise if formats differ). Use WP_Report for WP details; hours/task/ticket counts per WP still come from Timesheet_Data GROUP BY TICKET_WP_ID.
 
 SALES TABLES
 5. `Sales_Accounts` (~359 rows) — Customer accounts. Cols: VP, AM, Location, Account, Tier ('A'/'B'/'C'), Dormant ('Yes'/'No'), Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits, Zero_Visit ('Yes'/'No').
@@ -5134,6 +5135,7 @@ WORKFORCE TABLES:
 - `Allocation_Data` — weekly project allocation. Cols: project_id (STRING), employee_id (STRING — "E-1234"), allocation_percent (INT64 — compare directly), emp_competency (STRING), Flag (STRING — 'Allocated'/'Bench'), Forecast_Flag (INT64 0/1), Date (DATE), Year (INT64), Month (INT64 1-12), Week (INT64). NO year_id/week_id. Filter Year/Month with integers, not strings. Real/billable allocation = MAX(allocation_percent) over Flag='Allocated' rows; Bench = no Flag='Allocated' row with pct>0.
 - `Timesheet_Data` — ticket/project hours. Cols: EMPLOYEE_CODE (STRING "E-1571" — THIS is the employee who logged the hours; JOIN/filter on this, digit-normalised), TICKET_USER_ID (an unrelated internal numeric id — NEVER join or filter on it; it matches no employee), TICKET_NUMBER, TICKET_PROJECT_CODE (JOIN to Project_Master.Project_Code for the project name), TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT. For DATE_KEY filters use the type-agnostic form: COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))).
 - `Project_Master` — project reference. Cols: Project_Code (STRING — the key allocation.project_id and timesheet.TICKET_PROJECT_CODE join to), Project_Name (STRING, e.g. '1245 - TMC Project Matrix'), Client_Name (STRING), Project_Type (STRING — AMC/SLA/Internal/Admin/…), Project_Status (STRING — 'Active'/…), Competency (STRING), PM_ID (STRING — project manager's employee code), Project_Start_Date / Project_EndDate (STRING dates — SAFE parse), Location (STRING — the PROJECT's delivery city: Karachi/Lahore/Islamabad/International; COALESCE(NULLIF(TRIM(Location),''),'Unspecified') when grouping). Join here for project names AND for "projects in <city>" questions — the project Location is DISTINCT from the employee's EmployeeLocation.
+- `WP_Report` — PF work-package master/detail (WP names/statuses/owners/dates/planned effort). ALL columns STRING (raw CSV load — SAFE_CAST before aggregating); exact column names come ONLY from the live warehouse snapshot — never invent them. Join Timesheet_Data.TICKET_WP_ID = WP_Report's WP-id column. Per-WP hours/counts come from Timesheet_Data.
 
 SALES TABLES:
 - `Sales_Accounts` (~359 rows) — Customer accounts. Cols: VP, AM, Location, Account, Tier ('A'/'B'/'C'), Dormant ('Yes'/'No'), Jan_Visits/Feb_Visits/Mar_Visits/Q1_Visits (STRING — SAFE_CAST AS INT64), Zero_Visit.
@@ -5323,6 +5325,10 @@ IMPORTANT dimensions users ask about — keep them DISTINCT, never conflate:
   not rows.
 - TICKET_STATUS = 'Approved' / 'Submitted' is the APPROVAL state (not open/closed).
 - Also: TICKET_PRIORITY, TICKET_PLANNED_HOURS, TICKET_HOURS (FLOAT64).
+- WP DETAILS (name/status/owner/dates/planned effort) live in WP_Report —
+  ALL its columns are STRING and the exact names appear ONLY in the live
+  warehouse snapshot; never invent WP column names. Per-WP activity (hours,
+  people, ticket counts) still comes from Timesheet_Data GROUP BY TICKET_WP_ID.
 
 WHEN TO ASK vs. WHEN TO ACT:
 - ASK only when the answer materially depends on a choice you can't infer:
@@ -10964,7 +10970,8 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "(per-ticket: GROUP BY TICKET_NUMBER, closed = MAX(SAFE_CAST(TICKET_CLOSED_STATUS AS INT64))=1). 'How many open/closed' = COUNT(DISTINCT TICKET_NUMBER), not row counts.\n"
             "TICKETING use cases: open vs closed (TICKET_CLOSED_STATUS), approved vs submitted (TICKET_STATUS), counts/hours by TICKET_TYPE / TICKET_PRIORITY, "
             "and ALWAYS segregate Assigned vs Un-Assigned via FLAG when asked about assigned/unassigned tickets.\n"
-            "WORK PACKAGES (WP): TICKET_WP_ID is the Work-Package id (populated only on Assigned 'Task' rows; ~3,040 distinct WPs; blank/NULL = no WP). For WP questions GROUP BY TICKET_WP_ID — hours per WP = SUM(TICKET_HOURS), tasks/tickets per WP = COUNT(DISTINCT TICKET_NUMBER), people per WP = COUNT(DISTINCT EMPLOYEE_CODE). 'work package' / 'WP' ALWAYS means TICKET_WP_ID.\n"
+            "WORK PACKAGES (WP): TICKET_WP_ID is the Work-Package id (populated only on Assigned 'Task' rows; about 3,040 distinct WPs; blank/NULL = no WP). For WP ACTIVITY questions GROUP BY TICKET_WP_ID — hours per WP = SUM(TICKET_HOURS), tasks/tickets per WP = COUNT(DISTINCT TICKET_NUMBER), people per WP = COUNT(DISTINCT EMPLOYEE_CODE). 'work package' / 'WP' refers to TICKET_WP_ID here. "
+            "WP ATTRIBUTES (name/status/owner/dates/planned effort) live in the separate WP_Report table — join Timesheet_Data.TICKET_WP_ID to WP_Report's WP-id column (exact WP_Report column names come ONLY from the live warehouse snapshot; never invent them).\n"
             "SLA PROJECTS / SUPPORT: an SLA (support) project is one whose TICKET_PROJECT_LABEL contains 'SLA' (case-insensitive) — e.g. '931 - OGDCL SAP SLA', '743 - CGA SLA', '1250 - Packages Qlik Support SLA', '839 - SAP Support SLA Internal'. Filter SLA work with WHERE UPPER(TICKET_PROJECT_LABEL) LIKE '%SLA%'; segregate SLA (support) vs non-SLA (implementation/project) work this way. SLA hours = SUM(TICKET_HOURS) on matching labels; per-SLA-project = GROUP BY TICKET_PROJECT_LABEL; who works on SLAs = GROUP BY EMPLOYEE_CODE. 'SLA projects' / 'support SLAs' / 'on SLA' = these.\n"
             "To attribute hours/tickets to a person/department, JOIN Employee_Data on "
             "norm(EMPLOYEE_CODE)=norm(Employee_Code) where norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0')."
@@ -10983,6 +10990,18 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "ALWAYS join here to show project NAMES instead of bare codes. 'Projects in <city>' / 'projects by location' / 'where is project X delivered' = Project_Master.Location. "
             "⚠️ Three DIFFERENT location columns exist — never conflate: Project_Master.Location = where the PROJECT is delivered; Employee_Data.EmployeeLocation = where the EMPLOYEE sits; Sales_Accounts.Location = the customer account's city. "
             "A Lahore employee can be allocated to a Karachi project — 'people working on Karachi projects' joins Allocation→Project_Master and filters the PROJECT location."
+        ),
+    },
+    {
+        "table_name": "WP_Report",
+        "sort_order": 47,
+        "description": (
+            "PF work-package master/detail report — WP attributes (names, statuses, owners, dates, planned effort), refreshed from Drive every 30 min.\n"
+            "⚠️ ALL columns are STRING (raw header-derived CSV load) — SAFE_CAST numerics/dates before any comparison or aggregation.\n"
+            "⚠️ EXACT column names are listed ONLY in the LIVE WAREHOUSE SNAPSHOT block (section 'WORK PACKAGES (WP_Report)') — read them from there and NEVER invent or guess WP column names. "
+            "If the snapshot says the table isn't loaded, say the WP report isn't available yet.\n"
+            "JOIN: Timesheet_Data.TICKET_WP_ID = WP_Report's WP-id column (STRING match; digit-normalise both sides if formats differ). "
+            "Use WP_Report for what a work package IS; use Timesheet_Data (GROUP BY TICKET_WP_ID) for hours logged, people involved, and task/ticket counts per WP."
         ),
     },
     {
@@ -11057,6 +11076,7 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "restrict to LOWER(attendance_status_text) IN ('present','remote work')",  # pre checkin=NOT NULL (Missing-Punch has a real check-in) note
     "Attendance % = ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1)",  # pre company-calendar working-days note
     "there is usually exactly ONE match (e.g. 'Adnan Raza' = E-218)",   # pre namesake-disambiguation note
+    "'work package' / 'WP' ALWAYS means TICKET_WP_ID.",                 # pre WP_Report cross-reference note
     "Hist_Win_Rate (decimal 0-1 — multiply by 100 for %)",      # pre Hist_Win_Rate-is-STRING note
     "Open_Deals, Win_Rate_by (decimal 0-1).",                   # pre Win_Rate_by-is-STRING note
     "CRM_Pipeline, Coverage_Ratio, Status, Action.",            # pre Coverage_Ratio-is-STRING note
