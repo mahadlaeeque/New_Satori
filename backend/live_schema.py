@@ -232,7 +232,7 @@ def render_context_block() -> str:
                 "- 'How many work packages' = COUNT(DISTINCT WP_CODE), NEVER COUNT(*) (rows are deliverable lines). Per-WP attributes -> GROUP BY WP_CODE + ANY_VALUE(...).\n"
                 "- JOIN to Timesheet (VERIFIED 885/886): WP_Report.WP_CODE = REGEXP_REPLACE(UPPER(TRIM(t.TICKET_WP_ID)), r'(-[0-9]{4,})+$', '') "
                 "- TICKET_WP_ID is WP_CODE plus a numeric task-id suffix; NEVER join the two columns directly (0 matches). Wrap WP_CODE in UPPER(TRIM(...)) too.\n"
-                "- PROJECT_ID joins Project_Master.Project_Code (and Timesheet TICKET_PROJECT_CODE).\n"
+                "- PROJECT JOIN: the WP's project = WP_CODE's LEADING NUMBER - REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Master.Project_Code AS STRING) (verified 4321/4329 active WPs). ⚠️ PROJECT_ID is an INTERNAL id (e.g. 5861) that matches NOTHING - never join on it.\n"
                 f"- Progress_Status values - {_format_distinct(get_rows('wp_progress_statuses'))}\n"
                 f"- WP_PORTAL_STATUS values - {_format_distinct(get_rows('wp_portal_statuses'))}\n"
                 "- PLAN = planned progress percent 0-100 (INT64 after finalize; SAFE_CAST if STRING). ⚠️ ACTUAL is '?' in the source feed - UNUSABLE; "

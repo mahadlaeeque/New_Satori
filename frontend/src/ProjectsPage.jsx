@@ -66,6 +66,8 @@ const personName = (s) => (s || "").replace(/^[A-Za-z]{1,4}-\d+\s*-?\s*/, "").tr
 const ProjectDetailModal = ({ proj, onClose }) => {
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState(null);
+  const [showCompleted, setShowCompleted] = useState(false);
+  useEffect(() => { setShowCompleted(false); }, [proj]);
 
   useEffect(() => {
     if (!proj) { setDetail(null); setError(null); return; }
@@ -84,6 +86,7 @@ const ProjectDetailModal = ({ proj, onClose }) => {
   const statusMix = (d && d.status_mix) || {};
   const typeMix = (d && d.type_mix) || {};
   const activeWps = ((d && d.wps) || []).filter(w => (w.progress || "").toLowerCase() !== "completed");
+  const completedWps = ((d && d.wps) || []).filter(w => (w.progress || "").toLowerCase() === "completed");
   const doneCount = statusMix["Completed"] || 0;
 
   return (
@@ -187,6 +190,40 @@ const ProjectDetailModal = ({ proj, onClose }) => {
                       </div>
                     );
                   })}
+                </div>
+              )}
+
+              {/* Completed WPs — collapsed by default */}
+              {completedWps.length > 0 && (
+                <div style={{ marginBottom: 18 }}>
+                  <button onClick={() => setShowCompleted(s => !s)} style={{
+                    padding: "8px 14px", borderRadius: 8, border: `1px dashed ${C.border}`,
+                    background: "transparent", color: C.textSecondary, fontWeight: 600, fontSize: 12.5, cursor: "pointer",
+                  }}>
+                    {showCompleted ? "Hide" : "Show"} {completedWps.length} completed work package{completedWps.length === 1 ? "" : "s"}{doneCount > completedWps.length ? ` (of ${doneCount})` : ""}
+                  </button>
+                  {showCompleted && (
+                    <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", marginTop: 10 }}>
+                      {completedWps.map((w, i) => (
+                        <div key={w.code} style={{
+                          padding: "10px 14px", borderTop: i === 0 ? "none" : `1px solid ${C.border}`,
+                          display: "grid", gridTemplateColumns: "1fr auto", gap: 12, alignItems: "center", opacity: 0.75,
+                        }}>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontSize: 12.5, fontWeight: 600, color: C.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {w.description || w.code}
+                            </div>
+                            <div style={{ fontSize: 10.5, color: C.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {[w.code, w.owner ? `owner ${w.owner}` : null, w.resource ? `assigned ${personName(w.resource)}` : null, w.end_date ? `due ${w.end_date}` : null].filter(Boolean).join(" · ")}
+                            </div>
+                          </div>
+                          <span style={{ fontSize: 10.5, fontWeight: 700, padding: "2px 9px", borderRadius: 999, background: "var(--sem-ok-bg)", color: "var(--sem-ok-fg)", flexShrink: 0 }}>
+                            Completed
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
 
