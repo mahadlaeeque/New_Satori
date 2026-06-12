@@ -18,6 +18,7 @@ import { useState, useEffect, useMemo } from "react";
 import {
   Search, X, Briefcase, Users, Clock, AlertCircle, Loader2, FileText, MapPin,
 } from "lucide-react";
+import { BenchRadarPanel, SuggestWorkModal } from "./components/BenchRadar.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 
@@ -256,6 +257,7 @@ const ProjectsPage = () => {
   const [statusFilter, setStatusFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [selected, setSelected] = useState(null);
+  const [suggestFor, setSuggestFor] = useState(null); // Bench Radar "Find work"
 
   useEffect(() => {
     let cancelled = false;
@@ -288,15 +290,18 @@ const ProjectsPage = () => {
   return (
     <div style={{ padding: 24, maxWidth: 1500, margin: "0 auto" }}>
       <h1 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: C.textPrimary, display: "flex", alignItems: "center", gap: 12 }}>
-        Projects
+        Delivery Engine
         <span style={{ fontSize: 11, fontWeight: 700, padding: "4px 10px", borderRadius: 999, background: `${C.accent}22`, color: C.accentDark, display: "inline-flex", alignItems: "center", gap: 6 }}>
           <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.accent }} />
-          Work-package health · live BigQuery data
+          Enterprise AI · Connected to your data sources
         </span>
       </h1>
       <p style={{ margin: "4px 0 20px", fontSize: 13, color: C.textMuted }}>
-        Every project's delivery picture — work packages, deadlines, owners and the team behind it.
+        Ongoing and upcoming delivery — projects, work packages, deadlines, owners, and who frees up next. Scoped to the departments you can see.
       </p>
+
+      {/* Bench Radar — upcoming roll-offs (moved here from the Availability Engine) */}
+      <BenchRadarPanel onFindWork={(it) => setSuggestFor(it)} />
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 180px 180px", gap: 12, marginBottom: 20 }}>
         <div style={{ position: "relative" }}>
@@ -378,6 +383,7 @@ const ProjectsPage = () => {
       )}
 
       <ProjectDetailModal proj={selected} onClose={() => setSelected(null)} />
+      <SuggestWorkModal item={suggestFor} onClose={() => setSuggestFor(null)} />
     </div>
   );
 };

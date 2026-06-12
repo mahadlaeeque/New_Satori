@@ -8918,17 +8918,59 @@ def availability_bench_radar(weeks: int = 8, department: str = "",
     }
 
 
-# ─── Projects intelligence (project drill-down page) ────────────────────────
-# Project_Master is shared data (everyone sees it, same as the scope policy
-# for sales tables), so these endpoints are not dept-scoped. Health rollups
-# come from WP_Report; effort/team from Timesheet; staffing from Allocation.
+# ─── Projects intelligence (Delivery Engine page) ───────────────────────────
+# Health rollups come from WP_Report; effort/team from Timesheet; staffing
+# from Allocation. DEPT-SCOPED: a practice head sees only their department's
+# projects — defined as projects where their department's people hold a
+# current-week allocation OR logged hours in the last 90 days, plus projects
+# whose Project_Master.Competency matches the department name. Admins /
+# unrestricted users see everything.
+
+
+def _scoped_projects_cte(dept_scope) -> tuple:
+    """(extra_ctes_sql, where_clause) restricting `p` to the scope's projects.
+    Empty strings when unrestricted."""
+    if not dept_scope:
+        return "", ""
+    quoted = ", ".join("LOWER('" + str(v).replace("'", "''") + "')" for v in dept_scope)
+    ctes = f"""
+        scope_emp AS (
+          SELECT {_norm_emp_id('Employee_Code')} AS nid
+          FROM {_bq_avail('Employee_Data')}
+          WHERE LOWER(COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified')) IN ({quoted})
+        ),
+        scope_cur AS (SELECT MAX(Date) AS d FROM {_bq_avail('Allocation_Data')} WHERE Date <= CURRENT_DATE()),
+        scope_tmax AS (
+          SELECT MAX(COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),
+                               SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))) AS m
+          FROM {_bq_avail('Timesheet_Data')}
+        ),
+        scope_pids AS (
+          SELECT DISTINCT CAST(a.project_id AS STRING) AS pid
+          FROM {_bq_avail('Allocation_Data')} a
+          JOIN scope_cur ON a.Date = scope_cur.d
+          JOIN scope_emp se ON {_norm_emp_id('a.employee_id')} = se.nid
+          WHERE SAFE_CAST(a.allocation_percent AS FLOAT64) > 0
+          UNION DISTINCT
+          SELECT DISTINCT CAST(t.TICKET_PROJECT_CODE AS STRING)
+          FROM {_bq_avail('Timesheet_Data')} t
+          JOIN scope_emp se ON {_norm_emp_id('t.EMPLOYEE_CODE')} = se.nid, scope_tmax
+          WHERE COALESCE(SAFE_CAST(CAST(t.DATE_KEY AS STRING) AS DATE),
+                         SAFE.PARSE_DATE('%Y%m%d', CAST(t.DATE_KEY AS STRING))) > DATE_SUB(scope_tmax.m, INTERVAL 90 DAY)
+        ),
+    """
+    where = (f" AND (CAST(p.Project_Code AS STRING) IN (SELECT pid FROM scope_pids) "
+             f"OR LOWER(COALESCE(NULLIF(TRIM(p.Competency), ''), '')) IN ({quoted}))")
+    return ctes, where
 
 
 @app.get("/api/projects")
 def projects_list(user: dict = Depends(get_current_user)):
-    """All projects with a WP-health + activity rollup for the list page."""
+    """Projects (scope-filtered) with a WP-health + activity rollup."""
+    dept_scope = _get_user_dept_scope(int(user["sub"]))
+    scope_ctes, scope_where = _scoped_projects_cte(dept_scope)
     sql = f"""
-        WITH wp AS (
+        WITH {scope_ctes} wp AS (
           SELECT CAST(PROJECT_ID AS STRING) AS pid,
                  COUNT(DISTINCT WP_CODE) AS wp_total,
                  COUNT(DISTINCT IF(COALESCE(Progress_Status,'') != 'Completed', WP_CODE, NULL)) AS wp_active,
@@ -8967,6 +9009,7 @@ def projects_list(user: dict = Depends(get_current_user)):
         FROM {_bq_avail('Project_Master')} p
         LEFT JOIN wp ON CAST(p.Project_Code AS STRING) = wp.pid
         LEFT JOIN ts ON CAST(p.Project_Code AS STRING) = ts.pid
+        WHERE 1=1{scope_where}
         ORDER BY wp_active DESC, hrs_90d DESC, name
     """
     r = bq_run_query(normalize_bq_project(_autofix_dashboard_sql(sql)), max_rows=2000)
@@ -9001,6 +9044,31 @@ def project_detail(code: str, user: dict = Depends(get_current_user)):
     pid = (code or "").strip().replace("'", "''")
     if not pid:
         raise HTTPException(status_code=400, detail="Project code is required.")
+
+    # Same scope rule as the list: a practice head can only open their
+    # department's projects.
+    dept_scope = _get_user_dept_scope(int(user["sub"]))
+    if dept_scope:
+        scope_ctes, scope_where = _scoped_projects_cte(dept_scope)
+        chk_sql = f"""
+            WITH {scope_ctes} ok AS (
+              SELECT 1 AS x FROM {_bq_avail('Project_Master')} p
+              WHERE CAST(p.Project_Code AS STRING) = '{pid}'{scope_where}
+            )
+            SELECT COUNT(*) AS c FROM ok
+        """
+        rc = bq_run_query(normalize_bq_project(_autofix_dashboard_sql(chk_sql)), max_rows=1)
+        allowed = False
+        if "error" not in rc and (rc.get("rows") or []):
+            try:
+                allowed = int(float(rc["rows"][0].get("c") or 0)) > 0
+            except Exception:
+                allowed = False
+        if not allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=f"You're scoped to {', '.join(dept_scope)} and don't have access to this project.",
+            )
 
     wp_sql = f"""
         SELECT WP_CODE,
