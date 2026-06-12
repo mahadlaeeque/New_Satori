@@ -1047,6 +1047,13 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
                   fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999,
                   background: c.bg, color: c.fg, border: `1px solid ${c.border}`,
                 }}>{status}</span>
+                {(detail?.work_packages?.counts?.owned_total || 0) > 0 && (
+                  <span title={`Owns ${detail.work_packages.counts.owned_total} work packages (${detail.work_packages.counts.owned_active} active)`}
+                    style={{
+                      fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999,
+                      background: `${C.accent}18`, color: C.accentDark, border: `1px solid ${C.accent}55`,
+                    }}>WP Owner · {detail.work_packages.counts.owned_total}</span>
+                )}
               </div>
               <div style={{ fontSize: 13, color: C.textSecondary, marginTop: 4 }}>
                 {emp.position || "—"}{emp.department && ` · ${emp.department}`}{emp.location && ` · ${emp.location}`}
@@ -1299,6 +1306,68 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
               </div>
             </div>
           )}
+
+          {/* Work packages — assigned (active) + owned, from the PF WP report */}
+          {detail?.work_packages && (detail.work_packages.assigned?.length > 0 || detail.work_packages.owned?.length > 0) && (() => {
+            const wp = detail.work_packages;
+            const wpPill = (progress) => {
+              const p = (progress || "").toLowerCase();
+              if (p === "completed")   return { bg: "var(--sem-ok-bg)", fg: "var(--sem-ok-fg)" };
+              if (p === "in-progress") return { bg: "var(--sem-info-bg)", fg: "var(--sem-info-fg)" };
+              return { bg: C.surfaceAlt, fg: C.textMuted };
+            };
+            const WpRow = ({ w, i, showHrs }) => {
+              const pill = wpPill(w.progress);
+              return (
+                <div style={{
+                  padding: "10px 14px", borderTop: i === 0 ? "none" : `1px solid ${C.border}`,
+                  display: "grid", gridTemplateColumns: "1fr auto", gap: 12, alignItems: "center",
+                }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 600, color: C.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {w.description || w.code}
+                    </div>
+                    <div style={{ fontSize: 10.5, color: C.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {[w.code, w.project, w.end_date ? `due ${w.end_date}` : null, showHrs && w.my_hrs != null ? `${Math.round(w.my_hrs)}h logged` : null].filter(Boolean).join(" · ")}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                    {(w.performance || "").toLowerCase() === "behind" && (
+                      <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)" }}>Behind</span>
+                    )}
+                    <span style={{ fontSize: 10.5, fontWeight: 700, padding: "2px 9px", borderRadius: 999, background: pill.bg, color: pill.fg }}>
+                      {w.progress || "—"}{w.plan_pct ? ` · plan ${w.plan_pct}%` : ""}
+                    </span>
+                  </div>
+                </div>
+              );
+            };
+            return (
+              <div style={{ marginBottom: 20 }}>
+                <h3 style={{ margin: "0 0 10px", fontSize: 13, fontWeight: 700, color: C.textPrimary, textTransform: "uppercase", letterSpacing: "0.5px", display: "flex", alignItems: "center", gap: 6 }}>
+                  <FileText size={14} /> Work packages
+                  <span style={{ fontSize: 11, fontWeight: 600, color: C.textMuted, textTransform: "none", letterSpacing: 0 }}>
+                    {wp.counts.assigned_active} active of {wp.counts.assigned_total} assigned{wp.counts.owned_total > 0 ? ` · owns ${wp.counts.owned_total}` : ""}
+                  </span>
+                </h3>
+                {wp.assigned.length > 0 && (
+                  <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", marginBottom: wp.owned.length ? 10 : 0 }}>
+                    {wp.assigned.map((w, i) => <WpRow key={w.code} w={w} i={i} showHrs />)}
+                  </div>
+                )}
+                {wp.owned.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px", margin: "10px 0 6px" }}>
+                      Owns ({wp.counts.owned_active} active of {wp.counts.owned_total})
+                    </div>
+                    <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+                      {wp.owned.map((w, i) => <WpRow key={w.code} w={w} i={i} />)}
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Timesheet by project */}
           <div>

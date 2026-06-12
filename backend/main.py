@@ -5325,10 +5325,14 @@ IMPORTANT dimensions users ask about — keep them DISTINCT, never conflate:
   not rows.
 - TICKET_STATUS = 'Approved' / 'Submitted' is the APPROVAL state (not open/closed).
 - Also: TICKET_PRIORITY, TICKET_PLANNED_HOURS, TICKET_HOURS (FLOAT64).
-- WP DETAILS (name/status/owner/dates/planned effort) live in WP_Report —
-  ALL its columns are STRING and the exact names appear ONLY in the live
-  warehouse snapshot; never invent WP column names. Per-WP activity (hours,
-  people, ticket counts) still comes from Timesheet_Data GROUP BY TICKET_WP_ID.
+- WP DETAILS (name/status/owner/dates/planned %) live in WP_Report. When a
+  user asks about A PROJECT's work packages: resolve the project via
+  Project_Master, filter WP_Report by PROJECT_ID, GROUP BY WP_CODE (rows are
+  deliverable lines — never COUNT(*)). "Behind" = Performance_Status='Behind'
+  (non-completed); "overdue" = WP_END_DATE < CURRENT_DATE() and not Completed.
+  Resources = WP_RESOURCE_ASSIGNED ('E-938 - Name', digit-norm joins
+  Employee_Code); owners = WP_OWNER_NAME (bare name). ACTUAL is unusable —
+  effort context comes from Timesheet via the stripped TICKET_WP_ID join.
 
 WHEN TO ASK vs. WHEN TO ACT:
 - ASK only when the answer materially depends on a choice you can't infer:
@@ -8296,6 +8300,106 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
         })
     pva_items.sort(key=lambda x: (-x["planned_pct"], -x["hrs_90d"]))
 
+    # ── Work packages — assigned to / owned by this person (WP_Report) ──
+    # WP_RESOURCE_ASSIGNED carries the employee code ('E-938 - Zahid Nasim')
+    # → reliable digit-norm join. WP_OWNER_NAME is a BARE name → matched
+    # against Resource_Name with its code prefix stripped (namesake risk is
+    # accepted for a profile badge). The active list is capped; counts come
+    # from a separate cheap aggregate so big owners don't bloat the payload.
+    wp_assigned, wp_owned = [], []
+    wp_counts = {"assigned_total": 0, "assigned_active": 0, "owned_total": 0, "owned_active": 0}
+    try:
+        wp_rows_sql = f"""
+            WITH me AS (
+              SELECT UPPER(TRIM(REGEXP_REPLACE(Resource_Name, r'^[A-Za-z]+-[0-9]+\\s*-*\\s*', ''))) AS nm
+              FROM {_bq_avail('Employee_Data')}
+              WHERE {_norm_emp_id('Employee_Code')} = {norm_target}
+              LIMIT 1
+            ),
+            myhrs AS (
+              SELECT REGEXP_REPLACE(UPPER(TRIM(TICKET_WP_ID)), r'(-[0-9]{{4,}})+$', '') AS wpk,
+                     ROUND(SUM(TICKET_HOURS), 1) AS hrs
+              FROM {_bq_avail('Timesheet_Data')}
+              WHERE {_norm_emp_id('EMPLOYEE_CODE')} = {norm_target}
+                AND TICKET_WP_ID IS NOT NULL AND TRIM(TICKET_WP_ID) != ''
+              GROUP BY wpk
+            ),
+            u AS (
+              SELECT 'assigned' AS rel, WP_CODE,
+                     ANY_VALUE(WP_DESCRIPTION) AS descr,
+                     ANY_VALUE(PROJECT_NAME) AS project,
+                     ANY_VALUE(Progress_Status) AS progress,
+                     ANY_VALUE(Performance_Status) AS performance,
+                     MAX(PLAN) AS plan_pct,
+                     MAX(WP_END_DATE) AS end_date
+              FROM {_bq_avail('WP_Report')}
+              WHERE {_norm_emp_id('WP_RESOURCE_ASSIGNED')} = {norm_target}
+              GROUP BY WP_CODE
+              UNION ALL
+              SELECT 'owned', w.WP_CODE,
+                     ANY_VALUE(w.WP_DESCRIPTION),
+                     ANY_VALUE(w.PROJECT_NAME),
+                     ANY_VALUE(w.Progress_Status),
+                     ANY_VALUE(w.Performance_Status),
+                     MAX(w.PLAN),
+                     MAX(w.WP_END_DATE)
+              FROM {_bq_avail('WP_Report')} w, me
+              WHERE UPPER(TRIM(w.WP_OWNER_NAME)) = me.nm AND me.nm != ''
+              GROUP BY w.WP_CODE
+            )
+            SELECT u.*, h.hrs AS my_hrs
+            FROM u
+            LEFT JOIN myhrs h ON UPPER(TRIM(u.WP_CODE)) = h.wpk
+            WHERE COALESCE(u.progress, '') != 'Completed'
+            ORDER BY u.rel, u.end_date IS NULL, u.end_date
+            LIMIT 40
+        """
+        rwp = bq_run_query(normalize_bq_project(_autofix_dashboard_sql(wp_rows_sql)), max_rows=60)
+        if "error" in rwp:
+            print(f"[/api/availability/employees/detail] WP rows BQ error: {rwp['error']}")
+        else:
+            for row in (rwp.get("rows") or []):
+                item = {
+                    "code":        row.get("WP_CODE") or "",
+                    "description": row.get("descr") or "",
+                    "project":     row.get("project") or "",
+                    "progress":    row.get("progress") or "",
+                    "performance": row.get("performance") or "",
+                    "plan_pct":    int(float(row.get("plan_pct") or 0)),
+                    "end_date":    str(row.get("end_date")) if row.get("end_date") else None,
+                    "my_hrs":      float(row.get("my_hrs")) if row.get("my_hrs") not in (None, "") else None,
+                }
+                if (row.get("rel") or "") == "assigned" and len(wp_assigned) < 15:
+                    wp_assigned.append(item)
+                elif (row.get("rel") or "") == "owned" and len(wp_owned) < 15:
+                    wp_owned.append(item)
+
+        wp_counts_sql = f"""
+            WITH me AS (
+              SELECT UPPER(TRIM(REGEXP_REPLACE(Resource_Name, r'^[A-Za-z]+-[0-9]+\\s*-*\\s*', ''))) AS nm
+              FROM {_bq_avail('Employee_Data')}
+              WHERE {_norm_emp_id('Employee_Code')} = {norm_target}
+              LIMIT 1
+            )
+            SELECT
+              COUNT(DISTINCT IF({_norm_emp_id('WP_RESOURCE_ASSIGNED')} = {norm_target}, WP_CODE, NULL)) AS a_total,
+              COUNT(DISTINCT IF({_norm_emp_id('WP_RESOURCE_ASSIGNED')} = {norm_target} AND COALESCE(Progress_Status,'') != 'Completed', WP_CODE, NULL)) AS a_active,
+              COUNT(DISTINCT IF(UPPER(TRIM(WP_OWNER_NAME)) = me.nm AND me.nm != '', WP_CODE, NULL)) AS o_total,
+              COUNT(DISTINCT IF(UPPER(TRIM(WP_OWNER_NAME)) = me.nm AND me.nm != '' AND COALESCE(Progress_Status,'') != 'Completed', WP_CODE, NULL)) AS o_active
+            FROM {_bq_avail('WP_Report')}, me
+        """
+        rwc = bq_run_query(normalize_bq_project(_autofix_dashboard_sql(wp_counts_sql)), max_rows=1)
+        if "error" not in rwc and (rwc.get("rows") or []):
+            c = rwc["rows"][0]
+            wp_counts = {
+                "assigned_total":  int(float(c.get("a_total") or 0)),
+                "assigned_active": int(float(c.get("a_active") or 0)),
+                "owned_total":     int(float(c.get("o_total") or 0)),
+                "owned_active":    int(float(c.get("o_active") or 0)),
+            }
+    except Exception as e:
+        print(f"[/api/availability/employees/detail] WP block failed: {e}")
+
     return {
         "code": emp_code,
         "projects": projects,
@@ -8304,6 +8408,11 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
             "by_project":    timesheet_by_project,
         },
         "profile": profile,
+        "work_packages": {
+            "assigned": wp_assigned,
+            "owned": wp_owned,
+            "counts": wp_counts,
+        },
         "plan_vs_actual": {
             "items":       pva_items,
             "not_logging": sum(1 for x in pva_items if x["flag"] == "not_logging"),
@@ -11022,7 +11131,15 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "⚠️ JOIN TO TIMESHEET (verified 885/886 match): Timesheet's TICKET_WP_ID = WP_CODE **plus a numeric task-id suffix** ('1194-B1-3.15-PMO-001-47217'). "
             "NEVER join TICKET_WP_ID = WP_CODE directly (0 matches). Canonical join: "
             "UPPER(TRIM(w.WP_CODE)) = REGEXP_REPLACE(UPPER(TRIM(t.TICKET_WP_ID)), r'(-[0-9]{4,})+$', ''). "
-            "WP_Report = what a WP is (owner, dates, statuses, planned %); Timesheet_Data grouped by the stripped code = hours logged, people, task/ticket counts."
+            "WP_Report holds what a WP is (owner, dates, statuses, planned %); Timesheet_Data grouped by the stripped code holds hours logged, people, task/ticket counts.\n"
+            "PEOPLE COLUMNS: WP_RESOURCE_ASSIGNED = 'E-938 - Zahid Nasim' (carries the employee CODE — digit-norm join to Employee_Code: norm(WP_RESOURCE_ASSIGNED)=norm(Employee_Code)); WP_OWNER_NAME = bare name only — match UPPER(TRIM(WP_OWNER_NAME)) = UPPER(TRIM(REGEXP_REPLACE(Resource_Name, r'^[A-Za-z]+-[0-9]+\\s*-*\\s*', ''))).\n"
+            "RECIPES for common questions:\n"
+            "• 'WPs in project X' → resolve the project via Project_Master first (LOWER(Project_Name) LIKE '%x%' → Project_Code), then FROM WP_Report WHERE CAST(PROJECT_ID AS STRING)=Project_Code GROUP BY WP_CODE with ANY_VALUE(WP_DESCRIPTION/Progress_Status/Performance_Status/WP_OWNER_NAME/WP_RESOURCE_ASSIGNED), MAX(PLAN), MAX(WP_END_DATE).\n"
+            "• 'how far along / behind' → report the Progress_Status distribution + PLAN%; BEHIND = Performance_Status='Behind' on non-completed WPs; OVERDUE = WP_END_DATE < CURRENT_DATE() AND Progress_Status != 'Completed'. Never use ACTUAL.\n"
+            "• 'deliverables of project/WP' → DISTINCT Deliverables, DELIVERABLE_TYPE (per WP_CODE if asked per-WP).\n"
+            "• 'who is working on / resources' → DISTINCT WP_RESOURCE_ASSIGNED per WP; 'who owns' → WP_OWNER_NAME.\n"
+            "• '<person>'s work packages' → norm(WP_RESOURCE_ASSIGNED)=norm(their code) (resolve the person first per the identity rule); 'WPs <person> owns' → the OWNER name match above.\n"
+            "• 'project WP summary' → counts by Progress_Status + behind/overdue lists + top owners; add Timesheet hours via the stripped-code join for effort context."
         ),
     },
     {
@@ -11099,6 +11216,7 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "there is usually exactly ONE match (e.g. 'Adnan Raza' = E-218)",   # pre namesake-disambiguation note
     "'work package' / 'WP' ALWAYS means TICKET_WP_ID.",                 # pre WP_Report cross-reference note
     "Use WP_Report for what a work package IS",                         # v1 WP_Report note (pre verified columns/join)
+    "WP_Report = what a WP is (owner, dates, statuses, planned %)",     # v2 WP_Report note (pre people-columns + recipes)
     "Hist_Win_Rate (decimal 0-1 — multiply by 100 for %)",      # pre Hist_Win_Rate-is-STRING note
     "Open_Deals, Win_Rate_by (decimal 0-1).",                   # pre Win_Rate_by-is-STRING note
     "CRM_Pipeline, Coverage_Ratio, Status, Action.",            # pre Coverage_Ratio-is-STRING note
