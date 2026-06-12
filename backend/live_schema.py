@@ -114,6 +114,16 @@ _PROBES = {
     "wp_report_rows": (
         "SELECT 'WP_Report' AS v, COUNT(*) AS n FROM `capability-agent-prod.Satori_Project.WP_Report`"
     ),
+    "wp_progress_statuses": (
+        "SELECT DISTINCT Progress_Status AS v, COUNT(*) AS n "
+        "FROM `capability-agent-prod.Satori_Project.WP_Report` WHERE Progress_Status IS NOT NULL "
+        "GROUP BY v ORDER BY n DESC LIMIT 15"
+    ),
+    "wp_portal_statuses": (
+        "SELECT DISTINCT WP_PORTAL_STATUS AS v, COUNT(*) AS n "
+        "FROM `capability-agent-prod.Satori_Project.WP_Report` WHERE WP_PORTAL_STATUS IS NOT NULL "
+        "GROUP BY v ORDER BY n DESC LIMIT 15"
+    ),
     "join_compat_attendance_name": (
         "WITH e AS (SELECT DISTINCT UPPER(TRIM(Resource_Name)) AS k "
         "  FROM `capability-agent-prod.Satori_Project.Employee_Data` WHERE Resource_Name IS NOT NULL), "
@@ -217,10 +227,17 @@ def render_context_block() -> str:
             (
                 "WORK PACKAGES (WP_Report) - the PF work-package master/detail report"
                 + (f", {wp_rows[0].get('n')} rows" if wp_rows else "")
-                + ". ALL columns are STRING (raw CSV load) - SAFE_CAST numerics/dates before aggregating.\n"
+                + " (~10k distinct WPs across ~108 projects; MANY rows per WP - one per deliverable line).\n"
                 f"- EXACT live columns (the ONLY valid names - NEVER invent WP column names): {_format_distinct(wp_cols, limit=80)}\n"
-                "- Join to Timesheet_Data.TICKET_WP_ID on WP_Report's WP-id column (match as STRING; digit-normalise if formats differ). "
-                "Use WP_Report for WP attributes (name/status/owner/dates/planned effort); hours and task/ticket counts per WP still come from Timesheet_Data GROUP BY TICKET_WP_ID.\n\n"
+                "- 'How many work packages' = COUNT(DISTINCT WP_CODE), NEVER COUNT(*) (rows are deliverable lines). Per-WP attributes -> GROUP BY WP_CODE + ANY_VALUE(...).\n"
+                "- JOIN to Timesheet (VERIFIED 885/886): WP_Report.WP_CODE = REGEXP_REPLACE(UPPER(TRIM(t.TICKET_WP_ID)), r'(-[0-9]{4,})+$', '') "
+                "- TICKET_WP_ID is WP_CODE plus a numeric task-id suffix; NEVER join the two columns directly (0 matches). Wrap WP_CODE in UPPER(TRIM(...)) too.\n"
+                "- PROJECT_ID joins Project_Master.Project_Code (and Timesheet TICKET_PROJECT_CODE).\n"
+                f"- Progress_Status values - {_format_distinct(get_rows('wp_progress_statuses'))}\n"
+                f"- WP_PORTAL_STATUS values - {_format_distinct(get_rows('wp_portal_statuses'))}\n"
+                "- PLAN = planned progress percent 0-100 (INT64 after finalize; SAFE_CAST if STRING). ⚠️ ACTUAL is '?' in the source feed - UNUSABLE; "
+                "actual effort/progress comes from Timesheet hours (GROUP BY the stripped WP code). Date columns (WP_START_DATE etc.) are DATE after finalize; "
+                "if still STRING parse with SAFE.PARSE_DATE('%d-%b-%Y', col). Use the type-agnostic COALESCE(SAFE_CAST(CAST(col AS STRING) AS DATE), SAFE.PARSE_DATE('%d-%b-%Y', CAST(col AS STRING))).\n\n"
             )
             if wp_cols else
             "WORK PACKAGES: the WP_Report table has not been loaded yet - if asked about work-package details beyond Timesheet_Data's TICKET_WP_ID, say the WP report isn't available rather than guessing.\n\n"
