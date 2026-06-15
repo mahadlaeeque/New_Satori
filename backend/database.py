@@ -101,7 +101,6 @@ def init_db():
     _migrate_finalize_tmc_superadmin()
     _migrate_add_api_keys()
     _migrate_add_google_calendar()
-    _migrate_add_mindmaps()
 
 
 def _migrate_rename_polypack_to_ffc():
@@ -257,44 +256,6 @@ def _migrate_add_governance_tables():
         print("[DB] Migration: governance tables present (data_access_log, user_settings)")
     except Exception as e:
         print(f"[DB] Governance migration error (safe to ignore on fresh DB): {e}")
-
-
-def _migrate_add_mindmaps():
-    """Idempotent migration: saved mindmaps (data-grounded node graphs built in
-    the Mindmap Builder). One row per saved map; config holds the spec
-    (type + params). Safe to re-run on both SQLite and Postgres."""
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-        if USE_POSTGRES:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS saved_mindmaps (
-                    id          SERIAL PRIMARY KEY,
-                    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    name        TEXT NOT NULL,
-                    description TEXT,
-                    config      TEXT NOT NULL DEFAULT '{}',
-                    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-        else:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS saved_mindmaps (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    name        TEXT NOT NULL,
-                    description TEXT,
-                    config      TEXT NOT NULL DEFAULT '{}',
-                    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-        conn.commit()
-        conn.close()
-        print("[DB] Migration: saved_mindmaps table present")
-    except Exception as e:
-        print(f"[DB] Mindmaps migration error (safe to ignore on fresh DB): {e}")
 
 
 def _migrate_add_google_calendar():

@@ -14,15 +14,13 @@ import {
   Volume2, VolumeX, Minimize2, Maximize2, Bot, Sparkles, ChevronDown, Download,
   Plus, ToggleLeft, ToggleRight, Phone, Hash, Trash2, Edit3, Play, Pause, ArrowRight, MessageCircle,
   HelpCircle, Calendar, Command, CreditCard, Star, MoreHorizontal, Copy, Share2, Link as LinkIcon, UserPlus,
-  Filter, Sun, Moon, ThumbsUp, ThumbsDown, RefreshCw, Check, Network
+  Filter, Sun, Moon, ThumbsUp, ThumbsDown, RefreshCw, Check
 } from "lucide-react";
 // Lazy-loaded: the Availability Engine is a big self-contained page (cards,
 // heatmap, radar, modals, jspdf export) most sessions never open first —
 // splitting it keeps login/first-paint lean. Projects gets the same treatment.
 const AvailabilityEnginePage = lazy(() => import("./AvailabilityEngine.jsx"));
 const ProjectsPage = lazy(() => import("./ProjectsPage.jsx"));
-// Mindmap Builder pulls in react-flow — lazy-split so it never bloats first paint.
-const MindmapsPage = lazy(() => import("./MindmapsPage.jsx"));
 import SatoriAvatar from "./components/SatoriAvatar.jsx";
 
 // ─── TMC Brand Color Palette ───
@@ -10846,7 +10844,6 @@ const NAV_ITEMS = [
   { id: "agent", label: "Ask Me Anything", icon: Bot, component: AgentPage, requiresFeature: "agent" },
   { id: "reports", label: "Report Builder", icon: FileText, component: ReportsPage, requiresFeature: "reportbuilder" },
   { id: "dashboards", label: "Dashboard Builder", icon: LayoutDashboard, component: DashboardsPage, requiresFeature: "dashboards" },
-  { id: "mindmap", label: "Mindmap Builder", icon: Network, component: MindmapsPage },
   { id: "calendar", label: "Calendar", icon: Calendar, component: CalendarPage },
   { id: "_divider_intelligence", label: "INTELLIGENCE", isDivider: true },
   { id: "availability", label: "Availability Engine", icon: Activity, component: AvailabilityEnginePage, requiresFeature: "availability" },
@@ -12596,7 +12593,6 @@ export default function App() {
                   : activePage === "reports" ? "Build, edit, and download tabular reports as Excel or PDF"
                   : activePage === "rules" ? "Automated alerts & notifications"
                   : activePage === "dashboards" ? "Build, view, and refine your custom dashboards"
-                  : activePage === "mindmap" ? "Build live, data-grounded mindmaps of your org, teams and people"
                   : activePage === "ap" ? "Product Orders"
                   : activePage === "ar" ? "Dealer Orders"
                   : activePage === "invoices" ? "TMC Sales Invoice Analytics"
@@ -12704,8 +12700,8 @@ export default function App() {
         </header>
 
         {/* Dashboard Area */}
-        <main style={{ flex: 1, overflow: onPrivacy || activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" || activePage === "mindmap" ? "hidden" : "auto", padding: onPrivacy || activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" || activePage === "users" || activePage === "audit" || activePage === "support" || activePage === "mindmap" ? 0 : 32 }}>
-          <div style={{ animation: "fadeIn 0.3s ease", height: onPrivacy || activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" || activePage === "mindmap" ? "100%" : "auto" }}>
+        <main style={{ flex: 1, overflow: onPrivacy || activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" ? "hidden" : "auto", padding: onPrivacy || activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" || activePage === "users" || activePage === "audit" || activePage === "support" ? 0 : 32 }}>
+          <div style={{ animation: "fadeIn 0.3s ease", height: onPrivacy || activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" ? "100%" : "auto" }}>
             {onPrivacy ? (
               <PrivacyPage onBack={() => { window.location.hash = ""; }} />
             ) : DashboardContent && (
@@ -12720,7 +12716,7 @@ export default function App() {
           {/* Footer */}
           <div style={{
             marginTop: 32, padding: "20px 0", borderTop: `1px solid ${COLORS.border}`,
-            display: activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" || activePage === "mindmap" || activePage === "users" || activePage === "audit" || activePage === "support" ? "none" : "flex", justifyContent: "space-between", alignItems: "center"
+            display: activePage === "agent" || activePage === "reports" || activePage === "rules" || activePage === "dashboards" || activePage === "users" || activePage === "audit" || activePage === "support" ? "none" : "flex", justifyContent: "space-between", alignItems: "center"
           }}>
             <div style={{ fontSize: 12, color: COLORS.textMuted }}>
               Satori v1.0 &middot; TallyMarks Consulting (TMC)

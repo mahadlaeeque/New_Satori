@@ -7613,171 +7613,6 @@ def _dept_scope_clause(dept_scope: list | None) -> str:
     return f" AND LOWER(COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified')) IN ({quoted})"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  MINDMAP BUILDER — data-grounded node graphs (MVP: org / department tree)
-#  The org-tree endpoint reads the live workforce hierarchy (dept-scoped) and
-#  returns nodes/edges the frontend renders with react-flow. saved_mindmaps
-#  persists the spec (config) like saved_dashboards.
-# ─────────────────────────────────────────────────────────────────────────────
-def _clean_resource_name(raw: str) -> str:
-    """Strip the leading employee-code prefix from Resource_Name
-    ('E-1571 - Mahad Laeeque' / 'C-064 Mahad' → 'Mahad Laeeque')."""
-    import re as _re
-    s = (raw or "").strip()
-    stripped = _re.sub(r"^[A-Za-z]{0,3}-?\d+\s*[-–—]?\s*", "", s).strip()
-    return stripped or s
-
-
-@app.get("/api/mindmap/org-tree")
-def mindmap_org_tree(department: str = "", user: dict = Depends(get_current_user)):
-    """Build the org/department mindmap: TMC → departments → people, from live
-    Employee_Data, honouring the caller's department scope. `department` (a
-    EmployeeHierarchyNode value) optionally narrows to one branch."""
-    uid = int(user["sub"])
-    is_admin = (user.get("role") or "").lower() == "admin"
-    dept_scope = None if is_admin else _get_user_dept_scope(uid)
-    sql = f"""
-        SELECT Employee_Code, Resource_Name, EmployeePosition, EmployeeHierarchyNode, EmployeeLocation
-        FROM {_bq_avail('Employee_Data')}
-        WHERE LOWER(COALESCE(employee_status, '')) = 'active'
-              {_dept_scope_clause(dept_scope)}
-        ORDER BY EmployeeHierarchyNode, Resource_Name
-    """
-    sql = normalize_bq_project(sql)
-    r = bq_run_query(sql, max_rows=3000)
-    if "error" in r:
-        raise HTTPException(status_code=502, detail=f"Couldn't read workforce data: {r['error']}")
-    rows = r.get("rows") or []
-
-    from collections import OrderedDict
-    depts = OrderedDict()
-    for row in rows:
-        d = (row.get("EmployeeHierarchyNode") or "").strip() or "Unspecified"
-        depts.setdefault(d, []).append(row)
-    all_departments = sorted(depts.keys())
-
-    sel = (department or "").strip().lower()
-    if sel:
-        depts = OrderedDict((k, v) for k, v in depts.items() if k.lower() == sel)
-
-    total_people = sum(len(v) for v in depts.values())
-    single = bool(sel and len(depts) == 1)
-    root_label = (next(iter(depts)) if single else "TMC")
-
-    nodes, edges, seen = [], [], set()
-    def _add_node(n):
-        if n["id"] in seen:
-            return False
-        seen.add(n["id"]); nodes.append(n); return True
-
-    _add_node({"id": "root", "type": "root", "label": root_label,
-               "sublabel": f"{total_people} people" + ("" if single else f" · {len(depts)} departments")})
-    for d, people in depts.items():
-        did = f"dept::{d}"
-        _add_node({"id": did, "type": "department", "label": d, "sublabel": f"{len(people)} people"})
-        edges.append({"id": f"root->{did}", "source": "root", "target": did})
-        for i, p in enumerate(people):
-            code = (p.get("Employee_Code") or "").strip()
-            pid = f"emp::{code or 'x'}::{i}"
-            _add_node({
-                "id": pid, "type": "person",
-                "label": _clean_resource_name(p.get("Resource_Name")),
-                "sublabel": (p.get("EmployeePosition") or "").strip(),
-                "location": (p.get("EmployeeLocation") or "").strip(),
-                "code": code,
-            })
-            edges.append({"id": f"{did}->{pid}", "source": did, "target": pid})
-
-    return {
-        "title": (root_label + " — Org Map") if single else "TMC — Org Map",
-        "departments": all_departments,
-        "nodes": nodes, "edges": edges,
-        "counts": {"people": total_people, "departments": len(depts)},
-    }
-
-
-@app.get("/api/mindmaps")
-def list_mindmaps(user: dict = Depends(get_current_user)):
-    uid = int(user["sub"])
-    db = get_db(); cur = db.cursor()
-    rows = []
-    try:
-        cur.execute("SELECT id, name, description, updated_at FROM saved_mindmaps WHERE user_id = ? ORDER BY updated_at DESC", (uid,))
-        rows = [dict(r) for r in cur.fetchall()]
-    except Exception as e:
-        print(f"[/api/mindmaps] error: {e}")
-    db.close()
-    return {"mindmaps": rows}
-
-
-@app.post("/api/mindmaps")
-def create_mindmap(body: dict, user: dict = Depends(get_current_user)):
-    from database import USE_POSTGRES
-    uid = int(user["sub"])
-    name = (body.get("name") or body.get("title") or "Untitled mindmap").strip()
-    description = (body.get("description") or "").strip()
-    config_json = json.dumps(body.get("config") or {})
-    db = get_db(); cur = db.cursor()
-    if USE_POSTGRES:
-        cur.execute("INSERT INTO saved_mindmaps (user_id, name, description, config) VALUES (?, ?, ?, ?) RETURNING id",
-                    (uid, name, description, config_json))
-        row = cur.fetchone(); new_id = row["id"] if isinstance(row, dict) else row[0]
-    else:
-        cur.execute("INSERT INTO saved_mindmaps (user_id, name, description, config) VALUES (?, ?, ?, ?)",
-                    (uid, name, description, config_json))
-        new_id = cur.lastrowid
-    db.commit(); db.close()
-    return {"id": new_id, "ok": True}
-
-
-@app.get("/api/mindmaps/{mindmap_id}")
-def get_mindmap(mindmap_id: int, user: dict = Depends(get_current_user)):
-    uid = int(user["sub"])
-    db = get_db(); cur = db.cursor()
-    cur.execute("SELECT id, name, description, config, user_id, updated_at FROM saved_mindmaps WHERE id = ? AND user_id = ?", (mindmap_id, uid))
-    row = cur.fetchone(); db.close()
-    if not row:
-        raise HTTPException(status_code=404, detail="Mindmap not found")
-    r = dict(row)
-    if isinstance(r.get("config"), str):
-        try: r["config"] = json.loads(r["config"])
-        except Exception: pass
-    return r
-
-
-@app.put("/api/mindmaps/{mindmap_id}")
-def update_mindmap(mindmap_id: int, body: dict, user: dict = Depends(get_current_user)):
-    from database import USE_POSTGRES
-    uid = int(user["sub"])
-    db = get_db(); cur = db.cursor()
-    cur.execute("SELECT id FROM saved_mindmaps WHERE id = ? AND user_id = ?", (mindmap_id, uid))
-    if not cur.fetchone():
-        db.close(); raise HTTPException(status_code=404, detail="Mindmap not found")
-    sets, params = [], []
-    if body.get("name") is not None or body.get("title") is not None:
-        sets.append("name = ?"); params.append(body.get("name") or body.get("title"))
-    if body.get("description") is not None:
-        sets.append("description = ?"); params.append(body.get("description"))
-    if body.get("config") is not None:
-        sets.append("config = ?"); params.append(json.dumps(body.get("config")))
-    if not sets:
-        db.close(); return {"ok": True, "note": "nothing to update"}
-    sets.append("updated_at = " + ("NOW()" if USE_POSTGRES else "datetime('now')"))
-    params.append(mindmap_id)
-    cur.execute(f"UPDATE saved_mindmaps SET {', '.join(sets)} WHERE id = ?", tuple(params))
-    db.commit(); db.close()
-    return {"ok": True}
-
-
-@app.delete("/api/mindmaps/{mindmap_id}")
-def delete_mindmap(mindmap_id: int, user: dict = Depends(get_current_user)):
-    uid = int(user["sub"])
-    db = get_db(); cur = db.cursor()
-    cur.execute("DELETE FROM saved_mindmaps WHERE id = ? AND user_id = ?", (mindmap_id, uid))
-    db.commit(); db.close()
-    return {"ok": True}
-
-
 def _norm_emp_id(col: str) -> str:
     """Normalize an employee-ID column for cross-table joining.
 
@@ -11053,10 +10888,12 @@ WORKFORCE TABLES:
     emp_competency, Flag, Start_Date, End_Date.
     Bench = employees with MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per Employee_Code = 0 or NULL.
 
-- `ai-vertex-mahad.Satori_Project.Timesheet_Data`
-    TICKET_USER_ID (= Employee_Code), EMPLOYEE_CODE (also = Employee_Code), TICKET_PROJECT_LABEL,
-    TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (DATE),
-    TICKET_WP_ID (links to a work package — see WP_Report join rule below).
+- `ai-vertex-mahad.Satori_Project.Timesheet_Data`  (ticketing / effort log)
+    EMPLOYEE_CODE (= Employee_Code — THE employee join key; digit-normalise. ⚠️ TICKET_USER_ID is an unrelated internal id that matches almost nothing — never join on it),
+    TICKET_PROJECT_CODE (= Project_Master.Project_Code), TICKET_PROJECT_LABEL (project name text),
+    TICKET_HOURS (FLOAT64 — actual hours LOGGED), TICKET_PLANNED_HOURS (STRING — SAFE_CAST AS FLOAT64; PLANNED/budgeted hours. ⚠️ SPARSE — many rows are 0/blank, so a raw "logged > planned" mostly reflects a missing plan, not a real overrun; confirm scope and exclude/flag planned=0 rows when comparing),
+    TICKET_STATUS, DATE_KEY (DATE), TICKET_WP_ID (work-package id — see WP_Report join rule below),
+    FLAG ('Assigned' / 'Un-Assigned'), TICKET_TYPE ('Task' / 'Ticket').
 
 WORK-PACKAGE / PROJECT TABLES:
 - `ai-vertex-mahad.Satori_Project.WP_Report`  (work-package master/detail — ~490k DELIVERABLE-LINE rows, ~10,170 distinct WPs. A single WP spans MANY rows, so always COUNT(DISTINCT WP_CODE) and GROUP BY WP_CODE — never COUNT(*).)
@@ -11118,6 +10955,21 @@ This dataset DOES NOT contain SAP/MRP concepts (plant, storage_location, materia
     owned:    UPPER(TRIM(REGEXP_REPLACE(WP_OWNER_NAME, r'^[A-Za-z]+-[0-9]+\\s*-*\\s*',''))) = UPPER(TRIM(REGEXP_REPLACE(Resource_Name, r'^[A-Za-z]+-[0-9]+\\s*-*\\s*','')))
 - Project filter: REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(<Project_Code> AS STRING) (resolve the project name via Project_Master first).
 - Timesheet hours per WP: LEFT JOIN Timesheet_Data ON UPPER(TRIM(w.WP_CODE)) = REGEXP_REPLACE(UPPER(TRIM(t.TICKET_WP_ID)), r'(-[0-9]{4,})+$', '')  (NEVER a direct equality — TICKET_WP_ID carries a numeric task suffix), then SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)).
+
+═══ HOURS — LOGGED vs PLANNED/ALLOCATED, OVERRUN & COST ═══
+- Actual hours logged per resource per project: SUM(TICKET_HOURS), GROUP BY EMPLOYEE_CODE (+ TICKET_PROJECT_CODE); LEFT JOIN Employee_Data for the name and Project_Master for the project name.
+- "Logged MORE than assigned/planned" (an OVERRUN) — there are TWO valid baselines; if the user is not explicit, ASK which they mean:
+    (a) PLANNED hours (from the timesheet itself): overrun_hours = SUM(TICKET_HOURS) - SUM(SAFE_CAST(TICKET_PLANNED_HOURS AS FLOAT64)); keep only overruns with HAVING overrun_hours > 0. ⚠️ TICKET_PLANNED_HOURS is sparse — when the user wants a TRUE plan comparison, restrict to rows that HAVE a plan (SUM of planned > 0) so people with no recorded plan don't all look over budget.
+    (b) ALLOCATED hours (from Allocation_Data): expected_hours ≈ (AVG(SAFE_CAST(allocation_percent AS FLOAT64))/100) × <working_days_in_period> × 8, per resource per project; overrun = logged − expected. allocation_percent is a planning %, so call this an estimate.
+- EXTRA COST / WHAT-IF: an hourly cost per resource is NOT in the warehouse — the USER provides it. When they give a rate, add a computed column:
+    • FLAT rate: extra_cost = ROUND(overrun_hours * <rate>, 0).
+    • PER-PERSON rates: CASE WHEN LTRIM(REGEXP_REPLACE(Employee_Code,r'[^0-9]',''),'0')='1571' THEN 50 WHEN ...='1234' THEN 40 ELSE 0 END AS hourly_cost, then overrun_hours * hourly_cost AS extra_cost.
+  If the user hasn't supplied the rate yet, BUILD the overrun report first (resource, project, logged, planned/expected, overrun_hours) and tell them to give you the hourly cost(s) so you can add the extra-cost column on the next "generate".
+
+═══ DERIVED & WHAT-IF COLUMNS (be dynamic — this is expected) ═══
+- You CAN compute any derived column the user describes: a difference (a − b), a ratio / percentage, a variance vs a target, or a value × a user-supplied constant (cost-per-hour, day-rate, FX, budget). Build them as plain SQL expressions with clear aliases and list them in numeric_columns / total_columns where it makes sense.
+- When a metric needs a number the warehouse does NOT have (cost/hour, salary, a target), take it from the user as a constant or a per-entity CASE WHEN — NEVER invent it. Echo the number back so they can confirm, then bake it in.
+- For any "who did X more than Y" request: SELECT both X and Y and their difference, ORDER BY the difference DESC, and use HAVING to keep only the rows that exceed (e.g. HAVING overrun_hours > 0).
 
 ═══ DON'T BUILD AN EMPTY REPORT ═══
 - Resolve a named person to their Employee_Code FIRST (Employee_Data: LOWER(Resource_Name) LIKE '%name%'), and remember most people are assigned to only a FEW projects.
