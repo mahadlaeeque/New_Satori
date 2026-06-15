@@ -5538,8 +5538,10 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
       ON LTRIM(REGEXP_REPLACE(CAST(e.Employee_Code AS STRING), r'[^0-9]', ''), '0')
        = LTRIM(REGEXP_REPLACE(CAST(t.TICKET_USER_ID AS STRING), r'[^0-9]', ''), '0')
   And ALWAYS use LEFT JOIN (not plain JOIN) so attendance rows survive even if Employee_Data has no matching row.
+- 🚨 GROUP BY CORRECTNESS: in any grouped query, EVERY selected column that is NOT a GROUP BY key MUST be wrapped in an aggregate (ANY_VALUE / MAX / MIN / SUM / COUNT). A bare ungrouped, unaggregated column is a hard BigQuery error that blanks the widget.
+- WORK PACKAGES (WP_Report): a work package spans many rows → use COUNT(DISTINCT WP_CODE) and GROUP BY WP_CODE (wrap every other attribute in ANY_VALUE/MAX). The project of a WP = its leading number: REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Master.Project_Code AS STRING) (resolve a named project via Project_Master first). Hours logged per WP = LEFT JOIN Timesheet_Data ON UPPER(TRIM(WP_CODE)) = REGEXP_REPLACE(UPPER(TRIM(TICKET_WP_ID)), r'(-[0-9]{{4,}})+$', '') then SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) — NEVER a direct WP_CODE=TICKET_WP_ID equality. The ACTUAL column is unusable; planned progress = PLAN (0-100). Statuses: Progress_Status / WP_PORTAL_STATUS / Performance_Status.
 - EmployeeHierarchyNode is the DEPARTMENT — never call it anything else.
-- 📅 Date scope: today's date is May 2026. When the user says "last month" you mean April 2026; "this month" means May 2026. If they name a month (e.g. "March 2026"), use that exact month's first/last day.
+- 📅 Relative dates: resolve "today" / "this month" / "last month" against the CURRENT date with BigQuery functions, never hardcoded months — this month = BETWEEN DATE_TRUNC(CURRENT_DATE(),MONTH) AND CURRENT_DATE(); last month = DATE_TRUNC(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH),MONTH) to its month-end; a named month (e.g. "March 2026") = that month's first/last day. Prefer CURRENT_DATE()/DATE_SUB/DATE_TRUNC.
 - {{where}} placement: the runtime substitutes either `AND field='value' AND ...` or empty string into the spot where you wrote {{where}}. Your query MUST already have its own WHERE — write the placeholder as ` {{where}}` right after your last WHERE condition (with a leading space). If no filters apply at runtime, the placeholder becomes ''.
 - LIMIT every chart query to 50 rows.
 
@@ -11052,8 +11054,19 @@ WORKFORCE TABLES:
     Bench = employees with MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per Employee_Code = 0 or NULL.
 
 - `ai-vertex-mahad.Satori_Project.Timesheet_Data`
-    TICKET_USER_ID (= Employee_Code), TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST),
-    TICKET_STATUS, DATE_KEY (DATE).
+    TICKET_USER_ID (= Employee_Code), EMPLOYEE_CODE (also = Employee_Code), TICKET_PROJECT_LABEL,
+    TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (DATE),
+    TICKET_WP_ID (links to a work package — see WP_Report join rule below).
+
+WORK-PACKAGE / PROJECT TABLES:
+- `ai-vertex-mahad.Satori_Project.WP_Report`  (work-package master/detail — ~490k DELIVERABLE-LINE rows, ~10,170 distinct WPs. A single WP spans MANY rows, so always COUNT(DISTINCT WP_CODE) and GROUP BY WP_CODE — never COUNT(*).)
+    WP_CODE (the WP id, e.g. '1105-B1-1.3-PMO-001'; the PROJECT is its LEADING NUMBER: REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Master.Project_Code AS STRING). PROJECT_ID is an internal id that joins NOTHING — never use it),
+    WP_DESCRIPTION, WP_OWNER_NAME (owner — MIXED format, sometimes bare 'Zahid Nasim', sometimes code-prefixed 'E-1933 Waqar Anwar'), WP_RESOURCE_ASSIGNED (the ASSIGNED person, 'E-938 - Zahid Nasim' — carries the employee CODE),
+    Progress_Status ('Completed' / 'In-Progress' / 'Future Task' / 'Upcoming' / 'Initiation Pending' / 'Backlog'), WP_PORTAL_STATUS, Performance_Status,
+    PLAN (planned progress %, INT64 0-100), WP_BASELINE_START_DATE / WP_BASELINE_END_DATE / WP_LAST_STATUS_DATE (DATE).
+    ⚠️ No usable ACTUAL column — actual effort = SUM of Timesheet hours (join below). Baseline duration in days = DATE_DIFF(WP_BASELINE_END_DATE, WP_BASELINE_START_DATE, DAY).
+- `ai-vertex-mahad.Satori_Project.Project_Master`
+    Project_Code (INT64 — equals WP_CODE's leading number), Project_Name. Resolve a NAMED project here first: LOWER(Project_Name) LIKE '%x%' → Project_Code.
 
 SALES TABLES (USD/visit numbers stored as STRING → SAFE_CAST AS FLOAT64; win-rate already decimal 0-1):
 - `ai-vertex-mahad.Satori_Project.Sales_AM_Scorecard`
@@ -11093,6 +11106,22 @@ This dataset DOES NOT contain SAP/MRP concepts (plant, storage_location, materia
 - Use ROUND() for percentages and currency.
 - Always alias columns with readable names (AS attendance_pct, AS employee, …). The frontend uses the column names AS-IS.
 - The result MUST have at least one row for the user-supplied scope — pick filters loose enough that real data comes back.
+
+═══ GROUP BY CORRECTNESS (the #1 cause of broken reports) ═══
+- If the query has GROUP BY, EVERY column in the SELECT that is NOT one of the GROUP BY keys MUST be wrapped in an aggregate (ANY_VALUE / MAX / MIN / SUM / COUNT). A bare column reference that isn't grouped or aggregated is a hard BigQuery error.
+- For work-package reports you GROUP BY WP_CODE, so wrap ALL other attributes: ANY_VALUE(WP_DESCRIPTION), ANY_VALUE(WP_OWNER_NAME), ANY_VALUE(WP_RESOURCE_ASSIGNED), ANY_VALUE(Progress_Status), MIN(WP_BASELINE_START_DATE), MAX(WP_BASELINE_END_DATE), MAX(PLAN), ANY_VALUE(Project_Name). Baseline duration = DATE_DIFF(MAX(WP_BASELINE_END_DATE), MIN(WP_BASELINE_START_DATE), DAY).
+
+═══ WORK PACKAGES (WP_Report) ═══
+- A WP spans many deliverable rows → ALWAYS GROUP BY WP_CODE.
+- "A person's work packages" is ambiguous → they may be the ASSIGNED resource OR the OWNER. Unless the user clearly says only one, cover BOTH with OR:
+    assigned: LTRIM(REGEXP_REPLACE(WP_RESOURCE_ASSIGNED, r'[^0-9]',''),'0') = LTRIM(REGEXP_REPLACE(<their Employee_Code>, r'[^0-9]',''),'0')
+    owned:    UPPER(TRIM(REGEXP_REPLACE(WP_OWNER_NAME, r'^[A-Za-z]+-[0-9]+\\s*-*\\s*',''))) = UPPER(TRIM(REGEXP_REPLACE(Resource_Name, r'^[A-Za-z]+-[0-9]+\\s*-*\\s*','')))
+- Project filter: REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(<Project_Code> AS STRING) (resolve the project name via Project_Master first).
+- Timesheet hours per WP: LEFT JOIN Timesheet_Data ON UPPER(TRIM(w.WP_CODE)) = REGEXP_REPLACE(UPPER(TRIM(t.TICKET_WP_ID)), r'(-[0-9]{4,})+$', '')  (NEVER a direct equality — TICKET_WP_ID carries a numeric task suffix), then SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)).
+
+═══ DON'T BUILD AN EMPTY REPORT ═══
+- Resolve a named person to their Employee_Code FIRST (Employee_Data: LOWER(Resource_Name) LIKE '%name%'), and remember most people are assigned to only a FEW projects.
+- Be careful AND-ing a person + a specific project + a status — that combination is frequently empty (e.g. the person isn't on that project, or has nothing 'Completed'). If the user names both a person and a project, either confirm the person actually works on it, or scope to the one they emphasised and mention the other as a note. NEVER silently add a status filter (Completed/etc.) the user didn't ask for.
 
 ═══ JSON FIELDS ═══
 - title         (required) — short report title.
@@ -11422,7 +11451,7 @@ def _run_report_config(config: dict) -> dict:
     total_columns   = [c for c in total_columns if c in numeric_columns]
 
     print(f"[report]   ok — {len(rows)} rows, cols={all_columns}")
-    return {
+    out = {
         "title": title,
         "description": description,
         "sql": sql,
@@ -11433,6 +11462,15 @@ def _run_report_config(config: dict) -> dict:
         "numeric_columns": numeric_columns,
         "total_columns": total_columns,
     }
+    if not rows:
+        # The query ran fine but matched nothing — almost always over-narrow
+        # filters (a person who isn't on that project, a status with no items,
+        # or a date range with no activity). Tell the user how to widen it.
+        out["note"] = ("The query ran but matched no rows — the filters are likely too narrow. "
+                       "Common causes: the person isn't assigned to that specific project, there are "
+                       "no items in that status (e.g. nothing 'Completed' yet), or the date range is empty. "
+                       "Try removing one filter in the chat panel (e.g. drop the project or the status).")
+    return out
 
 
 @app.post("/api/report/preview")

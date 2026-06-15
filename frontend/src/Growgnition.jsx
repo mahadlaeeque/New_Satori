@@ -4063,8 +4063,9 @@ const ReportPreview = ({ config, configRev, onConfigChange, onSaveMeta, isReadOn
           </table>
         )}
         {!loading && !error && (!data.columns?.length || !data.rows?.length) && (
-          <div style={{ textAlign: "center", padding: 60, color: COLORS.textSecondary, fontSize: 13 }}>
-            No data returned. Adjust filters in the chat panel.
+          <div style={{ textAlign: "center", padding: "48px 32px", color: COLORS.textSecondary, fontSize: 13, maxWidth: 560, margin: "0 auto", lineHeight: 1.6 }}>
+            <div style={{ fontWeight: 700, color: COLORS.textPrimary, marginBottom: 6 }}>No rows matched</div>
+            {data.note || "No data returned — try loosening the filters in the chat panel."}
           </div>
         )}
       </div>
