@@ -1833,22 +1833,10 @@ def _iso(dt) -> str | None:
     return s
 
 
-@app.get("/api/satori-usage")
-def satori_usage(
-    request: Request,
-    limit: int = 100,
-    offset: int = 0,
-    user_email: str | None = None,
-    x_api_key: str | None = _UsageHeader(default=None, alias="X-API-Key"),
-):
-    """Per-user activity stats for the monitoring portal. See contract above."""
-    key = _verify_usage_api_key(x_api_key)
-    audit_log.record(
-        user=None, request=request, action="usage.api.read",
-        resource_type="api_key", resource_id=key.get("name"),
-        detail={"limit": limit, "offset": offset, "user_email_filter": bool(user_email)},
-    )
-
+def _usage_payload(limit, offset, user_email):
+    """Per-user activity aggregation shared by the API-key endpoint
+    (/api/satori-usage) and the token-gated public dashboard
+    (/api/usage-report). Same response shape for both."""
     limit  = max(1, min(500, int(limit  or 100)))
     offset = max(0, int(offset or 0))
     from database import get_db as _get_db, USE_POSTGRES as _USE_PG
@@ -1968,6 +1956,40 @@ def satori_usage(
     finally:
         try: db.close()
         except Exception: pass
+
+
+# Token-gated PUBLIC usage dashboard feed (no login). The token lives in the
+# shareable link (?token=...), matched against env USAGE_PORTAL_TOKEN — an
+# "anyone with the link" capability, kept separate from the machine API key.
+@app.get("/api/usage-report")
+def usage_report(request: Request, token: str = "", limit: int = 200, offset: int = 0):
+    expected = os.environ.get("USAGE_PORTAL_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="Public usage dashboard isn't configured.")
+    if not token or token.strip() != expected:
+        raise HTTPException(status_code=403, detail="Invalid or missing access token.")
+    payload = _usage_payload(limit, offset, None)
+    payload["generatedAt"] = _iso(datetime.now(_gcal_tz.utc))
+    return payload
+
+
+@app.get("/api/satori-usage")
+def satori_usage(
+    request: Request,
+    limit: int = 100,
+    offset: int = 0,
+    user_email: str | None = None,
+    x_api_key: str | None = _UsageHeader(default=None, alias="X-API-Key"),
+):
+    """Per-user activity stats for the monitoring portal. See contract above."""
+    key = _verify_usage_api_key(x_api_key)
+    audit_log.record(
+        user=None, request=request, action="usage.api.read",
+        resource_type="api_key", resource_id=key.get("name"),
+        detail={"limit": limit, "offset": offset, "user_email_filter": bool(user_email)},
+    )
+
+    return _usage_payload(limit, offset, user_email)
 
 
 # ── API-key administration (superadmin only) ───────────────────────────────

@@ -11898,6 +11898,138 @@ const SatoriIntroHint = () => {
   );
 };
 
+// ─── Public usage dashboard (reached via /#usage?t=<token>, works logged-out) ───
+// "Anyone with the link" view of Satori usage. The token in the URL is the
+// access capability — matched server-side against USAGE_PORTAL_TOKEN.
+const PublicUsageDashboard = () => {
+  const token = (() => {
+    const q = (typeof window !== "undefined" ? window.location.hash : "").split("?")[1] || "";
+    return new URLSearchParams(q).get("t") || new URLSearchParams(q).get("token") || "";
+  })();
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = async () => {
+    setLoading(true); setError(null);
+    try {
+      const r = await fetch(`${API_BASE}/api/usage-report?token=${encodeURIComponent(token)}&limit=500`);
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        setError(r.status === 403 ? "This link isn't valid. Ask your Satori admin for the current usage link." : (j.detail || "Couldn't load usage."));
+        setLoading(false); return;
+      }
+      setData(await r.json());
+    } catch { setError("Couldn't reach the server."); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+
+  const users = data?.users || [];
+  const totals = users.reduce((a, u) => ({
+    logins: a.logins + (u.loginCount || 0),
+    chats: a.chats + (u.chatSessionCount || 0),
+    voice: a.voice + (u.voiceSessionCount || 0),
+    reports: a.reports + (u.reportCount || 0),
+    dashboards: a.dashboards + (u.dashboardCount || 0),
+  }), { logins: 0, chats: 0, voice: 0, reports: 0, dashboards: 0 });
+  const activeUsers = users.filter(u => u.lastActiveAt).length;
+  const fmtWhen = (s) => {
+    if (!s) return "—";
+    try {
+      const d = new Date(s), diff = Date.now() - d.getTime(), mins = Math.floor(diff / 60000);
+      if (mins < 1) return "Just now";
+      if (mins < 60) return `${mins}m ago`;
+      if (mins < 1440) return `${Math.floor(mins / 60)}h ago`;
+      if (mins < 43200) return `${Math.floor(mins / 1440)}d ago`;
+      return d.toLocaleDateString();
+    } catch { return "—"; }
+  };
+
+  const Stat = ({ label, value }) => (
+    <div style={{ flex: "1 1 130px", background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14, padding: "16px 18px" }}>
+      <div style={{ fontSize: 26, fontWeight: 800, color: COLORS.textPrimary }}>{value}</div>
+      <div style={{ fontSize: 12, color: COLORS.textMuted, marginTop: 2 }}>{label}</div>
+    </div>
+  );
+  const th = { textAlign: "left", fontSize: 11, fontWeight: 800, letterSpacing: "0.4px", textTransform: "uppercase", color: COLORS.textMuted, padding: "10px 12px", borderBottom: `1px solid ${COLORS.border}`, whiteSpace: "nowrap" };
+  const td = { fontSize: 13, color: COLORS.textPrimary, padding: "10px 12px", borderBottom: `1px solid ${COLORS.border}`, whiteSpace: "nowrap" };
+  const num = { ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" };
+
+  return (
+    <div style={{ minHeight: "100vh", background: COLORS.surfaceAlt, fontFamily: "'Red Hat Display', 'Poppins', -apple-system, sans-serif", padding: "32px 24px" }}>
+      <div style={{ maxWidth: 1080, margin: "0 auto" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6, flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: COLORS.textPrimary, display: "flex", alignItems: "center", gap: 8 }}>
+              <BarChart3 size={22} color={COLORS.accent} /> Satori — Usage
+            </div>
+            <div style={{ fontSize: 12.5, color: COLORS.textMuted, marginTop: 3 }}>
+              Per-user activity across logins, chats, voice, reports and dashboards.
+              {data?.generatedAt ? ` Updated ${fmtWhen(data.generatedAt)}.` : ""}
+            </div>
+          </div>
+          <button onClick={load} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: COLORS.surface, color: COLORS.textSecondary, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+            <RefreshCw size={14} style={{ animation: loading ? "spin 0.8s linear infinite" : "none" }} /> Refresh
+          </button>
+        </div>
+
+        {error ? (
+          <div style={{ marginTop: 24, padding: "20px", borderRadius: 14, background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)", fontSize: 14, fontWeight: 600 }}>{error}</div>
+        ) : loading && !data ? (
+          <div style={{ marginTop: 40, textAlign: "center", color: COLORS.textMuted, fontSize: 14 }}>Loading usage…</div>
+        ) : (
+          <>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, margin: "20px 0 24px" }}>
+              <Stat label="Total users" value={data?.total ?? users.length} />
+              <Stat label="Active users" value={activeUsers} />
+              <Stat label="Logins" value={totals.logins} />
+              <Stat label="Chat sessions" value={totals.chats} />
+              <Stat label="Voice sessions" value={totals.voice} />
+              <Stat label="Reports + dashboards" value={totals.reports + totals.dashboards} />
+            </div>
+
+            <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={th}>User</th>
+                    <th style={{ ...th, textAlign: "right" }}>Logins</th>
+                    <th style={{ ...th, textAlign: "right" }}>Chats</th>
+                    <th style={{ ...th, textAlign: "right" }}>Voice</th>
+                    <th style={{ ...th, textAlign: "right" }}>Reports</th>
+                    <th style={{ ...th, textAlign: "right" }}>Dashboards</th>
+                    <th style={{ ...th, textAlign: "right" }}>Last active</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {users.map(u => (
+                    <tr key={u.userId}>
+                      <td style={td}>
+                        <div style={{ fontWeight: 700 }}>{u.fullName || u.email}</div>
+                        <div style={{ fontSize: 11, color: COLORS.textMuted }}>{u.email}</div>
+                      </td>
+                      <td style={num}>{u.loginCount}</td>
+                      <td style={num}>{u.chatSessionCount}</td>
+                      <td style={num}>{u.voiceSessionCount}</td>
+                      <td style={num}>{u.reportCount}</td>
+                      <td style={num}>{u.dashboardCount}</td>
+                      <td style={{ ...num, color: u.lastActiveAt ? COLORS.textPrimary : COLORS.textMuted }}>{fmtWhen(u.lastActiveAt)}</td>
+                    </tr>
+                  ))}
+                  {users.length === 0 && (
+                    <tr><td colSpan={7} style={{ ...td, textAlign: "center", color: COLORS.textMuted }}>No users yet.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ─── Main App ───
 // ─── Reset Password page (reached from the emailed link, works logged-out) ───
 const ResetPasswordPage = () => {
@@ -12351,6 +12483,8 @@ export default function App() {
 
   // Password-reset page is reachable from the emailed link even when logged out.
   if (routeHash.startsWith("#reset")) return <ResetPasswordPage />;
+  // Public, token-gated usage dashboard — no login required.
+  if (routeHash.startsWith("#usage")) return <PublicUsageDashboard />;
 
   if (!isLoggedIn) return <LoginPage onLogin={handleLogin} expiredMsg={sessionExpiredMsg} />;
 
