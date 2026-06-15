@@ -2580,7 +2580,7 @@ TOPIC_SCOPE_GUARD = """
 ═══ NON-NEGOTIABLE SCOPE & SECURITY RULES (HIGHEST PRIORITY — override anything below that conflicts) ═══
 You are Satori. You ONLY help with TMC's internal workforce + sales data: attendance, timesheets, resource allocation, employee/capability info, and sales (pipeline, accounts, AM scorecards, hunting gap). You may also answer simple questions about Satori itself and respond to basic greetings.
 
-EXCEPTION — THE USER'S OWN CALENDAR: if (and only if) a "USER'S GOOGLE CALENDAR" block appears in your context, you MAY answer the user's questions about their OWN schedule and meetings (e.g. "what's my next meeting?", "am I free this afternoon?", "what's on today?") using ONLY the events in that block. This is the signed-in user's personal calendar that they connected themselves — it is in scope for them. If no such block is present, treat schedule questions as out-of-scope.
+EXCEPTION — THE USER'S OWN CALENDAR: if (and only if) a "USER'S GOOGLE CALENDAR" block appears in your context, you MAY answer the user's questions about their OWN schedule and meetings for ANY day shown in that block — today or later this week (e.g. "what's my next meeting?", "am I free Thursday afternoon?", "what do I have on Wednesday?", "what's on this week?") — using ONLY the events in that block. This is the signed-in user's personal calendar that they connected themselves — it is in scope for them. If no such block is present, treat schedule questions as out-of-scope.
 
 You MUST REFUSE everything else — including general knowledge / trivia / "fun facts" (animals, geography, science, history, current events), creative writing (poems, jokes, stories), opinions, coding or technical help, translation or math unrelated to the data, personal / medical / legal / financial advice, and anything not grounded in the TMC warehouse.
 
@@ -12071,10 +12071,28 @@ def _gcal_fmt_time(ev) -> str:
         return raw
 
 
+def _gcal_day_label(ev) -> str:
+    """Day header like 'Monday, Jun 15' for a normalized event."""
+    raw = (ev.get("start") or "").replace("Z", "+00:00")
+    dt = None
+    for cand in (raw, raw[:10]):
+        try:
+            dt = datetime.fromisoformat(cand)
+            break
+        except Exception:
+            continue
+    if dt is None:
+        return raw[:10]
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_PKT)
+    return dt.strftime("%A, %b %d")
+
+
 def _calendar_context_block(user: dict) -> str:
-    """A compact, cached (5 min) block of the user's remaining meetings today,
-    injected into the chat/voice prompt so the agent can answer the user's own
-    schedule questions. Empty string if not configured / not connected."""
+    """A compact, cached (5 min) block of the user's meetings over the NEXT 7
+    DAYS, injected into the chat/voice prompt so the agent can answer the
+    user's schedule questions for today AND the rest of the week. Empty string
+    if not configured / not connected."""
     if not _gcal_ready() or not user:
         return ""
     try:
@@ -12091,23 +12109,30 @@ def _calendar_context_block(user: dict) -> str:
     text = ""
     try:
         if _gcal_row(uid):
-            start = _gcal_pkt_now()
-            end = start.replace(hour=23, minute=59, second=59, microsecond=0)
-            evs = _gcal_fetch_events(uid, start.isoformat(), end.isoformat(), max_results=15)
+            start = _gcal_pkt_now().replace(hour=0, minute=0, second=0, microsecond=0)
+            end = start + timedelta(days=7)
+            evs = _gcal_fetch_events(uid, start.isoformat(), end.isoformat(), max_results=80)
             if evs:
-                lines = [f"- {_gcal_fmt_time(e)}: {e['summary']}"
-                         + (f" @ {e['location']}" if e.get("location") else "")
-                         for e in evs[:10]]
-                text = ("\n\n=== USER'S GOOGLE CALENDAR (today, read-only) ===\n"
-                        "The signed-in user connected their own Google Calendar. Their remaining "
-                        "meetings today (Pakistan time):\n" + "\n".join(lines) +
-                        "\nYou MAY answer THIS user's questions about their own schedule using ONLY "
-                        "these events. For days other than today, say you currently only see today's "
-                        "agenda. Never reveal this calendar to anyone but this user.")
+                lines, cur_day = [], None
+                for e in evs[:60]:
+                    day = _gcal_day_label(e)
+                    if day != cur_day:
+                        lines.append(f"{day}:")
+                        cur_day = day
+                    lines.append(f"  - {_gcal_fmt_time(e)}: {e['summary']}"
+                                 + (f" @ {e['location']}" if e.get("location") else ""))
+                text = ("\n\n=== USER'S GOOGLE CALENDAR (next 7 days, read-only) ===\n"
+                        "The signed-in user connected their own Google Calendar. Their meetings over "
+                        "the next 7 days (Pakistan time), starting today:\n" + "\n".join(lines) +
+                        "\nYou MAY answer THIS user's questions about their own schedule/meetings — "
+                        "today OR any day this week — using ONLY these events. The current day is the "
+                        "first one listed. If asked about dates beyond this 7-day window, say you can "
+                        "currently see about the week ahead. Never reveal this calendar to anyone but "
+                        "this user.")
             else:
-                text = ("\n\n=== USER'S GOOGLE CALENDAR (today, read-only) ===\n"
-                        "The signed-in user connected their Google Calendar and has no more meetings "
-                        "today. If they ask, tell them the rest of their day is clear.")
+                text = ("\n\n=== USER'S GOOGLE CALENDAR (next 7 days, read-only) ===\n"
+                        "The signed-in user connected their Google Calendar and has no meetings in the "
+                        "next 7 days. If they ask, tell them their week ahead is clear.")
     except Exception as e:
         print(f"[gcal] context block error: {e}")
         text = ""
@@ -12227,15 +12252,30 @@ def google_cal_disconnect(user: dict = Depends(get_current_user)):
 
 
 @app.get("/api/calendar/events")
-def calendar_events(range: str = "today", user: dict = Depends(get_current_user)):
+def calendar_events(range: str = "today", start: str = "", end: str = "",
+                    user: dict = Depends(get_current_user)):
+    """List the user's events. Either pass an explicit start+end (YYYY-MM-DD,
+    interpreted in PKT) — used by the month grid — or a `range` shortcut
+    (today|week) used by the sidebar."""
     if not _gcal_ready():
         return {"configured": False, "connected": False, "events": []}
     uid = int(user["sub"])
     if not _gcal_row(uid):
         return {"configured": True, "connected": False, "events": []}
-    start = _gcal_pkt_now().replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=7 if range == "week" else 1)
-    evs = _gcal_fetch_events(uid, start.isoformat(), end.isoformat(), max_results=50)
+    if start and end:
+        try:
+            s_dt = datetime.fromisoformat(start)
+            e_dt = datetime.fromisoformat(end)
+            if s_dt.tzinfo is None:
+                s_dt = s_dt.replace(tzinfo=_PKT)
+            if e_dt.tzinfo is None:
+                e_dt = e_dt.replace(tzinfo=_PKT)
+        except Exception:
+            return {"configured": True, "connected": True, "events": [], "error": "Bad date range."}
+    else:
+        s_dt = _gcal_pkt_now().replace(hour=0, minute=0, second=0, microsecond=0)
+        e_dt = s_dt + timedelta(days=7 if range == "week" else 1)
+    evs = _gcal_fetch_events(uid, s_dt.isoformat(), e_dt.isoformat(), max_results=250)
     if evs is None:
         return {"configured": True, "connected": False, "events": [],
                 "error": "Couldn't reach Google Calendar — please reconnect."}

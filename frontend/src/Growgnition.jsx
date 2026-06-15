@@ -275,6 +275,9 @@ const ONBOARDING_STEPS = [
   { selector: '[data-tour="nav-dashboards"]', placement: "right", page: "dashboards", title: "Dashboard Builder",
     body: "Describe a dashboard and get live KPIs, charts and filters built from the warehouse. Click any chart to drill down, refine in chat, and share with your team.",
     narration: "Next, the Dashboard Builder. Describe what you want to monitor and I'll build live KPIs, charts and filters. Click any chart to drill into the detail behind it, refine it in chat, and share it with your team." },
+  { selector: '[data-tour="nav-calendar"]', placement: "right", page: "calendar", title: "Your Calendar",
+    body: "Connect your Google Calendar and Satori shows your meetings in a month view — and the AI can answer schedule questions like “what's my next meeting?” or “am I free Thursday?”. It's read-only, per person, and never shared.",
+    narration: "This is your Calendar. Connect your Google Calendar and I'll show your meetings in a month view — and you can ask me things like what's my next meeting, or am I free on Thursday. It's read-only, it's just yours, and I never share it." },
   { selector: '[data-tour="nav-availability"]', placement: "right", page: "availability", title: "Availability Engine",
     body: "Live capacity across the whole workforce: who's allocated, who's partial, who's on the bench — backed by the weekly allocation plan and real timesheets.",
     narration: "This is the Availability Engine — live capacity across the whole workforce. It shows who's fully allocated, who has spare capacity, and who's on the bench, using the weekly allocation plan cross-checked against real timesheets." },
@@ -2495,6 +2498,13 @@ const gcalEventTime = (ev) => {
 const gcalDayKey = (ev) => {
   try { return new Date(ev.start).toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" }); }
   catch { return ""; }
+};
+// Local YYYY-MM-DD key for bucketing an event into a calendar-grid cell.
+const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const gcalEventDateKey = (ev) => {
+  if (!ev) return "";
+  if (ev.all_day) return (ev.start || "").slice(0, 10);
+  try { return ymd(new Date(ev.start)); } catch { return ""; }
 };
 const authHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem("token")}` });
 
@@ -10280,10 +10290,18 @@ const CalendarPage = () => {
   const [status, setStatus] = useState(null);   // {configured, connected, google_email}
   const [loading, setLoading] = useState(true);
   const [events, setEvents] = useState([]);
-  const [range, setRange] = useState("today");   // "today" | "week"
+  const [viewDate, setViewDate] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
+  const [selectedKey, setSelectedKey] = useState(() => ymd(new Date()));
   const [evLoading, setEvLoading] = useState(false);
   const [banner, setBanner] = useState(null);     // {type:'ok'|'error', msg}
   const [busy, setBusy] = useState(false);
+
+  // Month grid spans the Monday before the 1st, six weeks (42 cells).
+  const monthStart = new Date(viewDate.getFullYear(), viewDate.getMonth(), 1);
+  const startOffset = (monthStart.getDay() + 6) % 7; // 0 = Monday
+  const gridStart = new Date(monthStart); gridStart.setDate(1 - startOffset);
+  const cells = Array.from({ length: 42 }, (_, i) => { const d = new Date(gridStart); d.setDate(gridStart.getDate() + i); return d; });
+  const gridEnd = new Date(gridStart); gridEnd.setDate(gridStart.getDate() + 42);
 
   const loadStatus = async () => {
     setLoading(true);
@@ -10294,10 +10312,10 @@ const CalendarPage = () => {
     finally { setLoading(false); }
   };
 
-  const loadEvents = async (rng) => {
+  const loadMonth = async () => {
     setEvLoading(true);
     try {
-      const r = await fetch(`${API_BASE}/api/calendar/events?range=${rng}`, { headers: authHeaders() });
+      const r = await fetch(`${API_BASE}/api/calendar/events?start=${ymd(gridStart)}&end=${ymd(gridEnd)}`, { headers: authHeaders() });
       const j = await r.json();
       if (j.connected) setEvents(j.events || []);
       else { setEvents([]); if (j.error) setBanner({ type: "error", msg: j.error }); }
@@ -10315,7 +10333,7 @@ const CalendarPage = () => {
     loadStatus();
   }, []);
 
-  useEffect(() => { if (status?.connected) loadEvents(range); /* eslint-disable-next-line */ }, [status?.connected, range]);
+  useEffect(() => { if (status?.connected) loadMonth(); /* eslint-disable-next-line */ }, [status?.connected, viewDate]);
 
   const connect = async () => {
     setBusy(true);
@@ -10339,15 +10357,20 @@ const CalendarPage = () => {
     finally { setBusy(false); }
   };
 
-  const now = Date.now();
-  // Group events by day for the week view; today view is a flat list.
-  const groups = [];
-  (events || []).forEach((e) => {
-    const key = gcalDayKey(e);
-    let g = groups.find(x => x.key === key);
-    if (!g) { g = { key, items: [] }; groups.push(g); }
-    g.items.push(e);
-  });
+  // Bucket events into day cells.
+  const byDay = {};
+  (events || []).forEach((e) => { const k = gcalEventDateKey(e); if (!k) return; (byDay[k] = byDay[k] || []).push(e); });
+  const todayKey = ymd(new Date());
+  const monthLabel = viewDate.toLocaleDateString([], { month: "long", year: "numeric" });
+  const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const selectedEvents = byDay[selectedKey] || [];
+  const prettySelected = (() => {
+    try { const [y, m, d] = selectedKey.split("-").map(Number); return new Date(y, m - 1, d).toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" }); }
+    catch { return selectedKey; }
+  })();
+
+  const navBtn = { padding: 7, borderRadius: 9, border: `1px solid ${COLORS.border}`, background: COLORS.surface, color: COLORS.textSecondary, cursor: "pointer", display: "flex" };
+  const pillBtn = { padding: "6px 14px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, cursor: "pointer", border: `1px solid ${COLORS.border}`, background: COLORS.surface, color: COLORS.textSecondary };
 
   const Banner = () => banner && (
     <div style={{
@@ -10362,8 +10385,28 @@ const CalendarPage = () => {
     </div>
   );
 
+  const EventRow = ({ e }) => {
+    const past = !e.all_day && new Date(e.end || e.start).getTime() < Date.now();
+    return (
+      <div style={{ display: "flex", gap: 14, padding: "12px 16px", borderRadius: 12, background: COLORS.surface, border: `1px solid ${COLORS.border}`, opacity: past ? 0.55 : 1 }}>
+        <div style={{ minWidth: 74, textAlign: "right", flexShrink: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: COLORS.accent }}>{gcalEventTime(e)}</div>
+        </div>
+        <div style={{ width: 1, background: COLORS.border, alignSelf: "stretch" }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.textPrimary }}>{e.summary}</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 14, marginTop: 4, fontSize: 11.5, color: COLORS.textMuted }}>
+            {e.location && <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Globe size={11} /> {e.location}</span>}
+            {e.attendees > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Users size={11} /> {e.attendees}</span>}
+            {e.meet_link && <a href={e.meet_link} target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 4, color: COLORS.accent, fontWeight: 700, textDecoration: "none" }}><LinkIcon size={11} /> Join</a>}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   return (
-    <div style={{ maxWidth: 820, margin: "0 auto" }}>
+    <div style={{ maxWidth: 1040, margin: "0 auto" }}>
       <Banner />
 
       {/* Connection header card */}
@@ -10399,68 +10442,85 @@ const CalendarPage = () => {
         </div>
         {status?.connected && (
           <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 12 }}>
-            Satori reads your events to show your schedule and answer questions like “what's my next meeting?”. It never edits or shares your calendar.
+            Satori reads your events to show your schedule and answer questions like “what's my next meeting?” or “am I free Thursday?”. It never edits or shares your calendar.
           </div>
         )}
       </div>
 
-      {/* Events */}
+      {/* Month calendar */}
       {status?.connected && (
         <>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-            {[{ k: "today", l: "Today" }, { k: "week", l: "This week" }].map(t => (
-              <button key={t.k} onClick={() => setRange(t.k)} style={{
-                padding: "6px 14px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
-                border: `1px solid ${range === t.k ? COLORS.accent : COLORS.border}`,
-                background: range === t.k ? `${COLORS.accent}15` : COLORS.surface,
-                color: range === t.k ? COLORS.accent : COLORS.textMuted,
-              }}>{t.l}</button>
-            ))}
-            <button onClick={() => loadEvents(range)} title="Refresh" style={{
-              marginLeft: "auto", padding: 8, borderRadius: 9, border: `1px solid ${COLORS.border}`,
-              background: COLORS.surface, color: COLORS.textMuted, cursor: "pointer", display: "flex",
-            }}><RefreshCw size={14} style={{ animation: evLoading ? "spin 0.8s linear infinite" : "none" }} /></button>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+            <div style={{ fontSize: 18, fontWeight: 800, color: COLORS.textPrimary, minWidth: 168 }}>{monthLabel}</div>
+            <div style={{ display: "flex", gap: 5 }}>
+              <button onClick={() => setViewDate(d => new Date(d.getFullYear(), d.getMonth() - 1, 1))} title="Previous month" style={navBtn}><ChevronLeft size={16} /></button>
+              <button onClick={() => setViewDate(d => new Date(d.getFullYear(), d.getMonth() + 1, 1))} title="Next month" style={navBtn}><ChevronRight size={16} /></button>
+            </div>
+            <button onClick={() => { const t = new Date(); setViewDate(new Date(t.getFullYear(), t.getMonth(), 1)); setSelectedKey(ymd(t)); }} style={pillBtn}>Today</button>
+            <button onClick={loadMonth} title="Refresh" style={{ marginLeft: "auto", ...navBtn }}><RefreshCw size={14} style={{ animation: evLoading ? "spin 0.8s linear infinite" : "none" }} /></button>
           </div>
 
-          {evLoading && events.length === 0 ? (
-            <div style={{ fontSize: 13, color: COLORS.textMuted, padding: "24px 0", textAlign: "center" }}>Loading your meetings…</div>
-          ) : events.length === 0 ? (
-            <div style={{ fontSize: 13, color: COLORS.textMuted, padding: "32px 0", textAlign: "center", background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14 }}>
-              {range === "today" ? "No meetings on your calendar today. 🎉" : "No meetings this week."}
-            </div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-              {groups.map((g) => (
-                <div key={g.key}>
-                  <div style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: "0.4px", textTransform: "uppercase", color: COLORS.textMuted, marginBottom: 8 }}>{g.key}</div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {g.items.map((e) => {
-                      const past = !e.all_day && new Date(e.end || e.start).getTime() < now;
-                      return (
-                        <div key={e.id} style={{
-                          display: "flex", gap: 14, padding: "12px 16px", borderRadius: 12,
-                          background: COLORS.surface, border: `1px solid ${COLORS.border}`, opacity: past ? 0.55 : 1,
-                        }}>
-                          <div style={{ minWidth: 74, textAlign: "right", flexShrink: 0 }}>
-                            <div style={{ fontSize: 13, fontWeight: 800, color: COLORS.accent }}>{gcalEventTime(e)}</div>
-                          </div>
-                          <div style={{ width: 1, background: COLORS.border, alignSelf: "stretch" }} />
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.textPrimary }}>{e.summary}</div>
-                            <div style={{ display: "flex", flexWrap: "wrap", gap: 14, marginTop: 4, fontSize: 11.5, color: COLORS.textMuted }}>
-                              {e.location && <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Globe size={11} /> {e.location}</span>}
-                              {e.attendees > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Users size={11} /> {e.attendees}</span>}
-                              {e.meet_link && <a href={e.meet_link} target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 4, color: COLORS.accent, fontWeight: 700, textDecoration: "none" }}><LinkIcon size={11} /> Join</a>}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
+          <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "hidden" }}>
+            {/* Weekday header */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", borderBottom: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt }}>
+              {WEEKDAYS.map(w => (
+                <div key={w} style={{ padding: "8px 10px", fontSize: 11, fontWeight: 800, letterSpacing: "0.5px", textTransform: "uppercase", color: COLORS.textMuted }}>{w}</div>
               ))}
             </div>
-          )}
+            {/* Day cells */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)" }}>
+              {cells.map((d, i) => {
+                const k = ymd(d);
+                const inMonth = d.getMonth() === viewDate.getMonth();
+                const isToday = k === todayKey;
+                const isSel = k === selectedKey;
+                const dayEvents = byDay[k] || [];
+                return (
+                  <div key={k} onClick={() => setSelectedKey(k)} style={{
+                    minHeight: 98, padding: 6, cursor: "pointer",
+                    borderRight: (i % 7 !== 6) ? `1px solid ${COLORS.border}` : "none",
+                    borderBottom: i < 35 ? `1px solid ${COLORS.border}` : "none",
+                    background: isSel ? `${COLORS.accent}12` : "transparent",
+                    opacity: inMonth ? 1 : 0.4, transition: "background 0.12s",
+                  }}>
+                    <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}>
+                      <span style={{
+                        fontSize: 11.5, fontWeight: 700, width: 22, height: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: "50%",
+                        background: isToday ? COLORS.accent : "transparent", color: isToday ? "#fff" : COLORS.textSecondary,
+                      }}>{d.getDate()}</span>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                      {dayEvents.slice(0, 3).map(e => (
+                        <div key={e.id} title={e.summary} style={{
+                          fontSize: 10, fontWeight: 600, padding: "2px 5px", borderRadius: 5,
+                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                          background: e.all_day ? `${COLORS.accent}22` : "transparent",
+                          color: e.all_day ? COLORS.accentDark : COLORS.textPrimary,
+                        }}>
+                          {e.all_day ? e.summary : <><span style={{ color: COLORS.accent, fontWeight: 700 }}>{gcalEventTime(e)}</span> {e.summary}</>}
+                        </div>
+                      ))}
+                      {dayEvents.length > 3 && <div style={{ fontSize: 9.5, color: COLORS.textMuted, paddingLeft: 5 }}>+{dayEvents.length - 3} more</div>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Selected-day detail */}
+          <div style={{ marginTop: 20 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 800, color: COLORS.textPrimary, marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>
+              <Calendar size={14} color={COLORS.accent} /> {prettySelected}
+            </div>
+            {selectedEvents.length === 0 ? (
+              <div style={{ fontSize: 13, color: COLORS.textMuted, padding: "16px 0" }}>No meetings on this day.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {selectedEvents.map(e => <EventRow key={e.id} e={e} />)}
+              </div>
+            )}
+          </div>
         </>
       )}
     </div>
