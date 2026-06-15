@@ -2239,16 +2239,59 @@ const INSIGHT_SEV = {
 };
 
 const BriefingPlayer = ({ onClose }) => {
-  const [phase, setPhase] = useState("loading"); // loading | speaking | done | error
+  const [phase, setPhase] = useState("loading"); // loading | speaking | paused | done | error
   const [script, setScript] = useState("");
   const [err, setErr] = useState(null);
   const [level, setLevel] = useState(0);
-  const audioRef = useRef(null);
+  const [voiceReady, setVoiceReady] = useState(false); // TTS audio fetched & ready
+  // Voice preference persists across sessions — the user can mute the spoken
+  // briefing for good and we'll just show the text.
+  const [voiceOn, setVoiceOn] = useState(() => {
+    try { return localStorage.getItem("satoriBriefingVoice") !== "off"; } catch { return true; }
+  });
+  const audioRef = useRef(null);   // <audio> element playing the TTS clip
+  const ttsRef = useRef(null);     // cached data: URL from /api/tts (replay without re-fetching)
   const lvlTimer = useRef(null);
+  const voiceOnRef = useRef(voiceOn);
+  voiceOnRef.current = voiceOn;
 
+  // Drive the avatar's mouth/level meter while the voice is talking.
+  const startLevels = () => {
+    if (lvlTimer.current) clearInterval(lvlTimer.current);
+    lvlTimer.current = setInterval(() => setLevel(0.35 + Math.random() * 0.45), 130);
+  };
+  const stopLevels = () => {
+    if (lvlTimer.current) { clearInterval(lvlTimer.current); lvlTimer.current = null; }
+    setLevel(0);
+  };
+
+  // Halt playback + the level meter. Safe to call repeatedly.
   const stop = () => {
     if (audioRef.current) { try { audioRef.current.pause(); } catch { /* noop */ } audioRef.current = null; }
-    if (lvlTimer.current) { clearInterval(lvlTimer.current); lvlTimer.current = null; }
+    stopLevels();
+  };
+
+  // Start (or restart) reading the briefing aloud from the cached TTS clip.
+  const begin = () => {
+    if (!ttsRef.current) return; // voice not ready yet — will auto-play once it arrives
+    stop();
+    const audio = new Audio(ttsRef.current);
+    audioRef.current = audio;
+    audio.onended = () => { audioRef.current = null; stopLevels(); setPhase("done"); };
+    audio.onerror = () => { audioRef.current = null; stopLevels(); setPhase("done"); };
+    startLevels();
+    setPhase("speaking");
+    audio.play().catch(() => { stopLevels(); setPhase("done"); });
+  };
+
+  const toggleVoice = () => {
+    setVoiceOn(on => {
+      const next = !on;
+      try { localStorage.setItem("satoriBriefingVoice", next ? "on" : "off"); } catch { /* noop */ }
+      if (next) begin();          // play now if ready; otherwise auto-plays when TTS arrives
+      else { stop(); setPhase("done"); }
+      return next;
+    });
   };
 
   useEffect(() => {
@@ -2259,52 +2302,131 @@ const BriefingPlayer = ({ onClose }) => {
         const b = await fetch(`${API_BASE}/api/briefing`, { headers })
           .then(r => { if (!r.ok) throw new Error("Couldn't prepare the briefing."); return r.json(); });
         if (cancelled) return;
+        // Show the text immediately; the voice clip can take a moment to warm up.
         setScript(b.script || "");
+        setPhase("done");
         const t = await fetch(`${API_BASE}/api/tts`, { method: "POST", headers, body: JSON.stringify({ text: b.script }) })
           .then(r => { if (!r.ok) throw new Error("Voice is unavailable right now — here's the text instead."); return r.json(); });
         if (cancelled) return;
-        const audio = new Audio(`data:${t.mime || "audio/wav"};base64,${t.audio}`);
-        audioRef.current = audio;
-        audio.onended = () => { if (!cancelled) { setPhase("done"); setLevel(0); stop(); } };
-        setPhase("speaking");
-        lvlTimer.current = setInterval(() => setLevel(0.35 + Math.random() * 0.45), 130);
-        audio.play().catch(() => { if (!cancelled) setPhase("done"); });
+        if (t && t.audio) {
+          ttsRef.current = `data:${t.mime || "audio/wav"};base64,${t.audio}`;
+          setVoiceReady(true);
+          if (voiceOnRef.current) begin(); // auto-start reading aloud
+        }
       } catch (e) {
-        if (!cancelled) { setErr(String(e.message || e)); setPhase(script ? "done" : "error"); }
+        if (!cancelled) {
+          // No script at all → hard error; script but no voice → show text + note.
+          setErr(String(e.message || e));
+          setPhase(prev => (prev === "loading" ? "error" : "done"));
+        }
       }
     })();
     return () => { cancelled = true; stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const ghostBtn = {
+    display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 11,
+    border: `1px solid ${COLORS.border}`, background: "transparent", color: COLORS.textSecondary,
+    fontWeight: 700, fontSize: 13, cursor: "pointer",
+  };
+  const primaryBtn = {
+    padding: "9px 22px", borderRadius: 11, border: "none",
+    background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentDark})`,
+    color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer",
+    boxShadow: `0 6px 16px ${COLORS.accent}55`,
+  };
+  const voiceLoading = voiceOn && !voiceReady && phase !== "error";
+  const canReplay = voiceReady && phase !== "loading" && phase !== "error";
+
   return (
     <div onClick={() => { stop(); onClose(); }} style={{
-      position: "fixed", inset: 0, zIndex: 1500, background: "rgba(15,23,42,0.6)",
+      position: "fixed", inset: 0, zIndex: 1500, background: "rgba(15,23,42,0.55)",
+      backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)",
       display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
+      animation: "fadeIn 0.25s ease",
     }}>
       <div onClick={e => e.stopPropagation()} style={{
-        background: COLORS.surface, borderRadius: 18, maxWidth: 520, width: "100%",
-        padding: 28, textAlign: "center", boxShadow: "0 24px 60px rgba(0,0,0,0.3)",
+        position: "relative", width: "100%", maxWidth: 468, borderRadius: 24, overflow: "hidden",
+        background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+        boxShadow: "0 32px 80px rgba(0,0,0,0.45)",
       }}>
-        <div style={{ display: "inline-flex", marginBottom: 14 }}>
-          <SatoriAvatar state={phase === "loading" ? "greeting" : phase === "speaking" ? "speaking" : "idle"} audioLevel={level} size={170} />
-        </div>
-        <div style={{ fontSize: 16, fontWeight: 800, color: COLORS.textPrimary, marginBottom: 8 }}>
-          {phase === "loading" ? "Preparing your briefing…" : phase === "error" ? "Briefing unavailable" : "Today's briefing"}
-        </div>
-        {phase === "error" ? (
-          <div style={{ fontSize: 13, color: "var(--sem-danger-fg)" }}>{err}</div>
-        ) : (
-          <div style={{ fontSize: 13, lineHeight: 1.65, color: COLORS.textSecondary, maxHeight: 190, overflowY: "auto", textAlign: "left", padding: "0 6px" }}>
-            {script || "…"}
+        {/* Gradient hero header */}
+        <div style={{
+          position: "relative", padding: "26px 22px 18px", textAlign: "center",
+          background: `linear-gradient(165deg, ${COLORS.accent}26 0%, ${COLORS.purple}1f 55%, transparent 100%)`,
+        }}>
+          <div style={{
+            position: "absolute", top: 16, left: 18, display: "inline-flex", alignItems: "center", gap: 6,
+            fontSize: 11, fontWeight: 800, letterSpacing: "0.7px", textTransform: "uppercase", color: COLORS.accent,
+          }}>
+            <Sparkles size={13} /> Satori
           </div>
-        )}
-        {phase === "done" && err && <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 8 }}>{err}</div>}
-        <div style={{ marginTop: 18 }}>
-          <button onClick={() => { stop(); onClose(); }} style={{
-            padding: "9px 22px", borderRadius: 10, border: "none", background: COLORS.accent,
-            color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer",
-          }}>Close</button>
+
+          {/* Voice on/off toggle — persists across sessions; shows live status */}
+          <button onClick={toggleVoice} title={voiceOn ? "Turn the spoken briefing off" : "Turn the spoken briefing on"} style={{
+            position: "absolute", top: 12, right: 14, display: "inline-flex", alignItems: "center", gap: 6,
+            padding: "6px 11px", borderRadius: 999, cursor: "pointer", fontSize: 11, fontWeight: 700,
+            border: `1px solid ${voiceOn ? COLORS.accent : COLORS.border}`,
+            background: voiceOn ? `${COLORS.accent}1f` : "transparent",
+            color: voiceOn ? COLORS.accent : COLORS.textMuted, transition: "all 0.15s",
+          }}>
+            {!voiceOn ? <VolumeX size={14} />
+              : voiceLoading ? <RefreshCw size={13} style={{ animation: "spin 0.9s linear infinite" }} />
+              : <Volume2 size={14} />}
+            {!voiceOn ? "Voice off" : voiceLoading ? "Loading voice…" : "Voice on"}
+          </button>
+
+          {/* Avatar with pulsing glow ring while speaking */}
+          <div style={{ display: "inline-flex", position: "relative", marginTop: 20 }}>
+            {phase === "speaking" && (
+              <div style={{
+                position: "absolute", inset: -10, borderRadius: "50%",
+                border: `2px solid ${COLORS.accent}`, opacity: 0.45,
+                animation: "pulse 1.8s ease-in-out infinite",
+              }} />
+            )}
+            <SatoriAvatar state={phase === "loading" ? "greeting" : phase === "speaking" ? "speaking" : "idle"} audioLevel={level} size={150} />
+          </div>
+
+          <div style={{ fontSize: 17, fontWeight: 800, color: COLORS.textPrimary, marginTop: 12 }}>
+            {phase === "loading" ? "Preparing your briefing…" : phase === "error" ? "Briefing unavailable" : "Today's briefing"}
+          </div>
+
+          {/* Live waveform while the voice is talking */}
+          {phase === "speaking" && (
+            <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "center", gap: 3, height: 18, marginTop: 9 }}>
+              {Array.from({ length: 18 }, (_, i) => (
+                <div key={i} style={{
+                  width: 2.5, borderRadius: 2, background: COLORS.accent, opacity: 0.75,
+                  animation: "wave 1s infinite ease-in-out", animationDelay: `${i * 0.05}s`,
+                  height: `${5 + ((i * 7) % 14)}px`,
+                }} />
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Body — the briefing text */}
+        <div style={{ padding: "2px 24px 0" }}>
+          {phase === "error" ? (
+            <div style={{ fontSize: 13, color: "var(--sem-danger-fg)", textAlign: "center", padding: "8px 0 4px" }}>{err}</div>
+          ) : (
+            <div style={{ fontSize: 13.5, lineHeight: 1.7, color: COLORS.textSecondary, maxHeight: 200, overflowY: "auto", textAlign: "left", padding: "2px 2px 4px" }}>
+              {script || (phase === "loading" ? "" : "…")}
+            </div>
+          )}
+          {phase === "done" && err && <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 8, textAlign: "center" }}>{err}</div>}
+        </div>
+
+        {/* Footer controls */}
+        <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "flex-end", padding: "18px 24px 22px" }}>
+          {phase === "speaking" ? (
+            <button onClick={() => { stop(); setPhase("paused"); }} style={ghostBtn}><Pause size={14} /> Pause</button>
+          ) : voiceOn && canReplay ? (
+            <button onClick={begin} style={ghostBtn}><Play size={14} /> {phase === "paused" ? "Resume" : "Replay"}</button>
+          ) : null}
+          <button onClick={() => { stop(); onClose(); }} style={primaryBtn}>Close</button>
         </div>
       </div>
     </div>
