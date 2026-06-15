@@ -100,6 +100,7 @@ def init_db():
     _migrate_reset_passwords_to_welcome()
     _migrate_finalize_tmc_superadmin()
     _migrate_add_api_keys()
+    _migrate_add_google_calendar()
 
 
 def _migrate_rename_polypack_to_ffc():
@@ -255,6 +256,47 @@ def _migrate_add_governance_tables():
         print("[DB] Migration: governance tables present (data_access_log, user_settings)")
     except Exception as e:
         print(f"[DB] Governance migration error (safe to ignore on fresh DB): {e}")
+
+
+def _migrate_add_google_calendar():
+    """Idempotent migration: per-user Google Calendar OAuth tokens. One row per
+    user; refresh_token is the long-lived credential, access_token/token_expiry
+    are the short-lived cache we refresh on demand. Read-only scope. Safe to
+    re-run on both SQLite and Postgres."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        if USE_POSTGRES:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_google_tokens (
+                    user_id       INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    refresh_token TEXT,
+                    access_token  TEXT,
+                    token_expiry  TEXT,
+                    google_email  TEXT,
+                    scope         TEXT,
+                    connected_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        else:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_google_tokens (
+                    user_id       INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    refresh_token TEXT,
+                    access_token  TEXT,
+                    token_expiry  TEXT,
+                    google_email  TEXT,
+                    scope         TEXT,
+                    connected_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        conn.commit()
+        conn.close()
+        print("[DB] Migration: user_google_tokens table present")
+    except Exception as e:
+        print(f"[DB] Google Calendar migration error (safe to ignore on fresh DB): {e}")
 
 
 def _migrate_add_data_scope_tables():

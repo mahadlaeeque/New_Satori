@@ -2482,6 +2482,78 @@ const BriefingCard = () => {
   );
 };
 
+// ─── Google Calendar helpers (shared by the sidebar card + Calendar page) ───
+const gcalEventTime = (ev) => {
+  if (!ev) return "";
+  if (ev.all_day) return "All day";
+  try {
+    const d = new Date(ev.start);
+    if (isNaN(d.getTime())) return "";
+    return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  } catch { return ""; }
+};
+const gcalDayKey = (ev) => {
+  try { return new Date(ev.start).toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" }); }
+  catch { return ""; }
+};
+const authHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem("token")}` });
+
+// Compact "Today" card in the agent right rail — only renders once the user
+// has connected their Google Calendar (silent otherwise, so it never nags).
+const TodayMeetingsCard = () => {
+  const [events, setEvents] = useState(null); // null = loading/unknown, [] = none
+  const [connected, setConnected] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/calendar/events?range=today`, { headers: authHeaders() });
+        if (!r.ok) return;
+        const j = await r.json();
+        if (cancelled) return;
+        setConnected(!!j.connected);
+        if (j.connected) setEvents(j.events || []);
+      } catch { /* additive — never break the page */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  if (!connected) return null; // not connected → show nothing here (Calendar page handles connecting)
+
+  const now = Date.now();
+  const upcoming = (events || []).filter(e => e.all_day || new Date(e.end || e.start).getTime() >= now).slice(0, 4);
+
+  return (
+    <div style={{ padding: "16px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+        <Calendar size={14} color={COLORS.accent} /> Today
+      </div>
+      {events === null ? (
+        <div style={{ fontSize: 11, color: COLORS.textMuted }}>Loading your calendar…</div>
+      ) : upcoming.length === 0 ? (
+        <div style={{ fontSize: 11, color: COLORS.textMuted }}>Nothing left on your calendar today.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {upcoming.map((e) => (
+            <div key={e.id} style={{ display: "flex", gap: 9, alignItems: "flex-start", padding: "7px 9px", background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 9 }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: COLORS.accent, whiteSpace: "nowrap", minWidth: 52, paddingTop: 1 }}>{gcalEventTime(e)}</div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.summary}</div>
+                {(e.location || e.meet_link) && (
+                  <div style={{ fontSize: 10, color: COLORS.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {e.meet_link ? "Google Meet" : e.location}
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── Agent & RAG Page ───
 const AgentPage = () => {
   const [messages, setMessages] = useState([]);
@@ -3178,6 +3250,9 @@ const AgentPage = () => {
       }}>
         {/* Spoken morning briefing — hero CTA */}
         <BriefingCard />
+
+        {/* Today's meetings (only shows once Google Calendar is connected) */}
+        <TodayMeetingsCard />
 
         {/* Sample Prompts */}
         <div data-tour="sample-prompts" style={{ padding: "14px 18px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
@@ -10200,11 +10275,204 @@ const UsageAnalyticsPage = () => {
   );
 };
 
+// ─── Calendar page — per-user Google Calendar (read-only) ───
+const CalendarPage = () => {
+  const [status, setStatus] = useState(null);   // {configured, connected, google_email}
+  const [loading, setLoading] = useState(true);
+  const [events, setEvents] = useState([]);
+  const [range, setRange] = useState("today");   // "today" | "week"
+  const [evLoading, setEvLoading] = useState(false);
+  const [banner, setBanner] = useState(null);     // {type:'ok'|'error', msg}
+  const [busy, setBusy] = useState(false);
+
+  const loadStatus = async () => {
+    setLoading(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/integrations/google/status`, { headers: authHeaders() });
+      setStatus(await r.json());
+    } catch { setStatus({ configured: false, connected: false }); }
+    finally { setLoading(false); }
+  };
+
+  const loadEvents = async (rng) => {
+    setEvLoading(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/calendar/events?range=${rng}`, { headers: authHeaders() });
+      const j = await r.json();
+      if (j.connected) setEvents(j.events || []);
+      else { setEvents([]); if (j.error) setBanner({ type: "error", msg: j.error }); }
+    } catch { setBanner({ type: "error", msg: "Couldn't load your calendar." }); }
+    finally { setEvLoading(false); }
+  };
+
+  // On mount: pick up the ?gcal= result from the OAuth redirect, then clean it.
+  useEffect(() => {
+    const q = (window.location.hash.split("?")[1] || "");
+    const g = new URLSearchParams(q).get("gcal");
+    if (g === "connected") setBanner({ type: "ok", msg: "Google Calendar connected — your schedule is now linked with Satori." });
+    else if (g === "error") setBanner({ type: "error", msg: "Couldn't connect Google Calendar. Please try again." });
+    if (g) { try { window.location.hash = "#calendar"; } catch { /* noop */ } }
+    loadStatus();
+  }, []);
+
+  useEffect(() => { if (status?.connected) loadEvents(range); /* eslint-disable-next-line */ }, [status?.connected, range]);
+
+  const connect = async () => {
+    setBusy(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/integrations/google/connect`, { headers: authHeaders() });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); setBanner({ type: "error", msg: j.detail || "Couldn't start Google sign-in." }); setBusy(false); return; }
+      const j = await r.json();
+      window.location.href = j.url; // full-page redirect to Google's consent screen
+    } catch { setBanner({ type: "error", msg: "Couldn't start Google sign-in." }); setBusy(false); }
+  };
+
+  const disconnect = async () => {
+    if (!window.confirm("Disconnect Google Calendar from Satori? Satori will no longer see your meetings.")) return;
+    setBusy(true);
+    try {
+      await fetch(`${API_BASE}/api/integrations/google/disconnect`, { method: "POST", headers: authHeaders() });
+      setEvents([]);
+      await loadStatus();
+      setBanner({ type: "ok", msg: "Disconnected from Google Calendar." });
+    } catch { setBanner({ type: "error", msg: "Couldn't disconnect." }); }
+    finally { setBusy(false); }
+  };
+
+  const now = Date.now();
+  // Group events by day for the week view; today view is a flat list.
+  const groups = [];
+  (events || []).forEach((e) => {
+    const key = gcalDayKey(e);
+    let g = groups.find(x => x.key === key);
+    if (!g) { g = { key, items: [] }; groups.push(g); }
+    g.items.push(e);
+  });
+
+  const Banner = () => banner && (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderRadius: 10, marginBottom: 16,
+      background: banner.type === "ok" ? "var(--sem-ok-bg)" : "var(--sem-danger-bg)",
+      color: banner.type === "ok" ? "var(--sem-ok-fg, #047857)" : "var(--sem-danger-fg)",
+      fontSize: 13, fontWeight: 600,
+    }}>
+      {banner.type === "ok" ? <CheckCircle size={15} /> : <AlertTriangle size={15} />}
+      <span style={{ flex: 1 }}>{banner.msg}</span>
+      <button onClick={() => setBanner(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", display: "flex" }}><X size={14} /></button>
+    </div>
+  );
+
+  return (
+    <div style={{ maxWidth: 820, margin: "0 auto" }}>
+      <Banner />
+
+      {/* Connection header card */}
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 20, marginBottom: 20 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <div style={{ width: 46, height: 46, borderRadius: 12, background: `${COLORS.accent}1f`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <Calendar size={22} color={COLORS.accent} />
+          </div>
+          <div style={{ flex: 1, minWidth: 180 }}>
+            <div style={{ fontSize: 16, fontWeight: 800, color: COLORS.textPrimary }}>Google Calendar</div>
+            <div style={{ fontSize: 12.5, color: COLORS.textSecondary, marginTop: 2 }}>
+              {loading ? "Checking connection…"
+                : !status?.configured ? "Calendar integration isn't set up on the server yet."
+                : status?.connected ? <>Connected{status.google_email ? <> as <b>{status.google_email}</b></> : ""} · read-only</>
+                : "Link your Google Calendar so Satori knows your schedule."}
+            </div>
+          </div>
+          {!loading && status?.configured && (
+            status.connected ? (
+              <button onClick={disconnect} disabled={busy} style={{
+                padding: "9px 16px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "transparent",
+                color: COLORS.textSecondary, fontWeight: 700, fontSize: 13, cursor: busy ? "default" : "pointer",
+              }}>Disconnect</button>
+            ) : (
+              <button onClick={connect} disabled={busy} style={{
+                padding: "10px 18px", borderRadius: 10, border: "none",
+                background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentDark})`, color: "#fff",
+                fontWeight: 700, fontSize: 13, cursor: busy ? "default" : "pointer", display: "inline-flex", alignItems: "center", gap: 7,
+                boxShadow: `0 6px 16px ${COLORS.accent}44`,
+              }}><Calendar size={15} /> {busy ? "Redirecting…" : "Connect Google Calendar"}</button>
+            )
+          )}
+        </div>
+        {status?.connected && (
+          <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 12 }}>
+            Satori reads your events to show your schedule and answer questions like “what's my next meeting?”. It never edits or shares your calendar.
+          </div>
+        )}
+      </div>
+
+      {/* Events */}
+      {status?.connected && (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+            {[{ k: "today", l: "Today" }, { k: "week", l: "This week" }].map(t => (
+              <button key={t.k} onClick={() => setRange(t.k)} style={{
+                padding: "6px 14px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                border: `1px solid ${range === t.k ? COLORS.accent : COLORS.border}`,
+                background: range === t.k ? `${COLORS.accent}15` : COLORS.surface,
+                color: range === t.k ? COLORS.accent : COLORS.textMuted,
+              }}>{t.l}</button>
+            ))}
+            <button onClick={() => loadEvents(range)} title="Refresh" style={{
+              marginLeft: "auto", padding: 8, borderRadius: 9, border: `1px solid ${COLORS.border}`,
+              background: COLORS.surface, color: COLORS.textMuted, cursor: "pointer", display: "flex",
+            }}><RefreshCw size={14} style={{ animation: evLoading ? "spin 0.8s linear infinite" : "none" }} /></button>
+          </div>
+
+          {evLoading && events.length === 0 ? (
+            <div style={{ fontSize: 13, color: COLORS.textMuted, padding: "24px 0", textAlign: "center" }}>Loading your meetings…</div>
+          ) : events.length === 0 ? (
+            <div style={{ fontSize: 13, color: COLORS.textMuted, padding: "32px 0", textAlign: "center", background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14 }}>
+              {range === "today" ? "No meetings on your calendar today. 🎉" : "No meetings this week."}
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+              {groups.map((g) => (
+                <div key={g.key}>
+                  <div style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: "0.4px", textTransform: "uppercase", color: COLORS.textMuted, marginBottom: 8 }}>{g.key}</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {g.items.map((e) => {
+                      const past = !e.all_day && new Date(e.end || e.start).getTime() < now;
+                      return (
+                        <div key={e.id} style={{
+                          display: "flex", gap: 14, padding: "12px 16px", borderRadius: 12,
+                          background: COLORS.surface, border: `1px solid ${COLORS.border}`, opacity: past ? 0.55 : 1,
+                        }}>
+                          <div style={{ minWidth: 74, textAlign: "right", flexShrink: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 800, color: COLORS.accent }}>{gcalEventTime(e)}</div>
+                          </div>
+                          <div style={{ width: 1, background: COLORS.border, alignSelf: "stretch" }} />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.textPrimary }}>{e.summary}</div>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 14, marginTop: 4, fontSize: 11.5, color: COLORS.textMuted }}>
+                              {e.location && <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Globe size={11} /> {e.location}</span>}
+                              {e.attendees > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Users size={11} /> {e.attendees}</span>}
+                              {e.meet_link && <a href={e.meet_link} target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 4, color: COLORS.accent, fontWeight: 700, textDecoration: "none" }}><LinkIcon size={11} /> Join</a>}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+};
+
 const NAV_ITEMS = [
   { id: "_divider_workspace", label: "WORKSPACE", isDivider: true },
   { id: "agent", label: "Ask Me Anything", icon: Bot, component: AgentPage, requiresFeature: "agent" },
   { id: "reports", label: "Report Builder", icon: FileText, component: ReportsPage, requiresFeature: "reportbuilder" },
   { id: "dashboards", label: "Dashboard Builder", icon: LayoutDashboard, component: DashboardsPage, requiresFeature: "dashboards" },
+  { id: "calendar", label: "Calendar", icon: Calendar, component: CalendarPage },
   { id: "_divider_intelligence", label: "INTELLIGENCE", isDivider: true },
   { id: "availability", label: "Availability Engine", icon: Activity, component: AvailabilityEnginePage, requiresFeature: "availability" },
   { id: "projects", label: "Delivery Engine", icon: Layers, component: ProjectsPage, requiresFeature: "availability" },
@@ -11704,6 +11972,12 @@ export default function App() {
   }, []);
   const onPrivacy = routeHash === "#privacy";
 
+  // Google Calendar OAuth callback / deep-link lands on /#calendar — switch to
+  // the Calendar page when we see that hash.
+  useEffect(() => {
+    if (isLoggedIn && routeHash.startsWith("#calendar")) setActivePage("calendar");
+  }, [isLoggedIn, routeHash]);
+
   // Password-reset page is reachable from the emailed link even when logged out.
   if (routeHash.startsWith("#reset")) return <ResetPasswordPage />;
 
@@ -11809,6 +12083,7 @@ export default function App() {
               <div style={{ fontSize: 18, fontWeight: 700, color: COLORS.textPrimary }}>{currentNav?.label || "Dashboard"}</div>
               <div style={{ fontSize: 12, color: COLORS.textMuted }}>
                 {activePage === "agent" ? "Enterprise AI · Connected to your data sources"
+                  : activePage === "calendar" ? "Your Google Calendar — today and the week ahead"
                   : activePage === "reports" ? "Build, edit, and download tabular reports as Excel or PDF"
                   : activePage === "rules" ? "Automated alerts & notifications"
                   : activePage === "dashboards" ? "Build, view, and refine your custom dashboards"
