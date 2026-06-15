@@ -10883,10 +10883,12 @@ WORKFORCE TABLES:
     LATE arrival = check-in after 09:30: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00' (any day with a check-in incl. Missing Punch; filter checkin_time IS NOT NULL, not a status whitelist). Never filter status='late'.
     `employee_id` here = `Employee_Code` in Employee_Data.
 
-- `ai-vertex-mahad.Satori_Project.Allocation_Data`
-    project_id, employee_id (= Employee_Code), allocation_percent (STRING — SAFE_CAST AS FLOAT64),
-    emp_competency, Flag, Start_Date, End_Date.
-    Bench = employees with MAX(SAFE_CAST(allocation_percent AS FLOAT64)) per Employee_Code = 0 or NULL.
+- `ai-vertex-mahad.Satori_Project.Allocation_Data`  (WEEKLY allocation snapshots — the PLANNED / assigned side)
+    project_id (= Project_Master.Project_Code), employee_id (= Employee_Code),
+    allocation_percent (INT64 0-100 — % of the person's time PLANNED on that project that week),
+    emp_competency, Flag ('Allocated' = real billable project / 'Bench'), Forecast_Flag (0 = actual, 1 = forward plan),
+    Date (DATE — the week), Year, Month, Week (INT64). There is NO Start_Date/End_Date column.
+    "Current" allocation = cap Date <= CURRENT_DATE(). Bench = no Flag='Allocated' row with allocation_percent > 0.
 
 - `ai-vertex-mahad.Satori_Project.Timesheet_Data`  (ticketing / effort log)
     EMPLOYEE_CODE (= Employee_Code — THE employee join key; digit-normalise. ⚠️ TICKET_USER_ID is an unrelated internal id that matches almost nothing — never join on it),
@@ -10956,11 +10958,16 @@ This dataset DOES NOT contain SAP/MRP concepts (plant, storage_location, materia
 - Project filter: REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(<Project_Code> AS STRING) (resolve the project name via Project_Master first).
 - Timesheet hours per WP: LEFT JOIN Timesheet_Data ON UPPER(TRIM(w.WP_CODE)) = REGEXP_REPLACE(UPPER(TRIM(t.TICKET_WP_ID)), r'(-[0-9]{4,})+$', '')  (NEVER a direct equality — TICKET_WP_ID carries a numeric task suffix), then SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)).
 
-═══ HOURS — LOGGED vs PLANNED/ALLOCATED, OVERRUN & COST ═══
-- Actual hours logged per resource per project: SUM(TICKET_HOURS), GROUP BY EMPLOYEE_CODE (+ TICKET_PROJECT_CODE); LEFT JOIN Employee_Data for the name and Project_Master for the project name.
-- "Logged MORE than assigned/planned" (an OVERRUN) — there are TWO valid baselines; if the user is not explicit, ASK which they mean:
-    (a) PLANNED hours (from the timesheet itself): overrun_hours = SUM(TICKET_HOURS) - SUM(SAFE_CAST(TICKET_PLANNED_HOURS AS FLOAT64)); keep only overruns with HAVING overrun_hours > 0. ⚠️ TICKET_PLANNED_HOURS is sparse — when the user wants a TRUE plan comparison, restrict to rows that HAVE a plan (SUM of planned > 0) so people with no recorded plan don't all look over budget.
-    (b) ALLOCATED hours (from Allocation_Data): expected_hours ≈ (AVG(SAFE_CAST(allocation_percent AS FLOAT64))/100) × <working_days_in_period> × 8, per resource per project; overrun = logged − expected. allocation_percent is a planning %, so call this an estimate.
+═══ HOURS — LOGGED (Timesheet) vs ASSIGNED/PLANNED (Allocation), OVERRUN & COST ═══
+🚨 LOGGED hours and PLANNED/ASSIGNED hours come from TWO DIFFERENT datasets — keep them separate, compute each on its own, then join per resource per project:
+    • LOGGED / ACTUAL hours → **Timesheet_Data**: SUM(TICKET_HOURS), grouped by EMPLOYEE_CODE (+ TICKET_PROJECT_CODE). NEVER use TICKET_PLANNED_HOURS as the plan — it is sparse/unreliable; the plan comes from Allocation.
+    • ASSIGNED / PLANNED hours → **Allocation_Data**, derived from allocation_percent. Each row is ONE WEEKLY snapshot, so planned_hours ≈ SUM(allocation_percent / 100 * 40) over that resource's weekly rows for the project in the period (40h = one work-week; Flag='Allocated', Date <= CURRENT_DATE() and within the period). allocation_percent is a planning %, so this is an ESTIMATE of assigned capacity — say so to the user. (If the user gives a different weekly-hours figure, use it instead of 40.)
+- Build it as two CTEs and JOIN on the digit-normalised employee code (+ project code):
+    WITH logged AS (SELECT norm(EMPLOYEE_CODE) emp, norm(TICKET_PROJECT_CODE) proj, SUM(TICKET_HOURS) logged_hours FROM Timesheet_Data WHERE <period> GROUP BY emp, proj),
+         planned AS (SELECT norm(employee_id) emp, norm(project_id) proj, SUM(allocation_percent/100*40) planned_hours FROM Allocation_Data WHERE Flag='Allocated' AND Date <= CURRENT_DATE() AND <period> GROUP BY emp, proj)
+    SELECT … logged_hours, COALESCE(planned_hours,0) AS planned_hours, logged_hours - COALESCE(planned_hours,0) AS overrun_hours
+    FROM logged LEFT JOIN planned USING (emp, proj) …  — where norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0'). Resolve names via Employee_Data, project names via Project_Master (Project_Code).
+- "Logged MORE than assigned" = HAVING / WHERE overrun_hours > 0, ORDER BY overrun_hours DESC. ⚠️ A resource with NO allocation row has planned_hours = NULL→0, so they'd show their FULL logged hours as overrun — note this, and if the user wants only true over-allocation, restrict to rows where a planned allocation exists (planned_hours > 0).
 - EXTRA COST / WHAT-IF: an hourly cost per resource is NOT in the warehouse — the USER provides it. When they give a rate, add a computed column:
     • FLAT rate: extra_cost = ROUND(overrun_hours * <rate>, 0).
     • PER-PERSON rates: CASE WHEN LTRIM(REGEXP_REPLACE(Employee_Code,r'[^0-9]',''),'0')='1571' THEN 50 WHEN ...='1234' THEN 40 ELSE 0 END AS hourly_cost, then overrun_hours * hourly_cost AS extra_cost.
