@@ -266,9 +266,9 @@ const ONBOARDING_STEPS = [
   { selector: '[data-tour="sample-prompts"]', placement: "left", page: "agent", title: "Not sure where to start?",
     body: "Tap a sample prompt — they're grouped by topic and show the kinds of questions Satori handles well.",
     narration: "If you're not sure where to start, tap one of these sample prompts. They're grouped by topic and show the kinds of questions I handle well." },
-  { selector: '[data-tour="insight-feed"]', placement: "left", page: "agent", title: "Satori noticed…",
-    body: "Every day Satori scans attendance, timesheets and allocations for anomalies and posts what it finds here — click any card to dig in, or press Briefing to hear the day's summary read aloud.",
-    narration: "I don't just wait for questions. Every day I scan attendance, timesheets and allocations for anomalies, and post what I notice right here. Click any card to dig in — or press the briefing button and I'll read you the day's summary." },
+  { selector: '[data-tour="briefing"]', placement: "left", page: "agent", title: "Your daily briefing",
+    body: "Press Daily Briefing and Satori reads the day's key findings aloud — attendance, timesheets and allocation anomalies, summarised. You can mute the voice anytime and just read along.",
+    narration: "Press the Daily Briefing card and I'll read you the day's key findings aloud — the attendance, timesheet and allocation anomalies I've spotted, summarised. You can mute my voice anytime and just read along." },
   { selector: '[data-tour="nav-reports"]', placement: "right", page: "reports", title: "Report Builder",
     body: "Describe the report you need and Satori builds it as a real table — refine it in chat, download as Excel or PDF, and share it with teammates as view-only or editable.",
     narration: "This is the Report Builder. Describe the report you need and I'll build it as a real table. You can refine it in chat, download it as Excel or P D F, and share it with teammates." },
@@ -2227,17 +2227,10 @@ const renderMarkdown = (text) => {
   return <div>{elements}</div>;
 };
 
-// ─── Proactive insight feed ("Satori noticed") + spoken morning briefing ───
-// The feed is Satori talking FIRST: deterministic anomaly checks run server-
-// side once a day and surface here. Clicking a card drops a ready-made
-// question into the chat input; the Briefing button has the avatar read a
-// composed summary aloud (script from /api/briefing, voice from /api/tts).
-const INSIGHT_SEV = {
-  critical: { bg: "var(--sem-danger-bg)", fg: "var(--sem-danger-fg)", label: "Critical" },
-  warn:     { bg: "var(--sem-warn-bg)", fg: "var(--sem-warn-fg)", label: "Heads-up" },
-  info:     { bg: "var(--sem-info-bg)", fg: "var(--sem-info-fg)", label: "FYI" },
-};
-
+// ─── Spoken morning briefing ───
+// Satori talking FIRST: the avatar reads a composed summary of the day's key
+// findings aloud (script from /api/briefing, voice from /api/tts). Surfaced
+// through the prominent BriefingCard at the top of the right sidebar.
 const BriefingPlayer = ({ onClose }) => {
   const [phase, setPhase] = useState("loading"); // loading | speaking | paused | done | error
   const [script, setScript] = useState("");
@@ -2433,72 +2426,46 @@ const BriefingPlayer = ({ onClose }) => {
   );
 };
 
-const InsightFeed = ({ onAsk }) => {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [briefingOpen, setBriefingOpen] = useState(false);
-  const [expanded, setExpanded] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const r = await fetch(`${API_BASE}/api/insights`, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } });
-        if (r.ok) { const j = await r.json(); if (!cancelled) setData(j); }
-      } catch { /* feed is additive — never break the page */ }
-      finally { if (!cancelled) setLoading(false); }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  const items = (data && data.insights) || [];
-  const shown = expanded ? items : items.slice(0, 4);
+// Prominent hero card at the top of the right sidebar — the day's spoken
+// briefing is Satori's headline feature, so it gets a full-width gradient CTA.
+const BriefingCard = () => {
+  const [open, setOpen] = useState(false);
+  const [hover, setHover] = useState(false);
   return (
-    <div data-tour="insight-feed" style={{ padding: "20px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.textPrimary, display: "flex", alignItems: "center", gap: 6 }}>
-          <Zap size={14} color={COLORS.accent} /> Satori noticed
-        </div>
-        <button onClick={() => setBriefingOpen(true)} title="Have Satori read today's briefing aloud" style={{
-          padding: "5px 10px", borderRadius: 7, border: "none", background: COLORS.accent, color: "#fff",
-          fontSize: 11, fontWeight: 700, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5,
+    <div data-tour="briefing" style={{ padding: "18px 18px 6px" }}>
+      <button
+        onClick={() => setOpen(true)}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        title="Have Satori read today's briefing aloud"
+        style={{
+          width: "100%", textAlign: "left", cursor: "pointer", border: "none",
+          borderRadius: 16, padding: 16, position: "relative", overflow: "hidden",
+          display: "flex", alignItems: "center", gap: 14,
+          background: `linear-gradient(135deg, ${COLORS.accent} 0%, ${COLORS.accentDark} 58%, ${COLORS.purple} 150%)`,
+          boxShadow: hover ? `0 14px 32px ${COLORS.accent}55` : `0 8px 22px ${COLORS.accent}38`,
+          transform: hover ? "translateY(-1px)" : "none", transition: "all 0.18s ease",
+        }}
+      >
+        {/* Decorative glow */}
+        <div style={{ position: "absolute", top: -30, right: -20, width: 110, height: 110, borderRadius: "50%", background: "rgba(255,255,255,0.14)" }} />
+        {/* Play disc */}
+        <div style={{
+          width: 48, height: 48, borderRadius: "50%", flexShrink: 0, zIndex: 1,
+          background: "rgba(255,255,255,0.22)", border: "1px solid rgba(255,255,255,0.4)",
+          display: "flex", alignItems: "center", justifyContent: "center",
         }}>
-          <Play size={11} /> Briefing
-        </button>
-      </div>
-      {loading ? (
-        <div style={{ fontSize: 11, color: COLORS.textMuted }}>Scanning today's data — first load of the day takes a few seconds…</div>
-      ) : items.length === 0 ? (
-        <div style={{ fontSize: 11, color: COLORS.textMuted }}>All quiet — no anomalies in today's scan of attendance, timesheets and allocations.</div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {shown.map((it) => {
-            const sev = INSIGHT_SEV[it.severity] || INSIGHT_SEV.info;
-            return (
-              <button key={it.id} onClick={() => onAsk && onAsk(`Dig into this finding: ${it.title} — ${it.body}`)}
-                title="Ask Satori about this" style={{
-                  padding: "10px 12px", background: COLORS.surface, border: `1px solid ${COLORS.border}`,
-                  borderRadius: 10, cursor: "pointer", textAlign: "left", width: "100%", transition: "all 0.15s",
-                }}
-                onMouseEnter={e => { e.currentTarget.style.borderColor = COLORS.accent; }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor = COLORS.border; }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
-                  <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 7px", borderRadius: 999, background: sev.bg, color: sev.fg, textTransform: "uppercase", letterSpacing: "0.4px", flexShrink: 0 }}>{sev.label}</span>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: COLORS.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.title}</span>
-                </div>
-                <div style={{ fontSize: 10.5, color: COLORS.textSecondary, lineHeight: 1.45 }}>{it.body}</div>
-              </button>
-            );
-          })}
-          {items.length > 4 && (
-            <button onClick={() => setExpanded(x => !x)} style={{
-              padding: "6px 10px", borderRadius: 8, border: `1px dashed ${COLORS.border}`, background: "transparent",
-              color: COLORS.textMuted, fontSize: 11, fontWeight: 600, cursor: "pointer",
-            }}>{expanded ? "Show less" : `Show all ${items.length}`}</button>
-          )}
+          <Play size={20} color="#fff" fill="#fff" />
         </div>
-      )}
-      {briefingOpen && <BriefingPlayer onClose={() => setBriefingOpen(false)} />}
+        <div style={{ minWidth: 0, zIndex: 1 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 800, letterSpacing: "0.7px", textTransform: "uppercase", color: "rgba(255,255,255,0.9)", marginBottom: 3 }}>
+            <Sparkles size={12} /> Daily Briefing
+          </div>
+          <div style={{ fontSize: 15.5, fontWeight: 800, color: "#fff", marginBottom: 2 }}>Hear today's summary</div>
+          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.88)", lineHeight: 1.4 }}>Satori reads the day's key findings aloud.</div>
+        </div>
+      </button>
+      {open && <BriefingPlayer onClose={() => setOpen(false)} />}
     </div>
   );
 };
@@ -3196,20 +3163,20 @@ const AgentPage = () => {
         width: 340, borderLeft: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt,
         display: "flex", flexDirection: "column", overflowY: "auto", flexShrink: 0
       }}>
-        {/* Proactive insights + spoken morning briefing */}
-        <InsightFeed onAsk={(q) => setInput(q)} />
+        {/* Spoken morning briefing — hero CTA */}
+        <BriefingCard />
 
         {/* Sample Prompts */}
-        <div data-tour="sample-prompts" style={{ padding: "20px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
+        <div data-tour="sample-prompts" style={{ padding: "14px 18px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 }}>
             <Sparkles size={14} color={COLORS.accent} /> Sample Prompts
           </div>
           {/* Category tabs (sales categories hidden from non-admins) */}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 12 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 12 }}>
             {PROMPT_CATEGORIES.filter(cat => isAdminRole() || !SALES_PROMPT_CATS.has(cat.id)).map(cat => (
               <button key={cat.id} onClick={() => setSelectedCategory(cat.id)} style={{
-                padding: "4px 10px", borderRadius: 8, border: `1px solid ${selectedCategory === cat.id ? COLORS.accent : COLORS.border}`,
-                background: selectedCategory === cat.id ? `${COLORS.accent}15` : COLORS.surface, fontSize: 10, fontWeight: 500,
+                padding: "4px 11px", borderRadius: 999, border: `1px solid ${selectedCategory === cat.id ? COLORS.accent : COLORS.border}`,
+                background: selectedCategory === cat.id ? `${COLORS.accent}15` : COLORS.surface, fontSize: 10, fontWeight: 600,
                 color: selectedCategory === cat.id ? COLORS.accent : COLORS.textMuted, cursor: "pointer", transition: "all 0.15s"
               }}>
                 {cat.label}
@@ -3223,8 +3190,8 @@ const AgentPage = () => {
                 padding: "10px 12px", background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 10,
                 cursor: "pointer", textAlign: "left", transition: "all 0.15s", width: "100%"
               }}
-              onMouseEnter={e => { e.currentTarget.style.borderColor = COLORS.accent; e.currentTarget.style.background = `${COLORS.accent}08`; }}
-              onMouseLeave={e => { e.currentTarget.style.borderColor = COLORS.border; e.currentTarget.style.background = COLORS.surface; }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = COLORS.accent; e.currentTarget.style.background = `${COLORS.accent}08`; e.currentTarget.style.boxShadow = `0 4px 12px ${COLORS.accent}1f`; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = COLORS.border; e.currentTarget.style.background = COLORS.surface; e.currentTarget.style.boxShadow = "none"; }}
               >
                 <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.textPrimary, marginBottom: 3 }}>{p.title}</div>
                 <div style={{ fontSize: 10, color: COLORS.textSecondary, lineHeight: 1.4, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{p.prompt}</div>
