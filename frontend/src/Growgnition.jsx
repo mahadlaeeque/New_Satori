@@ -3054,7 +3054,8 @@ const AgentPage = () => {
                 rows={2}
                 style={{
                   width: "100%", padding: "12px 18px", border: `1px solid ${COLORS.border}`, borderRadius: 14,
-                  fontSize: 14, outline: "none", background: COLORS.surfaceAlt, transition: "all 0.2s", boxSizing: "border-box",
+                  fontSize: 14, outline: "none", background: COLORS.surfaceAlt, color: COLORS.textPrimary,
+                  transition: "all 0.2s", boxSizing: "border-box",
                   resize: "none", fontFamily: "inherit", lineHeight: 1.5, display: "block", margin: 0
                 }}
                 onFocus={e => { e.target.style.borderColor = COLORS.accent; e.target.style.background = COLORS.surface; }}
@@ -3616,6 +3617,7 @@ const ReportChatPanel = ({
           style={{
             flex: 1, padding: "10px 14px", borderRadius: 10,
             border: `1px solid ${COLORS.border}`, fontSize: 13, outline: "none",
+            background: COLORS.surfaceAlt, color: COLORS.textPrimary,
             transition: "border-color 0.2s"
           }}
           onFocus={(e) => (e.target.style.borderColor = COLORS.accent)}
@@ -6941,6 +6943,7 @@ const DashboardChatPanel = ({
           style={{
             flex: 1, padding: "10px 14px", borderRadius: 10,
             border: `1px solid ${COLORS.border}`, fontSize: 13, outline: "none",
+            background: COLORS.surfaceAlt, color: COLORS.textPrimary,
             transition: "border-color 0.2s"
           }}
           onFocus={(e) => (e.target.style.borderColor = COLORS.accent)}
