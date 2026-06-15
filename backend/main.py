@@ -12107,6 +12107,14 @@ def _gcal_meet_link(ev) -> str | None:
 
 def _gcal_normalize(ev) -> dict:
     start, end = ev.get("start", {}) or {}, ev.get("end", {}) or {}
+    attendees = [{
+        "email": a.get("email"),
+        "name": a.get("displayName"),
+        "status": a.get("responseStatus"),   # accepted | declined | tentative | needsAction
+        "organizer": bool(a.get("organizer")),
+        "self": bool(a.get("self")),
+        "optional": bool(a.get("optional")),
+    } for a in (ev.get("attendees", []) or []) if a.get("email")]
     return {
         "id": ev.get("id"),
         "summary": ev.get("summary") or "(no title)",
@@ -12116,7 +12124,8 @@ def _gcal_normalize(ev) -> dict:
         "location": ev.get("location"),
         "description": ev.get("description"),
         "meet_link": _gcal_meet_link(ev),
-        "attendees": len(ev.get("attendees", []) or []),
+        "attendees": attendees,
+        "attendee_count": len(attendees),
         "organizer": (ev.get("organizer") or {}).get("email"),
         "html_link": ev.get("htmlLink"),
     }

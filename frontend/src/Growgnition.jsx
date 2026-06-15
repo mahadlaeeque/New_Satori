@@ -10285,6 +10285,123 @@ const UsageAnalyticsPage = () => {
   );
 };
 
+// Read-only details view for an event: time, join link, participants, notes.
+const EventDetailsModal = ({ event: e, onClose, onEdit, onDeleted }) => {
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState(null);
+
+  const fmtRange = () => {
+    if (e.all_day) return "All day";
+    try {
+      const s = new Date(e.start), en = new Date(e.end || e.start);
+      const t = (d) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      return `${t(s)} – ${t(en)}`;
+    } catch { return gcalEventTime(e); }
+  };
+  const dateLabel = () => {
+    try {
+      const d = new Date(e.all_day ? `${(e.start || "").slice(0, 10)}T00:00:00` : e.start);
+      return d.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
+    } catch { return ""; }
+  };
+
+  const STATUS = {
+    accepted:   { label: "Going",    bg: "var(--sem-ok-bg)",     fg: "var(--sem-ok-fg, #047857)" },
+    declined:   { label: "Declined", bg: "var(--sem-danger-bg)", fg: "var(--sem-danger-fg)" },
+    tentative:  { label: "Maybe",    bg: "var(--sem-warn-bg)",   fg: "var(--sem-warn-fg, #B45309)" },
+    needsAction:{ label: "Invited",  bg: COLORS.surfaceAlt,      fg: COLORS.textMuted },
+  };
+
+  const remove = async () => {
+    if (!window.confirm(`Delete "${e.summary}"? Attendees will be notified.`)) return;
+    setDeleting(true); setError(null);
+    try {
+      const r = await fetch(`${API_BASE}/api/calendar/events/${encodeURIComponent(e.id)}`, { method: "DELETE", headers: authHeaders() });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); setError(j.detail || "Couldn't delete the event."); setDeleting(false); return; }
+      onDeleted();
+    } catch { setError("Couldn't reach the server."); setDeleting(false); }
+  };
+
+  const Row = ({ icon, children }) => (
+    <div style={{ display: "flex", gap: 10, alignItems: "flex-start", marginBottom: 12 }}>
+      <div style={{ color: COLORS.textMuted, paddingTop: 1, flexShrink: 0 }}>{icon}</div>
+      <div style={{ flex: 1, minWidth: 0, fontSize: 13, color: COLORS.textPrimary }}>{children}</div>
+    </div>
+  );
+
+  const attendees = e.attendees || [];
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 1600, background: "rgba(15,23,42,0.55)", backdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div onClick={ev => ev.stopPropagation()} style={{ width: "100%", maxWidth: 460, background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 18, padding: 22, boxShadow: "0 24px 60px rgba(0,0,0,0.4)", maxHeight: "88vh", overflowY: "auto" }}>
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 10, minWidth: 0 }}>
+            <div style={{ width: 6, alignSelf: "stretch", borderRadius: 4, background: COLORS.accent, flexShrink: 0 }} />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 17, fontWeight: 800, color: COLORS.textPrimary, lineHeight: 1.25 }}>{e.summary}</div>
+              <div style={{ fontSize: 12.5, color: COLORS.textSecondary, marginTop: 3 }}>{dateLabel()} · {fmtRange()}</div>
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted, display: "flex", flexShrink: 0 }}><X size={18} /></button>
+        </div>
+
+        {/* Join CTA */}
+        {e.meet_link && (
+          <a href={e.meet_link} target="_blank" rel="noreferrer" style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8, textDecoration: "none",
+            padding: "11px 16px", borderRadius: 11, marginBottom: 16, fontWeight: 800, fontSize: 13.5, color: "#fff",
+            background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentDark})`, boxShadow: `0 6px 16px ${COLORS.accent}44`,
+          }}><LinkIcon size={15} /> Join video call</a>
+        )}
+
+        {e.location && <Row icon={<Globe size={15} />}>{e.location}</Row>}
+
+        {/* Participants */}
+        {attendees.length > 0 && (
+          <Row icon={<Users size={15} />}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>{attendees.length} participant{attendees.length === 1 ? "" : "s"}</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {attendees.map((a) => {
+                const st = STATUS[a.status] || STATUS.needsAction;
+                return (
+                  <div key={a.email} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: COLORS.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {a.name || a.email}{a.self ? " (you)" : ""}{a.organizer ? " · organizer" : ""}{a.optional ? " · optional" : ""}
+                    </span>
+                    <span style={{ fontSize: 9.5, fontWeight: 800, padding: "2px 8px", borderRadius: 999, background: st.bg, color: st.fg, textTransform: "uppercase", letterSpacing: "0.3px", flexShrink: 0 }}>{st.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </Row>
+        )}
+
+        {/* Description */}
+        {e.description && (
+          <Row icon={<FileText size={15} />}>
+            <div style={{ fontSize: 12.5, color: COLORS.textSecondary, lineHeight: 1.55, whiteSpace: "pre-wrap", maxHeight: 160, overflowY: "auto" }}>{e.description}</div>
+          </Row>
+        )}
+
+        {error && <div style={{ fontSize: 12, color: "var(--sem-danger-fg)", marginBottom: 12 }}>{error}</div>}
+
+        {/* Actions */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+          <button onClick={remove} disabled={deleting} title="Delete event" style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 14px", borderRadius: 10, border: "1px solid var(--sem-danger-bg)", background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+            <Trash2 size={14} /> {deleting ? "Deleting…" : "Delete"}
+          </button>
+          {e.html_link && <a href={e.html_link} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: COLORS.textMuted, textDecoration: "none", alignSelf: "center" }}>Open in Google Calendar ↗</a>}
+          <div style={{ flex: 1 }} />
+          <button onClick={onEdit} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 18px", borderRadius: 10, border: "none", background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentDark})`, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", boxShadow: `0 6px 16px ${COLORS.accent}44` }}>
+            <Edit3 size={14} /> Edit
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // Create / edit / reschedule / delete a Google Calendar event.
 const EventEditorModal = ({ event, defaultDate, onClose, onSaved }) => {
   const isEdit = !!event;
@@ -10452,6 +10569,7 @@ const CalendarPage = () => {
   const [banner, setBanner] = useState(null);     // {type:'ok'|'error', msg}
   const [busy, setBusy] = useState(false);
   const [editor, setEditor] = useState(null);      // null | { event, date }
+  const [viewing, setViewing] = useState(null);     // null | event (details modal)
 
   // Month grid spans the Monday before the 1st, six weeks (42 cells).
   const monthStart = new Date(viewDate.getFullYear(), viewDate.getMonth(), 1);
@@ -10545,7 +10663,7 @@ const CalendarPage = () => {
   const EventRow = ({ e }) => {
     const past = !e.all_day && new Date(e.end || e.start).getTime() < Date.now();
     return (
-      <div onClick={() => setEditor({ event: e, date: selectedKey })} title="Edit event" style={{ display: "flex", gap: 14, padding: "12px 16px", borderRadius: 12, background: COLORS.surface, border: `1px solid ${COLORS.border}`, opacity: past ? 0.55 : 1, cursor: "pointer", transition: "border-color 0.12s" }}
+      <div onClick={() => setViewing(e)} title="View details" style={{ display: "flex", gap: 14, padding: "12px 16px", borderRadius: 12, background: COLORS.surface, border: `1px solid ${COLORS.border}`, opacity: past ? 0.55 : 1, cursor: "pointer", transition: "border-color 0.12s" }}
         onMouseEnter={ev => { ev.currentTarget.style.borderColor = COLORS.accent; }}
         onMouseLeave={ev => { ev.currentTarget.style.borderColor = COLORS.border; }}>
         <div style={{ minWidth: 74, textAlign: "right", flexShrink: 0 }}>
@@ -10556,7 +10674,7 @@ const CalendarPage = () => {
           <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.textPrimary }}>{e.summary}</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 14, marginTop: 4, fontSize: 11.5, color: COLORS.textMuted }}>
             {e.location && <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Globe size={11} /> {e.location}</span>}
-            {e.attendees > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Users size={11} /> {e.attendees}</span>}
+            {e.attendee_count > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Users size={11} /> {e.attendee_count}</span>}
             {e.meet_link && <a href={e.meet_link} target="_blank" rel="noreferrer" onClick={ev => ev.stopPropagation()} style={{ display: "inline-flex", alignItems: "center", gap: 4, color: COLORS.accent, fontWeight: 700, textDecoration: "none" }}><LinkIcon size={11} /> Join</a>}
           </div>
         </div>
@@ -10653,16 +10771,18 @@ const CalendarPage = () => {
                     </div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                       {dayEvents.slice(0, 3).map(e => (
-                        <div key={e.id} title={e.summary} style={{
-                          fontSize: 10, fontWeight: 600, padding: "2px 5px", borderRadius: 5,
-                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                          background: e.all_day ? `${COLORS.accent}22` : "transparent",
-                          color: e.all_day ? COLORS.accentDark : COLORS.textPrimary,
-                        }}>
+                        <div key={e.id} title={e.summary}
+                          onClick={(ev) => { ev.stopPropagation(); setSelectedKey(k); setViewing(e); }}
+                          style={{
+                            fontSize: 10, fontWeight: 600, padding: "2px 5px", borderRadius: 5, cursor: "pointer",
+                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                            background: e.all_day ? `${COLORS.accent}22` : "transparent",
+                            color: e.all_day ? COLORS.accentDark : COLORS.textPrimary,
+                          }}>
                           {e.all_day ? e.summary : <><span style={{ color: COLORS.accent, fontWeight: 700 }}>{gcalEventTime(e)}</span> {e.summary}</>}
                         </div>
                       ))}
-                      {dayEvents.length > 3 && <div style={{ fontSize: 9.5, color: COLORS.textMuted, paddingLeft: 5 }}>+{dayEvents.length - 3} more</div>}
+                      {dayEvents.length > 3 && <div onClick={(ev) => { ev.stopPropagation(); setSelectedKey(k); }} style={{ fontSize: 9.5, color: COLORS.textMuted, paddingLeft: 5, cursor: "pointer" }}>+{dayEvents.length - 3} more</div>}
                     </div>
                   </div>
                 );
@@ -10684,6 +10804,15 @@ const CalendarPage = () => {
             )}
           </div>
         </>
+      )}
+
+      {viewing && (
+        <EventDetailsModal
+          event={viewing}
+          onClose={() => setViewing(null)}
+          onEdit={() => { setEditor({ event: viewing, date: selectedKey }); setViewing(null); }}
+          onDeleted={() => { setViewing(null); loadMonth(); }}
+        />
       )}
 
       {editor && (
