@@ -916,6 +916,7 @@ const VoiceModal = ({ open, onClose }) => {
   const turnEndedRef = useRef(false);
   const pendingHangupRef = useRef(false);
   const hangupWatchdogRef = useRef(null);
+  const greetingRef = useRef(false);  // true only during the opening greeting turn
 
   useEffect(() => {
     if (!open) return;
@@ -1045,8 +1046,13 @@ const VoiceModal = ({ open, onClose }) => {
             },
           }));
           // Set busy so the mic doesn't capture during the greeting playback.
+          // Use the dedicated "greeting" clip (welcome nod) so the opener
+          // looks distinct from the talking animation. greetingRef keeps the
+          // incoming greeting audio from flipping the avatar to the speaking
+          // clip mid-nod.
           isSpeakingRef.current = true;
-          setState("speaking");
+          greetingRef.current = true;
+          setState("greeting");
           setStatusText("Satori is greeting you\u2026");
         } catch (e) {
           setState("listening");
@@ -1069,8 +1075,9 @@ const VoiceModal = ({ open, onClose }) => {
             responses.push({ id: fc.id, name: fc.name, response: { output: "Goodbye accepted." } });
             continue;
           }
-          // BigQuery tool call
-          setState("speaking");
+          // BigQuery tool call \u2014 she's working out the answer, not talking, so
+          // show the "thinking" clip (pondering) rather than the speaking one.
+          setState("thinking");
           setStatusText("Satori is consulting BigQuery\u2026");
           try {
             const r = await fetch(`${apiBase}/api/voice/query`, {
@@ -1127,9 +1134,12 @@ const VoiceModal = ({ open, onClose }) => {
         if (sc.modelTurn?.parts) {
           for (const part of sc.modelTurn.parts) {
             if (part.inlineData?.data) {
-              if (!isSpeakingRef.current) {
-                isSpeakingRef.current = true;
-                setState("speaking");
+              isSpeakingRef.current = true; // gate the mic while audio plays
+              // Real audio is flowing \u2192 she's talking, so switch to the
+              // speaking clip \u2014 EXCEPT during the opening greeting, which keeps
+              // its own welcome-nod clip until the turn completes.
+              if (!greetingRef.current) {
+                setState(prev => (prev === "speaking" ? prev : "speaking"));
                 setStatusText("Satori is speaking\u2026");
               }
               playPcm(part.inlineData.data);
@@ -1142,6 +1152,7 @@ const VoiceModal = ({ open, onClose }) => {
           // chunk finishes playing (handled in src.onended). If audio is
           // already drained, drop straight back to listening.
           turnEndedRef.current = true;
+          greetingRef.current = false; // greeting turn (if any) is over
           if (activeSourcesRef.current.length === 0) {
             isSpeakingRef.current = false;
             turnEndedRef.current = false;
@@ -1157,6 +1168,7 @@ const VoiceModal = ({ open, onClose }) => {
           activeSourcesRef.current = [];
           isSpeakingRef.current = false;
           turnEndedRef.current = false;
+          greetingRef.current = false;
           nextPlayTimeRef.current = 0;
           setState("listening");
           setStatusText("Listening\u2026 speak now");

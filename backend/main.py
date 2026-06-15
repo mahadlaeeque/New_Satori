@@ -5708,17 +5708,23 @@ def voice_session(user: dict = Depends(get_current_user)):
     cache = getattr(voice_session, "_model_cache", {"model": None})
     model = os.environ.get("GEMINI_MODEL_VOICE", "").strip() or cache.get("model")
     if not model:
-        # Preferred Live (BidiGenerateContent) models, newest-known first. The
-        # old gemini-2.0-flash-live-001 was RETIRED (WS 1008 "not found"); its
-        # half-cascade successor is gemini-3.1-flash-live-preview (same client
-        # contract: audio in, audio out + TTS voice). Native-audio models are a
-        # fallback. The probe below also accepts ANY bidiGenerateContent model
-        # the API lists, so this self-heals as model names change again.
+        # Preferred Live (BidiGenerateContent) models, newest-known first.
+        # NATIVE-AUDIO models are listed FIRST on purpose: they detect the
+        # language the user is speaking and reply in that same language
+        # automatically (true mid-conversation Urdu<->English switching). The
+        # half-cascade gemini-3.1-flash-live-preview pipes audio->text->TTS and
+        # its synthesis language does NOT auto-switch without a fixed
+        # languageCode, so it can't satisfy the auto-switch requirement — it's
+        # kept only as a last-resort fallback. (Half-cascade was previously
+        # preferred to stop a 7k-token prompt drowning out the tool defs; the
+        # voice prompt is now compact, so native audio calls run_sql fine.)
+        # The probe below also accepts ANY bidiGenerateContent model the API
+        # lists, so this self-heals as model names change again.
         preferred = [
-            "models/gemini-3.1-flash-live-preview",
             "models/gemini-2.5-flash-native-audio-latest",
             "models/gemini-2.5-flash-native-audio-preview-12-2025",
             "models/gemini-2.5-flash-native-audio-preview-09-2025",
+            "models/gemini-3.1-flash-live-preview",
         ]
         try:
             import urllib.request
@@ -5741,9 +5747,9 @@ def voice_session(user: dict = Depends(get_current_user)):
         except Exception as e:
             print(f"[voice/session] model probe failed: {e}")
         if not model:
-            # Probe failed/empty — use the current half-cascade Live model, NOT
-            # the retired gemini-2.0-flash-live-001.
-            model = "models/gemini-3.1-flash-live-preview"
+            # Probe failed/empty — default to native audio for auto language
+            # matching (NOT the retired gemini-2.0-flash-live-001).
+            model = "models/gemini-2.5-flash-native-audio-latest"
         cache["model"] = model
         voice_session._model_cache = cache  # type: ignore[attr-defined]
         print(f"[voice/session] using model {model}")
