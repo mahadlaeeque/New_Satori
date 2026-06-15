@@ -11900,14 +11900,19 @@ def health_check():
 #  every endpoint degrades gracefully to "not configured".
 # ═══════════════════════════════════════════════════════════════════════════
 import json as _gcal_json
+import uuid as _gcal_uuid
 import urllib.parse as _gcal_urlparse
 import urllib.request as _gcal_urlreq
+from urllib.error import HTTPError as _GcalHTTPError
 from datetime import timezone as _gcal_tz
 from fastapi.responses import RedirectResponse as _GcalRedirect
 
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
-_GCAL_SCOPES = ("https://www.googleapis.com/auth/calendar.readonly "
+# calendar.events grants read AND write (create/update/delete) on the user's
+# events — supersedes the old calendar.readonly. Existing connected users must
+# reconnect once to grant the wider scope.
+_GCAL_SCOPES = ("https://www.googleapis.com/auth/calendar.events "
                 "https://www.googleapis.com/auth/userinfo.email")
 _GCAL_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _GCAL_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -11948,6 +11953,48 @@ def _gcal_get_json(url: str, token: str) -> dict:
     req = _gcal_urlreq.Request(url, headers={"Authorization": f"Bearer {token}"})
     with _gcal_urlreq.urlopen(req, timeout=15) as resp:
         return _gcal_json.loads(resp.read().decode())
+
+
+def _gcal_api(method: str, url: str, token: str, body: dict | None = None) -> dict:
+    """Authenticated JSON call to the Calendar API for writes (POST/PATCH/DELETE)."""
+    data = _gcal_json.dumps(body).encode() if body is not None else None
+    req = _gcal_urlreq.Request(url, data=data, method=method, headers={
+        "Authorization": f"Bearer {token}", "Content-Type": "application/json",
+    })
+    with _gcal_urlreq.urlopen(req, timeout=15) as resp:
+        raw = resp.read().decode()
+        return _gcal_json.loads(raw) if raw else {}
+
+
+def _build_event_resource(body: dict):
+    """Translate the frontend's event payload into a Calendar API event
+    resource. Returns (resource, want_meet). Only includes fields present in
+    `body` so PATCH never clobbers untouched fields (e.g. attendees)."""
+    r: dict = {}
+    if "summary" in body:
+        r["summary"] = (body.get("summary") or "").strip() or "(no title)"
+    if body.get("location") is not None:
+        r["location"] = body.get("location") or ""
+    if body.get("description") is not None:
+        r["description"] = body.get("description") or ""
+    all_day = bool(body.get("all_day"))
+    tz = "Asia/Karachi"
+    if body.get("start"):
+        r["start"] = {"date": body["start"][:10]} if all_day else {"dateTime": body["start"], "timeZone": tz}
+    if body.get("end"):
+        r["end"] = {"date": body["end"][:10]} if all_day else {"dateTime": body["end"], "timeZone": tz}
+    atts = body.get("attendees")
+    if atts:
+        if isinstance(atts, str):
+            atts = [a for a in (x.strip() for x in atts.split(",")) if a]
+        r["attendees"] = [{"email": a} for a in atts if a]
+    want_meet = bool(body.get("add_meet"))
+    if want_meet:
+        r["conferenceData"] = {"createRequest": {
+            "requestId": _gcal_uuid.uuid4().hex,
+            "conferenceSolutionKey": {"type": "hangoutsMeet"},
+        }}
+    return r, want_meet
 
 
 def _gcal_row(uid: int):
@@ -12042,19 +12089,37 @@ def _gcal_fetch_events(uid: int, time_min_iso: str, time_max_iso: str, max_resul
     for ev in data.get("items", []):
         if ev.get("status") == "cancelled":
             continue
-        start, end = ev.get("start", {}), ev.get("end", {})
-        out.append({
-            "id": ev.get("id"),
-            "summary": ev.get("summary") or "(no title)",
-            "start": start.get("dateTime") or start.get("date"),
-            "end": end.get("dateTime") or end.get("date"),
-            "all_day": "date" in start,
-            "location": ev.get("location"),
-            "meet_link": ev.get("hangoutLink"),
-            "attendees": len(ev.get("attendees", []) or []),
-            "organizer": (ev.get("organizer") or {}).get("email"),
-        })
+        out.append(_gcal_normalize(ev))
     return out
+
+
+def _gcal_meet_link(ev) -> str | None:
+    """Best online-meeting link for an event: Google Meet (hangoutLink) first,
+    else the first video entry point in conferenceData (covers Zoom/Teams added
+    via a calendar conferencing add-on)."""
+    if ev.get("hangoutLink"):
+        return ev["hangoutLink"]
+    for ep in (ev.get("conferenceData", {}) or {}).get("entryPoints", []) or []:
+        if ep.get("entryPointType") == "video" and ep.get("uri"):
+            return ep["uri"]
+    return None
+
+
+def _gcal_normalize(ev) -> dict:
+    start, end = ev.get("start", {}) or {}, ev.get("end", {}) or {}
+    return {
+        "id": ev.get("id"),
+        "summary": ev.get("summary") or "(no title)",
+        "start": start.get("dateTime") or start.get("date"),
+        "end": end.get("dateTime") or end.get("date"),
+        "all_day": "date" in start,
+        "location": ev.get("location"),
+        "description": ev.get("description"),
+        "meet_link": _gcal_meet_link(ev),
+        "attendees": len(ev.get("attendees", []) or []),
+        "organizer": (ev.get("organizer") or {}).get("email"),
+        "html_link": ev.get("htmlLink"),
+    }
 
 
 def _gcal_fmt_time(ev) -> str:
@@ -12280,6 +12345,82 @@ def calendar_events(range: str = "today", start: str = "", end: str = "",
         return {"configured": True, "connected": False, "events": [],
                 "error": "Couldn't reach Google Calendar — please reconnect."}
     return {"configured": True, "connected": True, "range": range, "events": evs}
+
+
+def _gcal_write_or_503(uid: int):
+    """Return a valid token for a write, or raise the right HTTP error."""
+    if not _gcal_ready():
+        raise HTTPException(status_code=503, detail="Google Calendar isn't configured on the server.")
+    token = _gcal_access_token(uid)
+    if not token:
+        raise HTTPException(status_code=400, detail="Your Google Calendar isn't connected. Connect it on the Calendar page.")
+    return token
+
+
+def _gcal_write_error(he) -> str:
+    try:
+        payload = _gcal_json.loads(he.read().decode())
+        return (payload.get("error", {}) or {}).get("message") or "Google Calendar rejected the request."
+    except Exception:
+        return "Google Calendar rejected the request."
+
+
+@app.post("/api/calendar/events")
+def calendar_create_event(body: dict, user: dict = Depends(get_current_user)):
+    """Create an event on the user's primary calendar. Set add_meet=true to
+    attach a Google Meet link."""
+    uid = int(user["sub"])
+    token = _gcal_write_or_503(uid)
+    resource, want_meet = _build_event_resource(body)
+    if not resource.get("start") or not resource.get("end"):
+        raise HTTPException(status_code=400, detail="Start and end are required.")
+    url = _GCAL_EVENTS_URL + ("?conferenceDataVersion=1&sendUpdates=all" if want_meet else "?sendUpdates=all")
+    try:
+        created = _gcal_api("POST", url, token, resource)
+    except _GcalHTTPError as he:
+        raise HTTPException(status_code=502, detail=_gcal_write_error(he))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Couldn't reach Google Calendar.")
+    _GCAL_CTX_CACHE.pop(uid, None)  # so the AI sees the new event immediately
+    return {"ok": True, "event": _gcal_normalize(created)}
+
+
+@app.patch("/api/calendar/events/{event_id}")
+def calendar_update_event(event_id: str, body: dict, user: dict = Depends(get_current_user)):
+    """Update / reschedule an event (only the fields supplied are changed)."""
+    uid = int(user["sub"])
+    token = _gcal_write_or_503(uid)
+    resource, want_meet = _build_event_resource(body)
+    if not resource:
+        raise HTTPException(status_code=400, detail="Nothing to update.")
+    url = f"{_GCAL_EVENTS_URL}/{_gcal_urlparse.quote(event_id)}" + ("?conferenceDataVersion=1&sendUpdates=all" if want_meet else "?sendUpdates=all")
+    try:
+        updated = _gcal_api("PATCH", url, token, resource)
+    except _GcalHTTPError as he:
+        raise HTTPException(status_code=502, detail=_gcal_write_error(he))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Couldn't reach Google Calendar.")
+    _GCAL_CTX_CACHE.pop(uid, None)
+    return {"ok": True, "event": _gcal_normalize(updated)}
+
+
+@app.delete("/api/calendar/events/{event_id}")
+def calendar_delete_event(event_id: str, user: dict = Depends(get_current_user)):
+    uid = int(user["sub"])
+    token = _gcal_write_or_503(uid)
+    url = f"{_GCAL_EVENTS_URL}/{_gcal_urlparse.quote(event_id)}?sendUpdates=all"
+    try:
+        _gcal_api("DELETE", url, token)
+    except _GcalHTTPError as he:
+        # 410 Gone = already deleted; treat as success.
+        if getattr(he, "code", None) in (404, 410):
+            _GCAL_CTX_CACHE.pop(uid, None)
+            return {"ok": True}
+        raise HTTPException(status_code=502, detail=_gcal_write_error(he))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Couldn't reach Google Calendar.")
+    _GCAL_CTX_CACHE.pop(uid, None)
+    return {"ok": True}
 
 
 from fastapi.staticfiles import StaticFiles

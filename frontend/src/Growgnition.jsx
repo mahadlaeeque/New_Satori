@@ -10285,7 +10285,163 @@ const UsageAnalyticsPage = () => {
   );
 };
 
-// ─── Calendar page — per-user Google Calendar (read-only) ───
+// Create / edit / reschedule / delete a Google Calendar event.
+const EventEditorModal = ({ event, defaultDate, onClose, onSaved }) => {
+  const isEdit = !!event;
+  const pad = (n) => String(n).padStart(2, "0");
+  const hhmm = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const init = (() => {
+    if (event && !event.all_day) {
+      try {
+        const s = new Date(event.start), e = new Date(event.end || event.start);
+        return { date: ymd(s), startTime: hhmm(s), endTime: hhmm(e), allDay: false };
+      } catch { /* fall through */ }
+    }
+    if (event && event.all_day) return { date: (event.start || "").slice(0, 10) || defaultDate, startTime: "09:00", endTime: "10:00", allDay: true };
+    return { date: defaultDate, startTime: "09:00", endTime: "10:00", allDay: false };
+  })();
+
+  const [title, setTitle] = useState(event?.summary && event.summary !== "(no title)" ? event.summary : "");
+  const [allDay, setAllDay] = useState(init.allDay);
+  const [date, setDate] = useState(init.date);
+  const [startTime, setStartTime] = useState(init.startTime);
+  const [endTime, setEndTime] = useState(init.endTime);
+  const [location, setLocation] = useState(event?.location || "");
+  const [description, setDescription] = useState(event?.description || "");
+  const [attendees, setAttendees] = useState("");
+  const [addMeet, setAddMeet] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState(null);
+
+  const hasMeet = !!event?.meet_link;
+  const inputStyle = {
+    width: "100%", padding: "9px 11px", borderRadius: 9, border: `1px solid ${COLORS.border}`,
+    background: COLORS.surfaceAlt, color: COLORS.textPrimary, fontSize: 13, fontFamily: "inherit",
+    outline: "none", boxSizing: "border-box",
+  };
+  const label = { fontSize: 11.5, fontWeight: 700, color: COLORS.textSecondary, marginBottom: 5, display: "block" };
+
+  const save = async () => {
+    if (!title.trim()) { setError("Give the event a title."); return; }
+    const payload = { summary: title.trim(), location, description, all_day: allDay };
+    if (allDay) {
+      payload.start = date;
+      const [y, m, d] = date.split("-").map(Number);
+      payload.end = ymd(new Date(y, m - 1, d + 1)); // Google all-day end is exclusive
+    } else {
+      if (endTime <= startTime) { setError("End time must be after the start time."); return; }
+      payload.start = `${date}T${startTime}:00`;
+      payload.end = `${date}T${endTime}:00`;
+    }
+    if (!isEdit && attendees.trim()) payload.attendees = attendees.split(",").map(s => s.trim()).filter(Boolean);
+    if (addMeet) payload.add_meet = true;
+    setSaving(true); setError(null);
+    try {
+      const url = isEdit ? `${API_BASE}/api/calendar/events/${encodeURIComponent(event.id)}` : `${API_BASE}/api/calendar/events`;
+      const r = await fetch(url, {
+        method: isEdit ? "PATCH" : "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); setError(j.detail || "Couldn't save the event."); setSaving(false); return; }
+      onSaved();
+    } catch { setError("Couldn't reach the server."); setSaving(false); }
+  };
+
+  const remove = async () => {
+    if (!window.confirm(`Delete "${event.summary}"? Attendees will be notified.`)) return;
+    setDeleting(true); setError(null);
+    try {
+      const r = await fetch(`${API_BASE}/api/calendar/events/${encodeURIComponent(event.id)}`, { method: "DELETE", headers: authHeaders() });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); setError(j.detail || "Couldn't delete the event."); setDeleting(false); return; }
+      onSaved();
+    } catch { setError("Couldn't reach the server."); setDeleting(false); }
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 1600, background: "rgba(15,23,42,0.55)", backdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 18, padding: 22, boxShadow: "0 24px 60px rgba(0,0,0,0.4)", maxHeight: "88vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+          <div style={{ fontSize: 16, fontWeight: 800, color: COLORS.textPrimary }}>{isEdit ? "Edit event" : "New event"}</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted, display: "flex" }}><X size={18} /></button>
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <label style={label}>Title</label>
+          <input value={title} onChange={e => setTitle(e.target.value)} placeholder="Meeting title" autoFocus style={inputStyle} />
+        </div>
+
+        <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 13, color: COLORS.textPrimary, cursor: "pointer" }}>
+          <input type="checkbox" checked={allDay} onChange={e => setAllDay(e.target.checked)} style={{ accentColor: COLORS.accent }} /> All day
+        </label>
+
+        <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 150px" }}>
+            <label style={label}>Date</label>
+            <input type="date" value={date} onChange={e => setDate(e.target.value)} style={inputStyle} />
+          </div>
+          {!allDay && (
+            <>
+              <div style={{ flex: "1 1 90px" }}>
+                <label style={label}>Start</label>
+                <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)} style={inputStyle} />
+              </div>
+              <div style={{ flex: "1 1 90px" }}>
+                <label style={label}>End</label>
+                <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)} style={inputStyle} />
+              </div>
+            </>
+          )}
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <label style={label}>Location</label>
+          <input value={location} onChange={e => setLocation(e.target.value)} placeholder="Room, address, or leave blank" style={inputStyle} />
+        </div>
+
+        {!isEdit && (
+          <div style={{ marginBottom: 12 }}>
+            <label style={label}>Guests (comma-separated emails, optional)</label>
+            <input value={attendees} onChange={e => setAttendees(e.target.value)} placeholder="ali@tmcltd.com, sara@tmcltd.com" style={inputStyle} />
+          </div>
+        )}
+
+        <div style={{ marginBottom: 14 }}>
+          <label style={label}>Description</label>
+          <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} placeholder="Optional notes" style={{ ...inputStyle, resize: "vertical" }} />
+        </div>
+
+        {hasMeet ? (
+          <div style={{ fontSize: 12, color: COLORS.textMuted, marginBottom: 14, display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <LinkIcon size={12} color={COLORS.accent} /> A meeting link is already attached.
+          </div>
+        ) : (
+          <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, fontSize: 13, color: COLORS.textPrimary, cursor: "pointer" }}>
+            <input type="checkbox" checked={addMeet} onChange={e => setAddMeet(e.target.checked)} style={{ accentColor: COLORS.accent }} /> Add a Google Meet video link
+          </label>
+        )}
+
+        {error && <div style={{ fontSize: 12, color: "var(--sem-danger-fg)", marginBottom: 12 }}>{error}</div>}
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {isEdit && (
+            <button onClick={remove} disabled={deleting || saving} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 14px", borderRadius: 10, border: `1px solid var(--sem-danger-bg)`, background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+              <Trash2 size={14} /> {deleting ? "Deleting…" : "Delete"}
+            </button>
+          )}
+          <div style={{ flex: 1 }} />
+          <button onClick={onClose} style={{ padding: "9px 16px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "transparent", color: COLORS.textSecondary, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Cancel</button>
+          <button onClick={save} disabled={saving || deleting} style={{ padding: "9px 18px", borderRadius: 10, border: "none", background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentDark})`, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", boxShadow: `0 6px 16px ${COLORS.accent}44` }}>
+            {saving ? "Saving…" : isEdit ? "Save changes" : "Create event"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── Calendar page — per-user Google Calendar (view + edit) ───
 const CalendarPage = () => {
   const [status, setStatus] = useState(null);   // {configured, connected, google_email}
   const [loading, setLoading] = useState(true);
@@ -10295,6 +10451,7 @@ const CalendarPage = () => {
   const [evLoading, setEvLoading] = useState(false);
   const [banner, setBanner] = useState(null);     // {type:'ok'|'error', msg}
   const [busy, setBusy] = useState(false);
+  const [editor, setEditor] = useState(null);      // null | { event, date }
 
   // Month grid spans the Monday before the 1st, six weeks (42 cells).
   const monthStart = new Date(viewDate.getFullYear(), viewDate.getMonth(), 1);
@@ -10388,7 +10545,9 @@ const CalendarPage = () => {
   const EventRow = ({ e }) => {
     const past = !e.all_day && new Date(e.end || e.start).getTime() < Date.now();
     return (
-      <div style={{ display: "flex", gap: 14, padding: "12px 16px", borderRadius: 12, background: COLORS.surface, border: `1px solid ${COLORS.border}`, opacity: past ? 0.55 : 1 }}>
+      <div onClick={() => setEditor({ event: e, date: selectedKey })} title="Edit event" style={{ display: "flex", gap: 14, padding: "12px 16px", borderRadius: 12, background: COLORS.surface, border: `1px solid ${COLORS.border}`, opacity: past ? 0.55 : 1, cursor: "pointer", transition: "border-color 0.12s" }}
+        onMouseEnter={ev => { ev.currentTarget.style.borderColor = COLORS.accent; }}
+        onMouseLeave={ev => { ev.currentTarget.style.borderColor = COLORS.border; }}>
         <div style={{ minWidth: 74, textAlign: "right", flexShrink: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 800, color: COLORS.accent }}>{gcalEventTime(e)}</div>
         </div>
@@ -10398,7 +10557,7 @@ const CalendarPage = () => {
           <div style={{ display: "flex", flexWrap: "wrap", gap: 14, marginTop: 4, fontSize: 11.5, color: COLORS.textMuted }}>
             {e.location && <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Globe size={11} /> {e.location}</span>}
             {e.attendees > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Users size={11} /> {e.attendees}</span>}
-            {e.meet_link && <a href={e.meet_link} target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 4, color: COLORS.accent, fontWeight: 700, textDecoration: "none" }}><LinkIcon size={11} /> Join</a>}
+            {e.meet_link && <a href={e.meet_link} target="_blank" rel="noreferrer" onClick={ev => ev.stopPropagation()} style={{ display: "inline-flex", alignItems: "center", gap: 4, color: COLORS.accent, fontWeight: 700, textDecoration: "none" }}><LinkIcon size={11} /> Join</a>}
           </div>
         </div>
       </div>
@@ -10420,7 +10579,7 @@ const CalendarPage = () => {
             <div style={{ fontSize: 12.5, color: COLORS.textSecondary, marginTop: 2 }}>
               {loading ? "Checking connection…"
                 : !status?.configured ? "Calendar integration isn't set up on the server yet."
-                : status?.connected ? <>Connected{status.google_email ? <> as <b>{status.google_email}</b></> : ""} · read-only</>
+                : status?.connected ? <>Connected{status.google_email ? <> as <b>{status.google_email}</b></> : ""} · view &amp; edit</>
                 : "Link your Google Calendar so Satori knows your schedule."}
             </div>
           </div>
@@ -10442,7 +10601,7 @@ const CalendarPage = () => {
         </div>
         {status?.connected && (
           <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 12 }}>
-            Satori reads your events to show your schedule and answer questions like “what's my next meeting?” or “am I free Thursday?”. It never edits or shares your calendar.
+            Satori shows your schedule, lets you create / reschedule / delete events here, and can answer questions like “what's my next meeting?” or “am I free Thursday?”. It never shares your calendar.
           </div>
         )}
       </div>
@@ -10457,7 +10616,10 @@ const CalendarPage = () => {
               <button onClick={() => setViewDate(d => new Date(d.getFullYear(), d.getMonth() + 1, 1))} title="Next month" style={navBtn}><ChevronRight size={16} /></button>
             </div>
             <button onClick={() => { const t = new Date(); setViewDate(new Date(t.getFullYear(), t.getMonth(), 1)); setSelectedKey(ymd(t)); }} style={pillBtn}>Today</button>
-            <button onClick={loadMonth} title="Refresh" style={{ marginLeft: "auto", ...navBtn }}><RefreshCw size={14} style={{ animation: evLoading ? "spin 0.8s linear infinite" : "none" }} /></button>
+            <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+              <button onClick={() => setEditor({ event: null, date: selectedKey })} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 10, border: "none", background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentDark})`, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", boxShadow: `0 6px 16px ${COLORS.accent}44` }}><Plus size={15} /> New event</button>
+              <button onClick={loadMonth} title="Refresh" style={navBtn}><RefreshCw size={14} style={{ animation: evLoading ? "spin 0.8s linear infinite" : "none" }} /></button>
+            </div>
           </div>
 
           <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "hidden" }}>
@@ -10522,6 +10684,15 @@ const CalendarPage = () => {
             )}
           </div>
         </>
+      )}
+
+      {editor && (
+        <EventEditorModal
+          event={editor.event}
+          defaultDate={editor.date}
+          onClose={() => setEditor(null)}
+          onSaved={() => { setEditor(null); loadMonth(); }}
+        />
       )}
     </div>
   );
