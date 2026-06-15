@@ -7611,6 +7611,171 @@ def _dept_scope_clause(dept_scope: list | None) -> str:
     return f" AND LOWER(COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified')) IN ({quoted})"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  MINDMAP BUILDER — data-grounded node graphs (MVP: org / department tree)
+#  The org-tree endpoint reads the live workforce hierarchy (dept-scoped) and
+#  returns nodes/edges the frontend renders with react-flow. saved_mindmaps
+#  persists the spec (config) like saved_dashboards.
+# ─────────────────────────────────────────────────────────────────────────────
+def _clean_resource_name(raw: str) -> str:
+    """Strip the leading employee-code prefix from Resource_Name
+    ('E-1571 - Mahad Laeeque' / 'C-064 Mahad' → 'Mahad Laeeque')."""
+    import re as _re
+    s = (raw or "").strip()
+    stripped = _re.sub(r"^[A-Za-z]{0,3}-?\d+\s*[-–—]?\s*", "", s).strip()
+    return stripped or s
+
+
+@app.get("/api/mindmap/org-tree")
+def mindmap_org_tree(department: str = "", user: dict = Depends(get_current_user)):
+    """Build the org/department mindmap: TMC → departments → people, from live
+    Employee_Data, honouring the caller's department scope. `department` (a
+    EmployeeHierarchyNode value) optionally narrows to one branch."""
+    uid = int(user["sub"])
+    is_admin = (user.get("role") or "").lower() == "admin"
+    dept_scope = None if is_admin else _get_user_dept_scope(uid)
+    sql = f"""
+        SELECT Employee_Code, Resource_Name, EmployeePosition, EmployeeHierarchyNode, EmployeeLocation
+        FROM {_bq_avail('Employee_Data')}
+        WHERE LOWER(COALESCE(employee_status, '')) = 'active'
+              {_dept_scope_clause(dept_scope)}
+        ORDER BY EmployeeHierarchyNode, Resource_Name
+    """
+    sql = normalize_bq_project(sql)
+    r = bq_run_query(sql, max_rows=3000)
+    if "error" in r:
+        raise HTTPException(status_code=502, detail=f"Couldn't read workforce data: {r['error']}")
+    rows = r.get("rows") or []
+
+    from collections import OrderedDict
+    depts = OrderedDict()
+    for row in rows:
+        d = (row.get("EmployeeHierarchyNode") or "").strip() or "Unspecified"
+        depts.setdefault(d, []).append(row)
+    all_departments = sorted(depts.keys())
+
+    sel = (department or "").strip().lower()
+    if sel:
+        depts = OrderedDict((k, v) for k, v in depts.items() if k.lower() == sel)
+
+    total_people = sum(len(v) for v in depts.values())
+    single = bool(sel and len(depts) == 1)
+    root_label = (next(iter(depts)) if single else "TMC")
+
+    nodes, edges, seen = [], [], set()
+    def _add_node(n):
+        if n["id"] in seen:
+            return False
+        seen.add(n["id"]); nodes.append(n); return True
+
+    _add_node({"id": "root", "type": "root", "label": root_label,
+               "sublabel": f"{total_people} people" + ("" if single else f" · {len(depts)} departments")})
+    for d, people in depts.items():
+        did = f"dept::{d}"
+        _add_node({"id": did, "type": "department", "label": d, "sublabel": f"{len(people)} people"})
+        edges.append({"id": f"root->{did}", "source": "root", "target": did})
+        for i, p in enumerate(people):
+            code = (p.get("Employee_Code") or "").strip()
+            pid = f"emp::{code or 'x'}::{i}"
+            _add_node({
+                "id": pid, "type": "person",
+                "label": _clean_resource_name(p.get("Resource_Name")),
+                "sublabel": (p.get("EmployeePosition") or "").strip(),
+                "location": (p.get("EmployeeLocation") or "").strip(),
+                "code": code,
+            })
+            edges.append({"id": f"{did}->{pid}", "source": did, "target": pid})
+
+    return {
+        "title": (root_label + " — Org Map") if single else "TMC — Org Map",
+        "departments": all_departments,
+        "nodes": nodes, "edges": edges,
+        "counts": {"people": total_people, "departments": len(depts)},
+    }
+
+
+@app.get("/api/mindmaps")
+def list_mindmaps(user: dict = Depends(get_current_user)):
+    uid = int(user["sub"])
+    db = get_db(); cur = db.cursor()
+    rows = []
+    try:
+        cur.execute("SELECT id, name, description, updated_at FROM saved_mindmaps WHERE user_id = ? ORDER BY updated_at DESC", (uid,))
+        rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[/api/mindmaps] error: {e}")
+    db.close()
+    return {"mindmaps": rows}
+
+
+@app.post("/api/mindmaps")
+def create_mindmap(body: dict, user: dict = Depends(get_current_user)):
+    from database import USE_POSTGRES
+    uid = int(user["sub"])
+    name = (body.get("name") or body.get("title") or "Untitled mindmap").strip()
+    description = (body.get("description") or "").strip()
+    config_json = json.dumps(body.get("config") or {})
+    db = get_db(); cur = db.cursor()
+    if USE_POSTGRES:
+        cur.execute("INSERT INTO saved_mindmaps (user_id, name, description, config) VALUES (?, ?, ?, ?) RETURNING id",
+                    (uid, name, description, config_json))
+        row = cur.fetchone(); new_id = row["id"] if isinstance(row, dict) else row[0]
+    else:
+        cur.execute("INSERT INTO saved_mindmaps (user_id, name, description, config) VALUES (?, ?, ?, ?)",
+                    (uid, name, description, config_json))
+        new_id = cur.lastrowid
+    db.commit(); db.close()
+    return {"id": new_id, "ok": True}
+
+
+@app.get("/api/mindmaps/{mindmap_id}")
+def get_mindmap(mindmap_id: int, user: dict = Depends(get_current_user)):
+    uid = int(user["sub"])
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT id, name, description, config, user_id, updated_at FROM saved_mindmaps WHERE id = ? AND user_id = ?", (mindmap_id, uid))
+    row = cur.fetchone(); db.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Mindmap not found")
+    r = dict(row)
+    if isinstance(r.get("config"), str):
+        try: r["config"] = json.loads(r["config"])
+        except Exception: pass
+    return r
+
+
+@app.put("/api/mindmaps/{mindmap_id}")
+def update_mindmap(mindmap_id: int, body: dict, user: dict = Depends(get_current_user)):
+    from database import USE_POSTGRES
+    uid = int(user["sub"])
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT id FROM saved_mindmaps WHERE id = ? AND user_id = ?", (mindmap_id, uid))
+    if not cur.fetchone():
+        db.close(); raise HTTPException(status_code=404, detail="Mindmap not found")
+    sets, params = [], []
+    if body.get("name") is not None or body.get("title") is not None:
+        sets.append("name = ?"); params.append(body.get("name") or body.get("title"))
+    if body.get("description") is not None:
+        sets.append("description = ?"); params.append(body.get("description"))
+    if body.get("config") is not None:
+        sets.append("config = ?"); params.append(json.dumps(body.get("config")))
+    if not sets:
+        db.close(); return {"ok": True, "note": "nothing to update"}
+    sets.append("updated_at = " + ("NOW()" if USE_POSTGRES else "datetime('now')"))
+    params.append(mindmap_id)
+    cur.execute(f"UPDATE saved_mindmaps SET {', '.join(sets)} WHERE id = ?", tuple(params))
+    db.commit(); db.close()
+    return {"ok": True}
+
+
+@app.delete("/api/mindmaps/{mindmap_id}")
+def delete_mindmap(mindmap_id: int, user: dict = Depends(get_current_user)):
+    uid = int(user["sub"])
+    db = get_db(); cur = db.cursor()
+    cur.execute("DELETE FROM saved_mindmaps WHERE id = ? AND user_id = ?", (mindmap_id, uid))
+    db.commit(); db.close()
+    return {"ok": True}
+
+
 def _norm_emp_id(col: str) -> str:
     """Normalize an employee-ID column for cross-table joining.
 
