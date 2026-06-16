@@ -10746,16 +10746,25 @@ const CalendarPage = () => {
             <div style={{ fontSize: 12.5, color: COLORS.textSecondary, marginTop: 2 }}>
               {loading ? "Checking connection…"
                 : !status?.configured ? "Calendar integration isn't set up on the server yet."
-                : status?.connected ? <>Connected{status.google_email ? <> as <b>{status.google_email}</b></> : ""} · view &amp; edit</>
+                : status?.connected ? <>Connected{status.google_email ? <> as <b>{status.google_email}</b></> : ""} · {status?.can_edit ? "view & edit" : "read-only"}</>
                 : "Link your Google Calendar so Satori knows your schedule."}
             </div>
           </div>
           {!loading && status?.configured && (
             status.connected ? (
-              <button onClick={disconnect} disabled={busy} style={{
-                padding: "9px 16px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "transparent",
-                color: COLORS.textSecondary, fontWeight: 700, fontSize: 13, cursor: busy ? "default" : "pointer",
-              }}>Disconnect</button>
+              <div style={{ display: "flex", gap: 8 }}>
+                {!status?.can_edit && (
+                  <button onClick={connect} disabled={busy} style={{
+                    padding: "9px 16px", borderRadius: 10, border: "none",
+                    background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentDark})`, color: "#fff",
+                    fontWeight: 700, fontSize: 13, cursor: busy ? "default" : "pointer",
+                  }}>{busy ? "Redirecting…" : "Enable editing"}</button>
+                )}
+                <button onClick={disconnect} disabled={busy} style={{
+                  padding: "9px 16px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "transparent",
+                  color: COLORS.textSecondary, fontWeight: 700, fontSize: 13, cursor: busy ? "default" : "pointer",
+                }}>Disconnect</button>
+              </div>
             ) : (
               <button onClick={connect} disabled={busy} style={{
                 padding: "10px 18px", borderRadius: 10, border: `1px solid ${COLORS.border}`,
@@ -10766,9 +10775,14 @@ const CalendarPage = () => {
             )
           )}
         </div>
-        {status?.connected && (
+        {status?.connected && !status?.can_edit && (
+          <div style={{ fontSize: 12, color: "var(--sem-warn-fg, #B45309)", background: "var(--sem-warn-bg)", borderRadius: 10, padding: "10px 12px", marginTop: 12, fontWeight: 600 }}>
+            Connected with read-only access — Satori can show your schedule but can't create or edit events yet. Click <b>Enable editing</b> (or Disconnect then reconnect) and approve calendar access to turn on create/edit/delete from chat, voice, and here.
+          </div>
+        )}
+        {status?.connected && status?.can_edit && (
           <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 12 }}>
-            Satori shows your schedule, lets you create / reschedule / delete events here, and can answer questions like “what's my next meeting?” or “am I free Thursday?”. It never shares your calendar.
+            Satori shows your schedule, lets you create / reschedule / delete events here or by chat/voice, and answers questions like “what's my next meeting?”. It never shares your calendar.
           </div>
         )}
       </div>

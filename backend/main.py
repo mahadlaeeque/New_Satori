@@ -2603,7 +2603,7 @@ TOPIC_SCOPE_GUARD = """
 You are Satori. You ONLY help with TMC's internal workforce + sales data: attendance, timesheets, resource allocation, employee/capability info, and sales (pipeline, accounts, AM scorecards, hunting gap). You may also answer simple questions about Satori itself and respond to basic greetings.
 
 EXCEPTION — THE USER'S OWN CALENDAR: if (and only if) a "USER'S GOOGLE CALENDAR" block appears in your context, you MAY answer the user's questions about their OWN schedule and meetings for ANY day shown in that block — today or later this week (e.g. "what's my next meeting?", "am I free Thursday afternoon?", "what do I have on Wednesday?", "what's on this week?") — using ONLY the events in that block. This is the signed-in user's personal calendar that they connected themselves — it is in scope for them.
-You ALSO have calendar-management tools — find_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event — that act ONLY on this signed-in user's own Google Calendar. Use them when the user asks to schedule, move/reschedule, or cancel a meeting: to edit or delete, FIRST call find_calendar_events to get the event_id; briefly confirm the details before creating, and ALWAYS confirm before deleting. (The tools handle the not-connected case themselves.) If no calendar block is present and the user asks a generic schedule question unrelated to their own calendar, treat it as out-of-scope.
+You ALSO have calendar-management tools — find_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event — that act ONLY on this signed-in user's own Google Calendar. Use them when the user asks to schedule, move/reschedule, or cancel a meeting. BEFORE creating an event, make sure you have the essentials and ASK (one short turn) for anything the user didn't give — in particular: is it ONLINE or IN-PERSON? (online → set add_meet=true to attach a Google Meet link; in-person → ask for the location), plus the attendees, the date, and the start & end time (assume 30–60 min only if they say so). Then read the final details back and create. To edit or delete, FIRST call find_calendar_events to get the event_id, and ALWAYS confirm before deleting. (The tools handle the not-connected / read-only case themselves — relay their message.) If no calendar block is present and the user asks a generic schedule question unrelated to their own calendar, treat it as out-of-scope.
 
 You MUST REFUSE everything else — including general knowledge / trivia / "fun facts" (animals, geography, science, history, current events), creative writing (poems, jokes, stories), opinions, coding or technical help, translation or math unrelated to the data, personal / medical / legal / financial advice, and anything not grounded in the TMC warehouse.
 
@@ -2906,7 +2906,7 @@ When the user asks about attendance for a period (a month, a week, a date range)
 """
 
 VOICE_SYSTEM_PROMPT_URDU = """### ABSOLUTE RULE #0 — NEVER FABRICATE DATA. TOOLS FIRST, ALWAYS. ###
-You have these tools: `run_sql(sql)` for BigQuery queries (use for every TMC figure); `end_call(reason)` to hang up when the user says goodbye; and CALENDAR tools for the user's OWN Google Calendar — `find_calendar_events`, `create_calendar_event`, `update_calendar_event`, `delete_calendar_event` — use them when the user wants to check, schedule, move, or cancel a meeting (to edit/cancel, call find_calendar_events first for the event_id; confirm details before creating and ALWAYS confirm before deleting; dates YYYY-MM-DD, times HH:MM 24h, Pakistan time).
+You have these tools: `run_sql(sql)` for BigQuery queries (use for every TMC figure); `end_call(reason)` to hang up when the user says goodbye; and CALENDAR tools for the user's OWN Google Calendar — `find_calendar_events`, `create_calendar_event`, `update_calendar_event`, `delete_calendar_event` — use them when the user wants to check, schedule, move, or cancel a meeting. Create karne se PEHLE jo detail missing ho woh poochho — khaas taur par online hai ya in-person? (online → add_meet=true Google Meet link ke liye; in-person → location poochho), aur attendees + date/time. Phir details confirm karke create karo. Edit/cancel ke liye pehle find_calendar_events se event_id lo; delete se pehle HAMESHA confirm karo. Agar tool kahe access read-only hai to user ko bolo Calendar page par reconnect karein. Dates YYYY-MM-DD, times HH:MM 24h, Pakistan time.
 
 EVERY answer involving ANY TMC figure (attendance, headcount, allocation %, pipeline USD, deal count, win rate, target, achievement) MUST come from a tool call made IN THIS SESSION, in THIS turn.
 
@@ -2965,7 +2965,7 @@ This is dynamic and per-turn: if the user switches language partway through the 
 1. run_sql(sql) — runs a BigQuery SELECT against `ai-vertex-mahad.Satori_Project`.
    CALL THIS for every TMC data question. No exceptions.
 2. end_call(reason) — hangs up the call. Call ONLY when the user says goodbye.
-3. CALENDAR TOOLS (the user's OWN Google Calendar): find_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event. Use them when the user asks to check, schedule, move, or cancel a meeting. To edit or cancel, FIRST call find_calendar_events to get the event_id; read back the key details and get a quick spoken "yes" BEFORE you create, and ALWAYS confirm before you delete. Dates are YYYY-MM-DD and times HH:MM (24h), Pakistan time.
+3. CALENDAR TOOLS (the user's OWN Google Calendar): find_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event. Use them when the user asks to check, schedule, move, or cancel a meeting. BEFORE you create, briefly ASK for any detail they didn't give — especially: online or in-person? (online → set add_meet=true for a Google Meet link; in-person → ask the location), plus who's invited and the date/start/end time. Then read the final details back, get a spoken "yes", and create. To edit or cancel, FIRST call find_calendar_events to get the event_id, and ALWAYS confirm before you delete. If a tool says access is read-only, tell the user to reconnect Google Calendar on the Calendar page. Dates are YYYY-MM-DD and times HH:MM (24h), Pakistan time.
 
 ═══ DATA QUESTION FLOW (do exactly this) ═══
 
@@ -12454,10 +12454,14 @@ def _gcal_agent_action(uid: int, name: str, args: dict) -> str:
     human-readable string the model relays to the user."""
     if not _gcal_ready():
         return "Google Calendar isn't configured on the server."
-    if not _gcal_row(uid):
+    row = _gcal_row(uid)
+    if not row:
         return ("The user hasn't connected their Google Calendar yet — tell them to open the "
                 "Calendar page in Satori and click Connect Google Calendar.")
     args = args or {}
+    # Writes need the calendar.events scope; a read-only grant can't create/edit/delete.
+    if name in ("create_calendar_event", "update_calendar_event", "delete_calendar_event") and not _gcal_scope_can_write(row):
+        return _GCAL_RECONNECT_MSG
     token = _gcal_access_token(uid)
     if not token:
         return "Couldn't access the user's Google Calendar — they may need to reconnect it on the Calendar page."
@@ -12523,13 +12527,29 @@ def voice_calendar_action(body: dict, user: dict = Depends(get_current_user)):
     return {"result": _gcal_agent_action(int(user["sub"]), name, body.get("args") or {})}
 
 
+def _gcal_scope_can_write(row) -> bool:
+    """True if the stored OAuth grant includes calendar WRITE access
+    (calendar.events or full calendar). A read-only grant can't create/edit."""
+    try:
+        s = (row["scope"] if row else "") or ""
+    except Exception:
+        s = ""
+    return ("calendar.events" in s) or s.rstrip("/").endswith("/auth/calendar")
+
+
+_GCAL_RECONNECT_MSG = ("Satori currently has READ-ONLY access to this calendar, so it can't create, "
+                       "move, or delete events. To enable editing: open the Calendar page in Satori, "
+                       "click Disconnect, then Connect Google Calendar again and approve.")
+
+
 @app.get("/api/integrations/google/status")
 def google_cal_status(user: dict = Depends(get_current_user)):
     if not _gcal_ready():
         return {"configured": False, "connected": False}
     row = _gcal_row(int(user["sub"]))
     return {"configured": True, "connected": bool(row),
-            "google_email": (row["google_email"] if row else None)}
+            "google_email": (row["google_email"] if row else None),
+            "can_edit": _gcal_scope_can_write(row)}
 
 
 @app.get("/api/integrations/google/connect")
@@ -12641,9 +12661,14 @@ def _gcal_write_or_503(uid: int):
     """Return a valid token for a write, or raise the right HTTP error."""
     if not _gcal_ready():
         raise HTTPException(status_code=503, detail="Google Calendar isn't configured on the server.")
+    row = _gcal_row(uid)
+    if not row:
+        raise HTTPException(status_code=400, detail="Your Google Calendar isn't connected. Connect it on the Calendar page.")
+    if not _gcal_scope_can_write(row):
+        raise HTTPException(status_code=403, detail=_GCAL_RECONNECT_MSG)
     token = _gcal_access_token(uid)
     if not token:
-        raise HTTPException(status_code=400, detail="Your Google Calendar isn't connected. Connect it on the Calendar page.")
+        raise HTTPException(status_code=400, detail="Couldn't access your Google Calendar — please reconnect it on the Calendar page.")
     return token
 
 
