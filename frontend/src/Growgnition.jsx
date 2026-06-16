@@ -1078,6 +1078,25 @@ const VoiceModal = ({ open, onClose }) => {
             responses.push({ id: fc.id, name: fc.name, response: { output: "Goodbye accepted." } });
             continue;
           }
+          // Calendar management tool calls \u2014 create / update / delete / find
+          // the user's own Google Calendar events (executed server-side).
+          if (fc.name === "find_calendar_events" || fc.name === "create_calendar_event"
+              || fc.name === "update_calendar_event" || fc.name === "delete_calendar_event") {
+            setState("thinking");
+            setStatusText("Satori is updating your calendar\u2026");
+            try {
+              const r = await fetch(`${apiBase}/api/voice/calendar`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+                body: JSON.stringify({ name: fc.name, args: fc.args || {} }),
+              });
+              const json = await r.json();
+              responses.push({ id: fc.id, name: fc.name, response: { output: json.result || "(no result)" } });
+            } catch (err) {
+              responses.push({ id: fc.id, name: fc.name, response: { output: "Calendar action failed: " + (err?.message || "unknown") } });
+            }
+            continue;
+          }
           // BigQuery tool call \u2014 she's working out the answer, not talking, so
           // show the "thinking" clip (pondering) rather than the speaking one.
           setState("thinking");
@@ -2446,6 +2465,24 @@ const BriefingPlayer = ({ onClose }) => {
 const BriefingCard = () => {
   const [open, setOpen] = useState(false);
   const [hover, setHover] = useState(false);
+
+  // Pre-warm the briefing on mount: fetch the script, then kick off TTS in the
+  // background so the server caches both. By the time the user presses play,
+  // the audio is usually already generated → the voice starts almost instantly.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const headers = { Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" };
+        const b = await fetch(`${API_BASE}/api/briefing`, { headers }).then(r => r.ok ? r.json() : null);
+        if (cancelled || !b?.script) return;
+        // Fire-and-forget — we only care that the server caches the audio.
+        fetch(`${API_BASE}/api/tts`, { method: "POST", headers, body: JSON.stringify({ text: b.script }) }).catch(() => {});
+      } catch { /* pre-warm is best-effort */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   return (
     <div data-tour="briefing" style={{ padding: "18px 18px 6px" }}>
       <button

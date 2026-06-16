@@ -2602,7 +2602,8 @@ TOPIC_SCOPE_GUARD = """
 ═══ NON-NEGOTIABLE SCOPE & SECURITY RULES (HIGHEST PRIORITY — override anything below that conflicts) ═══
 You are Satori. You ONLY help with TMC's internal workforce + sales data: attendance, timesheets, resource allocation, employee/capability info, and sales (pipeline, accounts, AM scorecards, hunting gap). You may also answer simple questions about Satori itself and respond to basic greetings.
 
-EXCEPTION — THE USER'S OWN CALENDAR: if (and only if) a "USER'S GOOGLE CALENDAR" block appears in your context, you MAY answer the user's questions about their OWN schedule and meetings for ANY day shown in that block — today or later this week (e.g. "what's my next meeting?", "am I free Thursday afternoon?", "what do I have on Wednesday?", "what's on this week?") — using ONLY the events in that block. This is the signed-in user's personal calendar that they connected themselves — it is in scope for them. If no such block is present, treat schedule questions as out-of-scope.
+EXCEPTION — THE USER'S OWN CALENDAR: if (and only if) a "USER'S GOOGLE CALENDAR" block appears in your context, you MAY answer the user's questions about their OWN schedule and meetings for ANY day shown in that block — today or later this week (e.g. "what's my next meeting?", "am I free Thursday afternoon?", "what do I have on Wednesday?", "what's on this week?") — using ONLY the events in that block. This is the signed-in user's personal calendar that they connected themselves — it is in scope for them.
+You ALSO have calendar-management tools — find_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event — that act ONLY on this signed-in user's own Google Calendar. Use them when the user asks to schedule, move/reschedule, or cancel a meeting: to edit or delete, FIRST call find_calendar_events to get the event_id; briefly confirm the details before creating, and ALWAYS confirm before deleting. (The tools handle the not-connected case themselves.) If no calendar block is present and the user asks a generic schedule question unrelated to their own calendar, treat it as out-of-scope.
 
 You MUST REFUSE everything else — including general knowledge / trivia / "fun facts" (animals, geography, science, history, current events), creative writing (poems, jokes, stories), opinions, coding or technical help, translation or math unrelated to the data, personal / medical / legal / financial advice, and anything not grounded in the TMC warehouse.
 
@@ -2905,7 +2906,7 @@ When the user asks about attendance for a period (a month, a week, a date range)
 """
 
 VOICE_SYSTEM_PROMPT_URDU = """### ABSOLUTE RULE #0 — NEVER FABRICATE DATA. TOOLS FIRST, ALWAYS. ###
-You have two tools: `run_sql(sql)` for BigQuery queries (use for every TMC figure) and `end_call(reason)` to hang up when the user says goodbye.
+You have these tools: `run_sql(sql)` for BigQuery queries (use for every TMC figure); `end_call(reason)` to hang up when the user says goodbye; and CALENDAR tools for the user's OWN Google Calendar — `find_calendar_events`, `create_calendar_event`, `update_calendar_event`, `delete_calendar_event` — use them when the user wants to check, schedule, move, or cancel a meeting (to edit/cancel, call find_calendar_events first for the event_id; confirm details before creating and ALWAYS confirm before deleting; dates YYYY-MM-DD, times HH:MM 24h, Pakistan time).
 
 EVERY answer involving ANY TMC figure (attendance, headcount, allocation %, pipeline USD, deal count, win rate, target, achievement) MUST come from a tool call made IN THIS SESSION, in THIS turn.
 
@@ -2964,6 +2965,7 @@ This is dynamic and per-turn: if the user switches language partway through the 
 1. run_sql(sql) — runs a BigQuery SELECT against `ai-vertex-mahad.Satori_Project`.
    CALL THIS for every TMC data question. No exceptions.
 2. end_call(reason) — hangs up the call. Call ONLY when the user says goodbye.
+3. CALENDAR TOOLS (the user's OWN Google Calendar): find_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event. Use them when the user asks to check, schedule, move, or cancel a meeting. To edit or cancel, FIRST call find_calendar_events to get the event_id; read back the key details and get a quick spoken "yes" BEFORE you create, and ALWAYS confirm before you delete. Dates are YYYY-MM-DD and times HH:MM (24h), Pakistan time.
 
 ═══ DATA QUESTION FLOW (do exactly this) ═══
 
@@ -3145,6 +3147,64 @@ _CHAT_SQL_TOOL = genai.types.Tool(function_declarations=[
         ),
     )
 ])
+
+
+# Calendar tools — let the chat/voice agent MANAGE the signed-in user's own
+# Google Calendar (create / reschedule / delete / find). Executed server-side
+# via _gcal_agent_action against the per-user OAuth token.
+_GCAL_AGENT_FNS = {"find_calendar_events", "create_calendar_event",
+                   "update_calendar_event", "delete_calendar_event"}
+
+# Plain-dict declarations (used by the Gemini Live voice session).
+_GCAL_TOOL_DECLS = [
+    {"name": "find_calendar_events",
+     "description": "Search the signed-in user's OWN Google Calendar (to get an event_id before updating/deleting, or to see what's coming up). Returns events with ids.",
+     "parameters": {"type": "object", "properties": {
+         "query": {"type": "string", "description": "Optional title keyword, e.g. 'standup'."},
+         "days": {"type": "integer", "description": "How many days ahead to search (default 14)."}}}},
+    {"name": "create_calendar_event",
+     "description": "Create an event on the user's own Google Calendar. Confirm the details with the user first.",
+     "parameters": {"type": "object", "properties": {
+         "summary": {"type": "string", "description": "Event title."},
+         "date": {"type": "string", "description": "Date YYYY-MM-DD (Pakistan time)."},
+         "start_time": {"type": "string", "description": "Start HH:MM 24h; omit if all_day."},
+         "end_time": {"type": "string", "description": "End HH:MM 24h; omit if all_day."},
+         "all_day": {"type": "boolean"}, "location": {"type": "string"}, "description": {"type": "string"},
+         "attendees": {"type": "array", "items": {"type": "string"}, "description": "Guest emails."},
+         "add_meet": {"type": "boolean", "description": "True to attach a Google Meet link."}},
+         "required": ["summary", "date"]}},
+    {"name": "update_calendar_event",
+     "description": "Reschedule/edit an event. Call find_calendar_events first for the event_id. Pass only the fields that change.",
+     "parameters": {"type": "object", "properties": {
+         "event_id": {"type": "string"}, "summary": {"type": "string"},
+         "date": {"type": "string"}, "start_time": {"type": "string"}, "end_time": {"type": "string"},
+         "all_day": {"type": "boolean"}, "location": {"type": "string"}, "description": {"type": "string"}},
+         "required": ["event_id"]}},
+    {"name": "delete_calendar_event",
+     "description": "Delete an event. Call find_calendar_events first for the event_id, and ALWAYS confirm with the user before deleting.",
+     "parameters": {"type": "object", "properties": {"event_id": {"type": "string"}}, "required": ["event_id"]}},
+]
+
+
+def _decl_to_genai(d):
+    """Convert a plain function-declaration dict to a genai FunctionDeclaration
+    (so chat and voice share one source of truth for the calendar tools)."""
+    def _schema(s):
+        t = (s.get("type") or "string").upper()
+        kw = {"type": t}
+        if s.get("description"): kw["description"] = s["description"]
+        if t == "OBJECT":
+            kw["properties"] = {k: _schema(v) for k, v in (s.get("properties") or {}).items()}
+            if s.get("required"): kw["required"] = s["required"]
+        if t == "ARRAY" and s.get("items"): kw["items"] = _schema(s["items"])
+        return genai.types.Schema(**kw)
+    return genai.types.FunctionDeclaration(
+        name=d["name"], description=d.get("description", ""),
+        parameters=_schema(d.get("parameters") or {"type": "object", "properties": {}}),
+    )
+
+
+_CALENDAR_TOOL = genai.types.Tool(function_declarations=[_decl_to_genai(d) for d in _GCAL_TOOL_DECLS])
 
 
 def _enforce_plant_scope_in_sql(sql: str, allowed_plants: list[str]) -> str:
@@ -3897,7 +3957,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                     system_instruction=system_prompt_final,
                     temperature=0.7,
                     max_output_tokens=4096,
-                    tools=[_CHAT_SQL_TOOL],
+                    tools=[_CHAT_SQL_TOOL, _CALENDAR_TOOL],
                     # Cap thinking budget so internal reasoning can't eat
                     # the whole output allocation. 4096 output is enough
                     # for a 25-employee paginated bullet list + summary.
@@ -4140,6 +4200,8 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                     else:
                         print(f"[CHAT] round {round_num+1} — run_sql ({len(sql)} chars)")
                     result_text = _execute_chat_sql(sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope, sales_allowed=chat_sales_allowed)
+                elif fc.name in _GCAL_AGENT_FNS:
+                    result_text = _gcal_agent_action(int(user.get("sub") or 0), fc.name, args)
                 else:
                     result_text = f"Unknown function: {fc.name}"
                 fr_parts.append(genai.types.Part.from_function_response(
@@ -4405,7 +4467,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                         system_instruction=system_prompt_final,
                         temperature=0.7,
                         max_output_tokens=1024,
-                        tools=[_CHAT_SQL_TOOL],
+                        tools=[_CHAT_SQL_TOOL, _CALENDAR_TOOL],
                     ),
                 )
                 fcs = []
@@ -4484,6 +4546,8 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                         else:
                             print(f"[CHAT-STREAM] round {round_num+1} — run_sql ({len(sql_arg)} chars)")
                         result_text = _execute_chat_sql(sql_arg, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope, sales_allowed=chat_sales_allowed)
+                    elif fc.name in _GCAL_AGENT_FNS:
+                        result_text = _gcal_agent_action(int(user.get("sub") or 0), fc.name, args)
                     else:
                         result_text = f"Unknown function: {fc.name}"
                     fr_parts.append(genai.types.Part.from_function_response(
@@ -5717,6 +5781,7 @@ def voice_session(user: dict = Depends(get_current_user)):
                     },
                 },
             },
+            *_GCAL_TOOL_DECLS,  # find / create / update / delete the user's own calendar events
         ],
     }]
     # Voice prompt is already self-contained — DON'T inject the admin schema
@@ -10108,6 +10173,9 @@ def get_insights(user: dict = Depends(get_current_user)):
     return {"date": day, "insights": _scoped_insights(user, day)}
 
 
+_BRIEFING_SCRIPT_CACHE: dict = {}  # (uid, day) -> {script, count}
+
+
 @app.get("/api/briefing")
 def get_briefing(user: dict = Depends(get_current_user)):
     """Compose today's findings into a ~60-second spoken briefing script for
@@ -10115,6 +10183,16 @@ def get_briefing(user: dict = Depends(get_current_user)):
     deterministic cards; if the model call fails we fall back to a plain
     template so the briefing always works."""
     day = datetime.now().strftime("%Y-%m-%d")
+    # Cache the composed script per (user, day) so re-opening the briefing — and
+    # the background pre-warm — skip the Gemini compose step and go straight to
+    # (cached) TTS. Keyed by uid so each user gets their own scoped script.
+    try:
+        _bkey = (int(user.get("sub") or 0), day)
+    except Exception:
+        _bkey = (0, day)
+    _bcached = _BRIEFING_SCRIPT_CACHE.get(_bkey)
+    if _bcached:
+        return {"date": day, "script": _bcached["script"], "count": _bcached["count"]}
     if not _insights_for_day(day):
         with _INSIGHTS_LOCK:
             if not _insights_for_day(day):
@@ -10131,6 +10209,7 @@ def get_briefing(user: dict = Depends(get_current_user)):
                   f"allocations this morning and everything looks steady — no anomalies worth flagging. "
                   f"Ask me anything if you want to dig into the details.")
         script += _gcal_briefing_sentence(user)
+        _BRIEFING_SCRIPT_CACHE[_bkey] = {"script": script, "count": 0}
         return {"date": day, "script": script, "count": 0}
 
     findings = "\n".join(f"- [{r['severity']}] {r['title']}: {r['body']}" for r in rows[:10])
@@ -10159,6 +10238,7 @@ def get_briefing(user: dict = Depends(get_current_user)):
         print(f"[briefing] compose error: {e}")
         script = fallback
     script += _gcal_briefing_sentence(user)
+    _BRIEFING_SCRIPT_CACHE[_bkey] = {"script": script, "count": len(rows)}
     return {"date": day, "script": script, "count": len(rows)}
 
 
@@ -10166,6 +10246,11 @@ def get_briefing(user: dict = Depends(get_current_user)):
 # play directly. Model resolved once per process: env override, then the
 # preferred list filtered against ListModels (same self-heal as voice_session).
 _TTS_MODEL_CACHE: dict = {}
+# Cache synthesized audio by (model+voice+text) hash so repeat plays — and the
+# daily morning briefing in particular — return instantly instead of re-running
+# Gemini TTS (the slow part of briefing playback). Bounded to keep memory flat.
+_TTS_AUDIO_CACHE: dict = {}
+_TTS_AUDIO_CACHE_MAX = 64
 
 
 def _resolve_tts_model() -> str:
@@ -10208,6 +10293,11 @@ def tts_speak(body: TTSBody, user: dict = Depends(get_current_user)):
         text = text[:2500]
     voice = os.environ.get("GEMINI_TTS_VOICE", "Leda")
     model = _resolve_tts_model()
+    import hashlib as _hl
+    cache_key = _hl.sha256(f"{model}|{voice}|{text}".encode("utf-8")).hexdigest()
+    cached = _TTS_AUDIO_CACHE.get(cache_key)
+    if cached:
+        return cached
     try:
         client = get_genai_client()
         resp = client.models.generate_content(
@@ -10234,7 +10324,13 @@ def tts_speak(body: TTSBody, user: dict = Depends(get_current_user)):
     with _wave.open(buf, "wb") as w:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
         w.writeframes(pcm)
-    return {"audio": base64.b64encode(buf.getvalue()).decode(), "mime": "audio/wav"}
+    out = {"audio": base64.b64encode(buf.getvalue()).decode(), "mime": "audio/wav"}
+    # Cache for instant replays; evict oldest if the bound is hit.
+    if len(_TTS_AUDIO_CACHE) >= _TTS_AUDIO_CACHE_MAX:
+        try: _TTS_AUDIO_CACHE.pop(next(iter(_TTS_AUDIO_CACHE)))
+        except Exception: _TTS_AUDIO_CACHE.clear()
+    _TTS_AUDIO_CACHE[cache_key] = out
+    return out
 
 
 # ─── Employee skills (practice-head assigned, used by find-best-fit) ────────
@@ -12324,6 +12420,107 @@ def _gcal_briefing_sentence(user: dict) -> str:
     lead = "one meeting" if n == 1 else f"{n} meetings"
     more = "" if n <= 4 else f", and {n - 4} more"
     return f" On your calendar today you have {lead}: " + "; ".join(parts) + more + "."
+
+
+def _agent_args_to_event_body(args: dict) -> dict:
+    """Map the agent's flat calendar args (date/start_time/end_time/all_day/…)
+    to the event body that _build_event_resource expects."""
+    body = {}
+    if args.get("summary"):     body["summary"] = args["summary"]
+    if args.get("location") is not None:    body["location"] = args.get("location")
+    if args.get("description") is not None: body["description"] = args.get("description")
+    if args.get("attendees"):   body["attendees"] = args["attendees"]
+    if args.get("add_meet"):    body["add_meet"] = True
+    all_day = bool(args.get("all_day"))
+    if all_day:                 body["all_day"] = True
+    date = (args.get("date") or "").strip()
+    if date:
+        if all_day:
+            body["start"] = date
+            try:
+                body["end"] = (datetime.fromisoformat(date) + timedelta(days=1)).date().isoformat()
+            except Exception:
+                body["end"] = date
+        else:
+            st = (args.get("start_time") or "09:00").strip()
+            et = (args.get("end_time") or "10:00").strip()
+            body["start"] = f"{date}T{st}:00"
+            body["end"] = f"{date}T{et}:00"
+    return body
+
+
+def _gcal_agent_action(uid: int, name: str, args: dict) -> str:
+    """Execute a calendar tool call from the chat/voice agent. Returns a short
+    human-readable string the model relays to the user."""
+    if not _gcal_ready():
+        return "Google Calendar isn't configured on the server."
+    if not _gcal_row(uid):
+        return ("The user hasn't connected their Google Calendar yet — tell them to open the "
+                "Calendar page in Satori and click Connect Google Calendar.")
+    args = args or {}
+    token = _gcal_access_token(uid)
+    if not token:
+        return "Couldn't access the user's Google Calendar — they may need to reconnect it on the Calendar page."
+    try:
+        if name == "find_calendar_events":
+            q = (args.get("query") or "").strip().lower()
+            days = int(args.get("days") or 14)
+            start = _gcal_pkt_now().replace(hour=0, minute=0, second=0, microsecond=0)
+            end = start + timedelta(days=max(1, min(60, days)))
+            evs = _gcal_fetch_events(uid, start.isoformat(), end.isoformat(), max_results=50) or []
+            if q:
+                evs = [e for e in evs if q in (e.get("summary") or "").lower()]
+            if not evs:
+                return "No matching events found in that window."
+            lines = [f"id={e['id']} | {'All day' if e.get('all_day') else e.get('start')} | {e['summary']}"
+                     + (f" @ {e['location']}" if e.get("location") else "") for e in evs[:15]]
+            return "Matching events (use the id for update/delete):\n" + "\n".join(lines)
+
+        if name == "create_calendar_event":
+            body = _agent_args_to_event_body(args)
+            if not body.get("start") or not body.get("end"):
+                return "Need a date and time (or all_day) to create the event."
+            resource, want_meet = _build_event_resource(body)
+            url = _GCAL_EVENTS_URL + ("?conferenceDataVersion=1&sendUpdates=all" if want_meet else "?sendUpdates=all")
+            ev = _gcal_normalize(_gcal_api("POST", url, token, resource))
+            _GCAL_CTX_CACHE.pop(uid, None)
+            extra = f" Meet link: {ev['meet_link']}." if ev.get("meet_link") else ""
+            return f"Created '{ev['summary']}' ({ev.get('start')} → {ev.get('end')}).{extra}"
+
+        if name == "update_calendar_event":
+            eid = (args.get("event_id") or "").strip()
+            if not eid:
+                return "Need the event_id — call find_calendar_events first to get it."
+            resource, want_meet = _build_event_resource(_agent_args_to_event_body(args))
+            if not resource:
+                return "No changes were provided."
+            url = f"{_GCAL_EVENTS_URL}/{_gcal_urlparse.quote(eid)}" + ("?conferenceDataVersion=1&sendUpdates=all" if want_meet else "?sendUpdates=all")
+            ev = _gcal_normalize(_gcal_api("PATCH", url, token, resource))
+            _GCAL_CTX_CACHE.pop(uid, None)
+            return f"Updated '{ev['summary']}' (now {ev.get('start')} → {ev.get('end')})."
+
+        if name == "delete_calendar_event":
+            eid = (args.get("event_id") or "").strip()
+            if not eid:
+                return "Need the event_id — call find_calendar_events first to get it."
+            _gcal_api("DELETE", f"{_GCAL_EVENTS_URL}/{_gcal_urlparse.quote(eid)}?sendUpdates=all", token)
+            _GCAL_CTX_CACHE.pop(uid, None)
+            return "Event deleted."
+        return f"Unknown calendar action: {name}"
+    except _GcalHTTPError as he:
+        return f"Calendar error: {_gcal_write_error(he)}"
+    except Exception as e:
+        return f"Calendar action failed: {e}"
+
+
+@app.post("/api/voice/calendar")
+def voice_calendar_action(body: dict, user: dict = Depends(get_current_user)):
+    """Voice-agent calendar tool execution (the browser forwards Gemini Live
+    toolCalls here, mirroring /api/voice/query for run_sql)."""
+    name = (body.get("name") or "").strip()
+    if name not in _GCAL_AGENT_FNS:
+        return {"result": f"Unknown calendar action: {name}"}
+    return {"result": _gcal_agent_action(int(user["sub"]), name, body.get("args") or {})}
 
 
 @app.get("/api/integrations/google/status")
