@@ -3958,7 +3958,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
                     temperature=0.7,
-                    max_output_tokens=4096,
+                    max_output_tokens=8192,
                     tools=[_CHAT_SQL_TOOL, _CALENDAR_TOOL, _GMAIL_TOOL],
                     # Cap thinking budget so internal reasoning can't eat
                     # the whole output allocation. 4096 output is enough
@@ -4235,7 +4235,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
             config=genai.types.GenerateContentConfig(
                 system_instruction=system_prompt_final,
                 temperature=0.5,
-                max_output_tokens=2048,
+                max_output_tokens=6144,
                 # Cap thinking so a complex post-rounds compose still has output budget
                 # left for the actual answer — but allow some reasoning.
                 thinking_config=genai.types.ThinkingConfig(thinking_budget=1024),
@@ -4580,6 +4580,8 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
 
             # Now stream the final answer (no tools). Thinking stays ON here so the
             # model can reason about which numbers to surface and how to format them.
+            # Generous token budget: thinking shares this budget, so a low cap can
+            # truncate the visible answer mid-sentence.
             streamed_any_text = False
             for chunk in client.models.generate_content_stream(
                 model="gemini-2.5-flash",
@@ -4587,7 +4589,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
                     temperature=0.5,
-                    max_output_tokens=1024,
+                    max_output_tokens=8192,
                 ),
             ):
                 if chunk.text:
@@ -13013,8 +13015,9 @@ def _gmail_agent_action(uid: int, name: str, args: dict) -> str:
             msgs = _gmail_list(uid, q=(args.get("query") or ""), max_results=int(args.get("max") or 10)) or []
             if not msgs:
                 return "No matching emails."
-            lines = [f"id={m['id']} | {'UNREAD ' if m['unread'] else ''}{m.get('from') or ''} | {m.get('subject')} | {(m.get('snippet') or '')[:120]}" for m in msgs[:12]]
-            return "Emails (use the id with read_email/reply_email/modify_email):\n" + "\n".join(lines)
+            lines = [f"id={m['id']} | {'UNREAD ' if m['unread'] else ''}{m.get('from') or ''} | {m.get('subject')} | {m.get('snippet') or ''}" for m in msgs[:12]]
+            return ("Emails (use the id with read_email/reply_email/modify_email; the text after the "
+                    "subject is just Gmail's short preview — call read_email for the full message):\n" + "\n".join(lines))
         if name == "read_email":
             m = _gmail_get(uid, (args.get("id") or "").strip())
             if not m:
