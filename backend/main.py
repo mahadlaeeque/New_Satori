@@ -2604,6 +2604,7 @@ You are Satori. You ONLY help with TMC's internal workforce + sales data: attend
 
 EXCEPTION — THE USER'S OWN CALENDAR: if (and only if) a "USER'S GOOGLE CALENDAR" block appears in your context, you MAY answer the user's questions about their OWN schedule and meetings for ANY day shown in that block — today or later this week (e.g. "what's my next meeting?", "am I free Thursday afternoon?", "what do I have on Wednesday?", "what's on this week?") — using ONLY the events in that block. This is the signed-in user's personal calendar that they connected themselves — it is in scope for them.
 You ALSO have calendar-management tools — find_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event — that act ONLY on this signed-in user's own Google Calendar. Use them when the user asks to schedule, move/reschedule, or cancel a meeting. BEFORE creating an event, make sure you have the essentials and ASK (one short turn) for anything the user didn't give — in particular: is it ONLINE or IN-PERSON? (online → set add_meet=true to attach a Google Meet link; in-person → ask for the location), plus the attendees, the date, and the start & end time (assume 30–60 min only if they say so). Then read the final details back and create. To edit or delete, FIRST call find_calendar_events to get the event_id, and ALWAYS confirm before deleting. (The tools handle the not-connected / read-only case themselves — relay their message.) If no calendar block is present and the user asks a generic schedule question unrelated to their own calendar, treat it as out-of-scope.
+EXCEPTION — THE USER'S OWN GMAIL: you have email tools — search_emails, read_email, send_email, reply_email, modify_email — that act ONLY on the signed-in user's own Gmail. Use them when the user asks to check/search their inbox, read an email, send or reply to one, or mark-read/archive/trash. Get the id from search_emails before read/reply/modify. ALWAYS confirm the recipient, subject and body before sending or replying, and confirm before trashing. (The tools handle the not-connected / no-permission case — relay their message.) This is the user's own mailbox and is in scope for them; never expose it to anyone else.
 
 You MUST REFUSE everything else — including general knowledge / trivia / "fun facts" (animals, geography, science, history, current events), creative writing (poems, jokes, stories), opinions, coding or technical help, translation or math unrelated to the data, personal / medical / legal / financial advice, and anything not grounded in the TMC warehouse.
 
@@ -2906,7 +2907,7 @@ When the user asks about attendance for a period (a month, a week, a date range)
 """
 
 VOICE_SYSTEM_PROMPT_URDU = """### ABSOLUTE RULE #0 — NEVER FABRICATE DATA. TOOLS FIRST, ALWAYS. ###
-You have these tools: `run_sql(sql)` for BigQuery queries (use for every TMC figure); `end_call(reason)` to hang up when the user says goodbye; and CALENDAR tools for the user's OWN Google Calendar — `find_calendar_events`, `create_calendar_event`, `update_calendar_event`, `delete_calendar_event` — use them when the user wants to check, schedule, move, or cancel a meeting. Create karne se PEHLE jo detail missing ho woh poochho — khaas taur par online hai ya in-person? (online → add_meet=true Google Meet link ke liye; in-person → location poochho), aur attendees + date/time. Phir details confirm karke create karo. Edit/cancel ke liye pehle find_calendar_events se event_id lo; delete se pehle HAMESHA confirm karo. Agar tool kahe access read-only hai to user ko bolo Calendar page par reconnect karein. Dates YYYY-MM-DD, times HH:MM 24h, Pakistan time.
+You have these tools: `run_sql(sql)` for BigQuery queries (use for every TMC figure); `end_call(reason)` to hang up when the user says goodbye; and CALENDAR tools for the user's OWN Google Calendar — `find_calendar_events`, `create_calendar_event`, `update_calendar_event`, `delete_calendar_event` — use them when the user wants to check, schedule, move, or cancel a meeting. Create karne se PEHLE jo detail missing ho woh poochho — khaas taur par online hai ya in-person? (online → add_meet=true Google Meet link ke liye; in-person → location poochho), aur attendees + date/time. Phir details confirm karke create karo. Edit/cancel ke liye pehle find_calendar_events se event_id lo; delete se pehle HAMESHA confirm karo. Agar tool kahe access read-only hai to user ko bolo Calendar page par reconnect karein. Dates YYYY-MM-DD, times HH:MM 24h, Pakistan time. GMAIL tools bhi hain (user ka apna inbox): search_emails, read_email, send_email, reply_email, modify_email — inbox check karne, email parhne, bhejne/reply karne, ya mark-read/archive/trash ke liye. Read/reply/modify se pehle search_emails se id lo. Bhejne/reply se pehle recipient aur gist confirm karo; trash se pehle bhi confirm karo. Agar email access na ho to user ko bolo Inbox page par Google reconnect karein.
 
 EVERY answer involving ANY TMC figure (attendance, headcount, allocation %, pipeline USD, deal count, win rate, target, achievement) MUST come from a tool call made IN THIS SESSION, in THIS turn.
 
@@ -2966,6 +2967,7 @@ This is dynamic and per-turn: if the user switches language partway through the 
    CALL THIS for every TMC data question. No exceptions.
 2. end_call(reason) — hangs up the call. Call ONLY when the user says goodbye.
 3. CALENDAR TOOLS (the user's OWN Google Calendar): find_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event. Use them when the user asks to check, schedule, move, or cancel a meeting. BEFORE you create, briefly ASK for any detail they didn't give — especially: online or in-person? (online → set add_meet=true for a Google Meet link; in-person → ask the location), plus who's invited and the date/start/end time. Then read the final details back, get a spoken "yes", and create. To edit or cancel, FIRST call find_calendar_events to get the event_id, and ALWAYS confirm before you delete. If a tool says access is read-only, tell the user to reconnect Google Calendar on the Calendar page. Dates are YYYY-MM-DD and times HH:MM (24h), Pakistan time.
+4. GMAIL TOOLS (the user's OWN inbox): search_emails, read_email, send_email, reply_email, modify_email. Use them to check the inbox, read a message, send or reply, or mark-read/archive/trash. Get the id from search_emails before reading/replying/modifying. ALWAYS read back the recipient and the gist before you send or reply, and confirm before trashing. If a tool says there's no email access, tell the user to reconnect Google on the Inbox page.
 
 ═══ DATA QUESTION FLOW (do exactly this) ═══
 
@@ -3957,7 +3959,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                     system_instruction=system_prompt_final,
                     temperature=0.7,
                     max_output_tokens=4096,
-                    tools=[_CHAT_SQL_TOOL, _CALENDAR_TOOL],
+                    tools=[_CHAT_SQL_TOOL, _CALENDAR_TOOL, _GMAIL_TOOL],
                     # Cap thinking budget so internal reasoning can't eat
                     # the whole output allocation. 4096 output is enough
                     # for a 25-employee paginated bullet list + summary.
@@ -4202,6 +4204,8 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                     result_text = _execute_chat_sql(sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope, sales_allowed=chat_sales_allowed)
                 elif fc.name in _GCAL_AGENT_FNS:
                     result_text = _gcal_agent_action(int(user.get("sub") or 0), fc.name, args)
+                elif fc.name in _GMAIL_AGENT_FNS:
+                    result_text = _gmail_agent_action(int(user.get("sub") or 0), fc.name, args)
                 else:
                     result_text = f"Unknown function: {fc.name}"
                 fr_parts.append(genai.types.Part.from_function_response(
@@ -4467,7 +4471,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                         system_instruction=system_prompt_final,
                         temperature=0.7,
                         max_output_tokens=1024,
-                        tools=[_CHAT_SQL_TOOL, _CALENDAR_TOOL],
+                        tools=[_CHAT_SQL_TOOL, _CALENDAR_TOOL, _GMAIL_TOOL],
                     ),
                 )
                 fcs = []
@@ -4548,6 +4552,8 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                         result_text = _execute_chat_sql(sql_arg, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope, sales_allowed=chat_sales_allowed)
                     elif fc.name in _GCAL_AGENT_FNS:
                         result_text = _gcal_agent_action(int(user.get("sub") or 0), fc.name, args)
+                    elif fc.name in _GMAIL_AGENT_FNS:
+                        result_text = _gmail_agent_action(int(user.get("sub") or 0), fc.name, args)
                     else:
                         result_text = f"Unknown function: {fc.name}"
                     fr_parts.append(genai.types.Part.from_function_response(
@@ -5781,7 +5787,8 @@ def voice_session(user: dict = Depends(get_current_user)):
                     },
                 },
             },
-            *_GCAL_TOOL_DECLS,  # find / create / update / delete the user's own calendar events
+            *_GCAL_TOOL_DECLS,   # find / create / update / delete the user's own calendar events
+            *_GMAIL_TOOL_DECLS,  # search / read / send / reply / modify the user's own Gmail
         ],
     }]
     # Voice prompt is already self-contained — DON'T inject the admin schema
@@ -12089,11 +12096,19 @@ from fastapi.responses import RedirectResponse as _GcalRedirect
 
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
-# calendar.events grants read AND write (create/update/delete) on the user's
-# events — supersedes the old calendar.readonly. Existing connected users must
-# reconnect once to grant the wider scope.
+# Unified Google scope set for the single "Connect Google" flow:
+#   calendar.events  — read + create/update/delete the user's events
+#   gmail.modify     — read mail + mark read/unread, archive, trash, labels (NO permanent delete)
+#   gmail.send       — send / reply
+#   userinfo.email   — identify the connected account
+# Restricted Gmail scopes need NO Google verification because the app is
+# Internal to the TMC Workspace. Existing connected users must reconnect once
+# to grant the wider set.
 _GCAL_SCOPES = ("https://www.googleapis.com/auth/calendar.events "
+                "https://www.googleapis.com/auth/gmail.modify "
+                "https://www.googleapis.com/auth/gmail.send "
                 "https://www.googleapis.com/auth/userinfo.email")
+_GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 _GCAL_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _GCAL_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _GCAL_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
@@ -12549,7 +12564,9 @@ def google_cal_status(user: dict = Depends(get_current_user)):
     row = _gcal_row(int(user["sub"]))
     return {"configured": True, "connected": bool(row),
             "google_email": (row["google_email"] if row else None),
-            "can_edit": _gcal_scope_can_write(row)}
+            "can_edit": _gcal_scope_can_write(row),
+            "can_email": _gmail_scope_ok(row),
+            "can_send": _gmail_send_scope_ok(row)}
 
 
 @app.get("/api/integrations/google/connect")
@@ -12736,6 +12753,340 @@ def calendar_delete_event(event_id: str, user: dict = Depends(get_current_user))
         raise HTTPException(status_code=502, detail="Couldn't reach Google Calendar.")
     _GCAL_CTX_CACHE.pop(uid, None)
     return {"ok": True}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  GMAIL INBOX INTEGRATION (per-user) — reuses the Google OAuth token above.
+#  Read / search / send / reply / mark-read / archive / trash. No permanent
+#  delete (trash only — recoverable). Surfaced via the Inbox page + chat/voice.
+# ═══════════════════════════════════════════════════════════════════════════
+import base64 as _gm_b64
+from email.mime.text import MIMEText as _MIMEText
+
+_GMAIL_AGENT_FNS = {"search_emails", "read_email", "send_email", "reply_email", "modify_email"}
+_GMAIL_RECONNECT_MSG = ("Satori doesn't have Gmail access for this user yet. Tell them to open the "
+                        "Inbox page in Satori and click Connect / Enable email, then approve Gmail access.")
+
+
+def _gmail_scope_ok(row) -> bool:
+    try: s = (row["scope"] if row else "") or ""
+    except Exception: s = ""
+    return ("gmail.modify" in s) or ("gmail.readonly" in s) or ("mail.google.com" in s)
+
+
+def _gmail_send_scope_ok(row) -> bool:
+    try: s = (row["scope"] if row else "") or ""
+    except Exception: s = ""
+    return ("gmail.send" in s) or ("mail.google.com" in s)
+
+
+def _gmail_header(payload, name):
+    for h in (payload.get("headers") or []):
+        if (h.get("name") or "").lower() == name.lower():
+            return h.get("value")
+    return None
+
+
+def _gmail_extract_body(payload) -> str:
+    """Pull the text/plain body (falling back to crudely-stripped HTML)."""
+    if not payload:
+        return ""
+    mt = payload.get("mimeType", "") or ""
+    data = (payload.get("body") or {}).get("data")
+    if mt == "text/plain" and data:
+        try: return _gm_b64.urlsafe_b64decode(data).decode("utf-8", "replace")
+        except Exception: return ""
+    plain, html = "", ""
+    for p in (payload.get("parts") or []):
+        r = _gmail_extract_body(p)
+        if not r:
+            continue
+        if (p.get("mimeType", "") or "").startswith("text/plain") and not plain:
+            plain = r
+        elif not html:
+            html = r
+    if plain:
+        return plain
+    if mt == "text/html" and data:
+        try:
+            import re as _re
+            raw = _gm_b64.urlsafe_b64decode(data).decode("utf-8", "replace")
+            return _re.sub(r"<[^>]+>", " ", raw)
+        except Exception:
+            return ""
+    return html
+
+
+def _gmail_normalize(msg, with_body=False) -> dict:
+    payload = msg.get("payload", {}) or {}
+    labels = msg.get("labelIds") or []
+    out = {
+        "id": msg.get("id"), "thread_id": msg.get("threadId"),
+        "from": _gmail_header(payload, "From"), "to": _gmail_header(payload, "To"),
+        "subject": _gmail_header(payload, "Subject") or "(no subject)",
+        "date": _gmail_header(payload, "Date"), "snippet": msg.get("snippet"),
+        "unread": "UNREAD" in labels, "starred": "STARRED" in labels,
+    }
+    if with_body:
+        out["body"] = _gmail_extract_body(payload)
+        out["message_id_header"] = _gmail_header(payload, "Message-ID") or _gmail_header(payload, "Message-Id")
+    return out
+
+
+def _gmail_list(uid: int, q: str = "", max_results: int = 20):
+    token = _gcal_access_token(uid)
+    if not token:
+        return None
+    n = max(1, min(50, max_results))
+    qs = {"maxResults": str(n)}
+    if (q or "").strip():
+        qs["q"] = q.strip()
+    else:
+        qs["labelIds"] = "INBOX"
+    try:
+        data = _gcal_get_json(f"{_GMAIL_BASE}/messages?{_gcal_urlparse.urlencode(qs)}", token)
+    except Exception as e:
+        print(f"[gmail] list failed uid={uid}: {e}")
+        return None
+    out = []
+    for m in (data.get("messages") or [])[:n]:
+        try:
+            full = _gcal_get_json(
+                f"{_GMAIL_BASE}/messages/{m['id']}?format=metadata"
+                f"&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date", token)
+            out.append(_gmail_normalize(full))
+        except Exception:
+            continue
+    return out
+
+
+def _gmail_get(uid: int, mid: str):
+    token = _gcal_access_token(uid)
+    if not token:
+        return None
+    try:
+        full = _gcal_get_json(f"{_GMAIL_BASE}/messages/{_gcal_urlparse.quote(mid)}?format=full", token)
+        return _gmail_normalize(full, with_body=True)
+    except Exception as e:
+        print(f"[gmail] get failed: {e}")
+        return None
+
+
+def _gmail_raw(to, subject, body, cc=None, in_reply_to=None, references=None) -> str:
+    msg = _MIMEText(body or "", "plain", "utf-8")
+    msg["To"] = to or ""
+    if cc:
+        msg["Cc"] = cc
+    msg["Subject"] = subject or ""
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = references or in_reply_to
+    return _gm_b64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+
+def _gmail_send_raw(uid: int, raw: str, thread_id=None):
+    body = {"raw": raw}
+    if thread_id:
+        body["threadId"] = thread_id
+    return _gcal_api("POST", f"{_GMAIL_BASE}/messages/send", _gcal_access_token(uid), body)
+
+
+def _gmail_modify(uid: int, mid: str, action: str):
+    token = _gcal_access_token(uid)
+    a = (action or "").lower().strip()
+    if a in ("trash", "delete"):
+        return _gcal_api("POST", f"{_GMAIL_BASE}/messages/{_gcal_urlparse.quote(mid)}/trash", token, {})
+    mods = {
+        "markread":   {"removeLabelIds": ["UNREAD"]},
+        "read":       {"removeLabelIds": ["UNREAD"]},
+        "markunread": {"addLabelIds": ["UNREAD"]},
+        "unread":     {"addLabelIds": ["UNREAD"]},
+        "archive":    {"removeLabelIds": ["INBOX"]},
+        "star":       {"addLabelIds": ["STARRED"]},
+        "unstar":     {"removeLabelIds": ["STARRED"]},
+    }.get(a)
+    if not mods:
+        raise ValueError(f"unknown action {action}")
+    return _gcal_api("POST", f"{_GMAIL_BASE}/messages/{_gcal_urlparse.quote(mid)}/modify", token, mods)
+
+
+# ── Gmail HTTP endpoints (Inbox page) ──
+@app.get("/api/gmail/messages")
+def gmail_messages(q: str = "", max: int = 20, user: dict = Depends(get_current_user)):
+    if not _gcal_ready():
+        return {"configured": False, "connected": False, "messages": []}
+    uid = int(user["sub"]); row = _gcal_row(uid)
+    if not row:
+        return {"configured": True, "connected": False, "can_email": False, "messages": []}
+    if not _gmail_scope_ok(row):
+        return {"configured": True, "connected": True, "can_email": False, "messages": [], "error": _GMAIL_RECONNECT_MSG}
+    msgs = _gmail_list(uid, q=q, max_results=max)
+    if msgs is None:
+        return {"configured": True, "connected": True, "can_email": True, "messages": [], "error": "Couldn't reach Gmail — please reconnect."}
+    return {"configured": True, "connected": True, "can_email": True, "can_send": _gmail_send_scope_ok(row), "messages": msgs}
+
+
+@app.get("/api/gmail/messages/{mid}")
+def gmail_message(mid: str, user: dict = Depends(get_current_user)):
+    uid = int(user["sub"]); row = _gcal_row(uid)
+    if not row or not _gmail_scope_ok(row):
+        raise HTTPException(status_code=403, detail=_GMAIL_RECONNECT_MSG)
+    m = _gmail_get(uid, mid)
+    if m is None:
+        raise HTTPException(status_code=502, detail="Couldn't load that email.")
+    return {"message": m}
+
+
+def _gmail_send_or_403(uid: int, row):
+    if not _gcal_ready():
+        raise HTTPException(status_code=503, detail="Gmail isn't configured on the server.")
+    if not row:
+        raise HTTPException(status_code=400, detail="Gmail isn't connected. Connect it on the Inbox page.")
+    if not _gmail_send_scope_ok(row):
+        raise HTTPException(status_code=403, detail=_GMAIL_RECONNECT_MSG)
+
+
+@app.post("/api/gmail/send")
+def gmail_send_ep(body: dict, user: dict = Depends(get_current_user)):
+    uid = int(user["sub"]); row = _gcal_row(uid)
+    _gmail_send_or_403(uid, row)
+    to = (body.get("to") or "").strip()
+    if not to:
+        raise HTTPException(status_code=400, detail="A recipient (to) is required.")
+    raw = _gmail_raw(to, body.get("subject") or "", body.get("body") or "", cc=(body.get("cc") or None))
+    try:
+        _gmail_send_raw(uid, raw)
+    except _GcalHTTPError as he:
+        raise HTTPException(status_code=502, detail=_gcal_write_error(he))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Couldn't send the email.")
+    return {"ok": True}
+
+
+@app.post("/api/gmail/messages/{mid}/reply")
+def gmail_reply_ep(mid: str, body: dict, user: dict = Depends(get_current_user)):
+    uid = int(user["sub"]); row = _gcal_row(uid)
+    _gmail_send_or_403(uid, row)
+    orig = _gmail_get(uid, mid)
+    if not orig:
+        raise HTTPException(status_code=404, detail="Original email not found.")
+    subj = orig.get("subject") or ""
+    if not subj.lower().startswith("re:"):
+        subj = "Re: " + subj
+    raw = _gmail_raw(orig.get("from") or "", subj, body.get("body") or "",
+                     in_reply_to=orig.get("message_id_header"))
+    try:
+        _gmail_send_raw(uid, raw, thread_id=orig.get("thread_id"))
+    except _GcalHTTPError as he:
+        raise HTTPException(status_code=502, detail=_gcal_write_error(he))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Couldn't send the reply.")
+    return {"ok": True}
+
+
+@app.post("/api/gmail/messages/{mid}/modify")
+def gmail_modify_ep(mid: str, body: dict, user: dict = Depends(get_current_user)):
+    uid = int(user["sub"]); row = _gcal_row(uid)
+    if not row or not _gmail_scope_ok(row):
+        raise HTTPException(status_code=403, detail=_GMAIL_RECONNECT_MSG)
+    try:
+        _gmail_modify(uid, mid, body.get("action") or "")
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except _GcalHTTPError as he:
+        raise HTTPException(status_code=502, detail=_gcal_write_error(he))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Couldn't update the email.")
+    return {"ok": True}
+
+
+# ── Gmail agent tools (chat + voice) ──
+def _gmail_agent_action(uid: int, name: str, args: dict) -> str:
+    if not _gcal_ready():
+        return "Gmail isn't configured on the server."
+    row = _gcal_row(uid)
+    if not row or not _gmail_scope_ok(row):
+        return _GMAIL_RECONNECT_MSG
+    args = args or {}
+    try:
+        if name == "search_emails":
+            msgs = _gmail_list(uid, q=(args.get("query") or ""), max_results=int(args.get("max") or 10)) or []
+            if not msgs:
+                return "No matching emails."
+            lines = [f"id={m['id']} | {'UNREAD ' if m['unread'] else ''}{m.get('from') or ''} | {m.get('subject')} | {(m.get('snippet') or '')[:120]}" for m in msgs[:12]]
+            return "Emails (use the id with read_email/reply_email/modify_email):\n" + "\n".join(lines)
+        if name == "read_email":
+            m = _gmail_get(uid, (args.get("id") or "").strip())
+            if not m:
+                return "Couldn't find that email."
+            body = (m.get("body") or "")[:3000]
+            return (f"From: {m.get('from')}\nTo: {m.get('to')}\nSubject: {m.get('subject')}\nDate: {m.get('date')}\n\n{body}")
+        if name == "send_email":
+            if not _gmail_send_scope_ok(row):
+                return _GMAIL_RECONNECT_MSG
+            to = (args.get("to") or "").strip()
+            if not to:
+                return "Need a recipient email address (to) to send."
+            raw = _gmail_raw(to, args.get("subject") or "", args.get("body") or "", cc=(args.get("cc") or None))
+            _gmail_send_raw(uid, raw)
+            return f"Email sent to {to}."
+        if name == "reply_email":
+            if not _gmail_send_scope_ok(row):
+                return _GMAIL_RECONNECT_MSG
+            orig = _gmail_get(uid, (args.get("id") or "").strip())
+            if not orig:
+                return "Couldn't find the email to reply to."
+            subj = orig.get("subject") or ""
+            if not subj.lower().startswith("re:"):
+                subj = "Re: " + subj
+            raw = _gmail_raw(orig.get("from") or "", subj, args.get("body") or "", in_reply_to=orig.get("message_id_header"))
+            _gmail_send_raw(uid, raw, thread_id=orig.get("thread_id"))
+            return f"Reply sent to {orig.get('from')}."
+        if name == "modify_email":
+            _gmail_modify(uid, (args.get("id") or "").strip(), args.get("action") or "")
+            return f"Done ({args.get('action')})."
+        return f"Unknown email action: {name}"
+    except _GcalHTTPError as he:
+        return f"Gmail error: {_gcal_write_error(he)}"
+    except Exception as e:
+        return f"Email action failed: {e}"
+
+
+@app.post("/api/voice/gmail")
+def voice_gmail_action(body: dict, user: dict = Depends(get_current_user)):
+    name = (body.get("name") or "").strip()
+    if name not in _GMAIL_AGENT_FNS:
+        return {"result": f"Unknown email action: {name}"}
+    return {"result": _gmail_agent_action(int(user["sub"]), name, body.get("args") or {})}
+
+
+_GMAIL_TOOL_DECLS = [
+    {"name": "search_emails",
+     "description": "Search / list the signed-in user's OWN Gmail (default: recent Inbox). Returns emails with ids. Use Gmail search syntax in query (e.g. 'from:ali is:unread', 'subject:invoice newer_than:7d').",
+     "parameters": {"type": "object", "properties": {
+         "query": {"type": "string", "description": "Gmail search query; empty = recent inbox."},
+         "max": {"type": "integer", "description": "Max results (default 10)."}}}},
+    {"name": "read_email",
+     "description": "Read the full body of one email by id (get the id from search_emails first).",
+     "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+    {"name": "send_email",
+     "description": "Send a NEW email from the user's account. Confirm recipient, subject and body with the user before sending.",
+     "parameters": {"type": "object", "properties": {
+         "to": {"type": "string", "description": "Recipient email address."},
+         "subject": {"type": "string"}, "body": {"type": "string"},
+         "cc": {"type": "string", "description": "Optional CC address(es)."}}, "required": ["to", "body"]}},
+    {"name": "reply_email",
+     "description": "Reply in-thread to an email by id (get the id from search_emails first). Confirm the reply text before sending.",
+     "parameters": {"type": "object", "properties": {
+         "id": {"type": "string"}, "body": {"type": "string"}}, "required": ["id", "body"]}},
+    {"name": "modify_email",
+     "description": "Mark read/unread, archive, or trash an email by id. Confirm before trashing.",
+     "parameters": {"type": "object", "properties": {
+         "id": {"type": "string"},
+         "action": {"type": "string", "description": "One of: markread, markunread, archive, trash, star, unstar."}},
+         "required": ["id", "action"]}},
+]
+_GMAIL_TOOL = genai.types.Tool(function_declarations=[_decl_to_genai(d) for d in _GMAIL_TOOL_DECLS])
 
 
 from fastapi.staticfiles import StaticFiles

@@ -1097,6 +1097,24 @@ const VoiceModal = ({ open, onClose }) => {
             }
             continue;
           }
+          // Gmail tool calls \u2014 search / read / send / reply / modify the user's own inbox.
+          if (fc.name === "search_emails" || fc.name === "read_email" || fc.name === "send_email"
+              || fc.name === "reply_email" || fc.name === "modify_email") {
+            setState("thinking");
+            setStatusText("Satori is working with your inbox\u2026");
+            try {
+              const r = await fetch(`${apiBase}/api/voice/gmail`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+                body: JSON.stringify({ name: fc.name, args: fc.args || {} }),
+              });
+              const json = await r.json();
+              responses.push({ id: fc.id, name: fc.name, response: { output: json.result || "(no result)" } });
+            } catch (err) {
+              responses.push({ id: fc.id, name: fc.name, response: { output: "Email action failed: " + (err?.message || "unknown") } });
+            }
+            continue;
+          }
           // BigQuery tool call \u2014 she's working out the answer, not talking, so
           // show the "thinking" clip (pondering) rather than the speaking one.
           setState("thinking");
@@ -10890,12 +10908,230 @@ const CalendarPage = () => {
   );
 };
 
+// ─── Inbox page — per-user Gmail (read / search / send / reply / archive / trash) ───
+const InboxPage = () => {
+  const [status, setStatus] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [messages, setMessages] = useState([]);
+  const [msgLoading, setMsgLoading] = useState(false);
+  const [q, setQ] = useState("");
+  const [banner, setBanner] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(null);        // message being read (with body)
+  const [openLoading, setOpenLoading] = useState(false);
+  const [compose, setCompose] = useState(null);  // { to, cc, subject, body, replyTo }
+
+  const loadStatus = async () => {
+    setLoading(true);
+    try { const r = await fetch(`${API_BASE}/api/integrations/google/status`, { headers: authHeaders() }); setStatus(await r.json()); }
+    catch { setStatus({ configured: false, connected: false }); }
+    finally { setLoading(false); }
+  };
+  const loadMessages = async (query) => {
+    setMsgLoading(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/gmail/messages?max=25&q=${encodeURIComponent(query || "")}`, { headers: authHeaders() });
+      const j = await r.json();
+      if (j.can_email) setMessages(j.messages || []);
+      else setMessages([]);
+      if (j.error) setBanner({ type: "error", msg: j.error });
+    } catch { setBanner({ type: "error", msg: "Couldn't load your inbox." }); }
+    finally { setMsgLoading(false); }
+  };
+  useEffect(() => { loadStatus(); }, []);
+  useEffect(() => { if (status?.can_email) loadMessages(""); /* eslint-disable-next-line */ }, [status?.can_email]);
+
+  const connect = async () => {
+    setBusy(true);
+    try { const r = await fetch(`${API_BASE}/api/integrations/google/connect`, { headers: authHeaders() }); const j = await r.json(); if (j.url) window.location.href = j.url; else { setBanner({ type: "error", msg: j.detail || "Couldn't start Google sign-in." }); setBusy(false); } }
+    catch { setBanner({ type: "error", msg: "Couldn't start Google sign-in." }); setBusy(false); }
+  };
+
+  const modify = async (id, action, silent) => {
+    try {
+      await fetch(`${API_BASE}/api/gmail/messages/${encodeURIComponent(id)}/modify`, { method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ action }) });
+      if (!silent) { setOpen(null); loadMessages(q); setBanner({ type: "ok", msg: `Done — ${action}.` }); }
+    } catch { setBanner({ type: "error", msg: `Couldn't ${action}.` }); }
+  };
+  const openMessage = async (m) => {
+    setOpen({ ...m, body: null }); setOpenLoading(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/gmail/messages/${encodeURIComponent(m.id)}`, { headers: authHeaders() });
+      const j = await r.json();
+      setOpen(j.message || { ...m, body: "(couldn't load this email)" });
+      if (m.unread) { modify(m.id, "markread", true); setMessages(ms => ms.map(x => x.id === m.id ? { ...x, unread: false } : x)); }
+    } catch { setOpen({ ...m, body: "(couldn't load this email)" }); }
+    finally { setOpenLoading(false); }
+  };
+  const send = async () => {
+    const c = compose;
+    if (!c.replyTo && !(c.to || "").trim()) { setBanner({ type: "error", msg: "Add a recipient." }); return; }
+    setBusy(true);
+    try {
+      const r = c.replyTo
+        ? await fetch(`${API_BASE}/api/gmail/messages/${encodeURIComponent(c.replyTo)}/reply`, { method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ body: c.body }) })
+        : await fetch(`${API_BASE}/api/gmail/send`, { method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ to: c.to, cc: c.cc, subject: c.subject, body: c.body }) });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); setBanner({ type: "error", msg: j.detail || "Couldn't send the email." }); setBusy(false); return; }
+      setCompose(null); setOpen(null); setBanner({ type: "ok", msg: "Sent." });
+    } catch { setBanner({ type: "error", msg: "Couldn't send the email." }); }
+    finally { setBusy(false); }
+  };
+
+  const fmtDate = (d) => { try { return new Date(d).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); } catch { return d || ""; } };
+  const fromName = (f) => { if (!f) return ""; const m = f.match(/^\s*"?([^"<]+?)"?\s*</); return (m ? m[1] : f).trim(); };
+  const inp = { width: "100%", padding: "9px 11px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt, color: COLORS.textPrimary, fontSize: 13, outline: "none", boxSizing: "border-box", fontFamily: "inherit" };
+
+  const Banner = () => banner && (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderRadius: 10, marginBottom: 16, background: banner.type === "ok" ? "var(--sem-ok-bg)" : "var(--sem-danger-bg)", color: banner.type === "ok" ? "var(--sem-ok-fg, #047857)" : "var(--sem-danger-fg)", fontSize: 13, fontWeight: 600 }}>
+      {banner.type === "ok" ? <CheckCircle size={15} /> : <AlertTriangle size={15} />}
+      <span style={{ flex: 1 }}>{banner.msg}</span>
+      <button onClick={() => setBanner(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", display: "flex" }}><X size={14} /></button>
+    </div>
+  );
+
+  return (
+    <div style={{ maxWidth: 920, margin: "0 auto" }}>
+      <Banner />
+
+      {/* Connection card */}
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 20, marginBottom: 20 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <div style={{ width: 46, height: 46, borderRadius: 12, background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <GoogleG size={24} />
+          </div>
+          <div style={{ flex: 1, minWidth: 180 }}>
+            <div style={{ fontSize: 16, fontWeight: 800, color: COLORS.textPrimary }}>Gmail</div>
+            <div style={{ fontSize: 12.5, color: COLORS.textSecondary, marginTop: 2 }}>
+              {loading ? "Checking connection…"
+                : !status?.configured ? "Google integration isn't set up on the server yet."
+                : status?.can_email ? <>Connected{status.google_email ? <> as <b>{status.google_email}</b></> : ""}{status?.can_send ? " · read & send" : " · read-only"}</>
+                : status?.connected ? "Connected, but email access isn't granted yet."
+                : "Connect your Google account to use your inbox in Satori."}
+            </div>
+          </div>
+          {!loading && status?.configured && !status?.can_email && (
+            <button onClick={connect} disabled={busy} style={{ padding: "10px 18px", borderRadius: 10, border: "none", background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentDark})`, color: "#fff", fontWeight: 700, fontSize: 13, cursor: busy ? "default" : "pointer", display: "inline-flex", alignItems: "center", gap: 7 }}>
+              <Mail size={15} /> {busy ? "Redirecting…" : (status?.connected ? "Enable email" : "Connect Google")}
+            </button>
+          )}
+        </div>
+        {status?.connected && !status?.can_email && (
+          <div style={{ fontSize: 12, color: "var(--sem-warn-fg, #B45309)", background: "var(--sem-warn-bg)", borderRadius: 10, padding: "10px 12px", marginTop: 12, fontWeight: 600 }}>
+            Click <b>Enable email</b> and approve Gmail access to read, search, send and manage your inbox from Satori (and by chat/voice).
+          </div>
+        )}
+      </div>
+
+      {/* Inbox */}
+      {status?.can_email && (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+            <div style={{ position: "relative", flex: 1 }}>
+              <Search size={14} color={COLORS.textMuted} style={{ position: "absolute", left: 11, top: 10 }} />
+              <input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === "Enter") loadMessages(q); }}
+                placeholder="Search mail — e.g. from:ali is:unread subject:invoice" style={{ ...inp, paddingLeft: 32 }} />
+            </div>
+            <button onClick={() => loadMessages(q)} title="Refresh" style={{ padding: 9, borderRadius: 9, border: `1px solid ${COLORS.border}`, background: COLORS.surface, color: COLORS.textMuted, cursor: "pointer", display: "flex" }}>
+              <RefreshCw size={15} style={{ animation: msgLoading ? "spin 0.8s linear infinite" : "none" }} />
+            </button>
+            {status?.can_send && (
+              <button onClick={() => setCompose({ to: "", cc: "", subject: "", body: "" })} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 10, border: "none", background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentDark})`, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+                <Plus size={15} /> Compose
+              </button>
+            )}
+          </div>
+
+          <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14, overflow: "hidden" }}>
+            {msgLoading && messages.length === 0 ? (
+              <div style={{ padding: 40, textAlign: "center", color: COLORS.textMuted, fontSize: 13 }}>Loading your inbox…</div>
+            ) : messages.length === 0 ? (
+              <div style={{ padding: 40, textAlign: "center", color: COLORS.textMuted, fontSize: 13 }}>No emails {q ? "match that search." : "in your inbox."}</div>
+            ) : messages.map((m, i) => (
+              <div key={m.id} onClick={() => openMessage(m)} style={{
+                display: "flex", gap: 12, padding: "12px 16px", cursor: "pointer",
+                borderBottom: i < messages.length - 1 ? `1px solid ${COLORS.border}` : "none",
+                background: m.unread ? `${COLORS.accent}0c` : "transparent",
+              }}
+                onMouseEnter={e => e.currentTarget.style.background = COLORS.surfaceAlt}
+                onMouseLeave={e => e.currentTarget.style.background = m.unread ? `${COLORS.accent}0c` : "transparent"}>
+                <div style={{ width: 8, paddingTop: 5, flexShrink: 0 }}>{m.unread && <div style={{ width: 8, height: 8, borderRadius: "50%", background: COLORS.accent }} />}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                    <span style={{ fontSize: 13, fontWeight: m.unread ? 800 : 600, color: COLORS.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{fromName(m.from)}</span>
+                    <span style={{ fontSize: 11, color: COLORS.textMuted, whiteSpace: "nowrap", flexShrink: 0 }}>{fmtDate(m.date)}</span>
+                  </div>
+                  <div style={{ fontSize: 12.5, fontWeight: m.unread ? 700 : 500, color: COLORS.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 1 }}>{m.subject}</div>
+                  <div style={{ fontSize: 11.5, color: COLORS.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 1 }}>{m.snippet}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* Read modal */}
+      {open && (
+        <div onClick={() => setOpen(null)} style={{ position: "fixed", inset: 0, zIndex: 1600, background: "rgba(15,23,42,0.55)", backdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: "100%", maxWidth: 640, background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 18, padding: 22, boxShadow: "0 24px 60px rgba(0,0,0,0.4)", maxHeight: "88vh", display: "flex", flexDirection: "column" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 10 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 16, fontWeight: 800, color: COLORS.textPrimary }}>{open.subject}</div>
+                <div style={{ fontSize: 12, color: COLORS.textSecondary, marginTop: 3 }}>{open.from}</div>
+                <div style={{ fontSize: 11, color: COLORS.textMuted }}>{fmtDate(open.date)}</div>
+              </div>
+              <button onClick={() => setOpen(null)} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted, display: "flex" }}><X size={18} /></button>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", fontSize: 13, lineHeight: 1.6, color: COLORS.textPrimary, whiteSpace: "pre-wrap", borderTop: `1px solid ${COLORS.border}`, paddingTop: 12 }}>
+              {openLoading && open.body === null ? "Loading…" : (open.body || open.snippet || "(no content)")}
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+              {status?.can_send && (
+                <button onClick={() => setCompose({ to: open.from, cc: "", subject: open.subject?.toLowerCase().startsWith("re:") ? open.subject : `Re: ${open.subject}`, body: "", replyTo: open.id })} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 9, border: "none", background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentDark})`, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}><Send size={14} /> Reply</button>
+              )}
+              <button onClick={() => modify(open.id, "archive")} style={{ padding: "8px 14px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: "transparent", color: COLORS.textSecondary, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Archive</button>
+              <button onClick={() => modify(open.id, open.unread ? "markread" : "markunread")} style={{ padding: "8px 14px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: "transparent", color: COLORS.textSecondary, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Mark {open.unread ? "read" : "unread"}</button>
+              <div style={{ flex: 1 }} />
+              <button onClick={() => { if (window.confirm("Move this email to Trash?")) modify(open.id, "trash"); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9, border: "1px solid var(--sem-danger-bg)", background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)", fontWeight: 700, fontSize: 13, cursor: "pointer" }}><Trash2 size={14} /> Trash</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Compose / reply modal */}
+      {compose && (
+        <div onClick={() => setCompose(null)} style={{ position: "fixed", inset: 0, zIndex: 1700, background: "rgba(15,23,42,0.55)", backdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: "100%", maxWidth: 520, background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 18, padding: 22, boxShadow: "0 24px 60px rgba(0,0,0,0.4)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div style={{ fontSize: 16, fontWeight: 800, color: COLORS.textPrimary }}>{compose.replyTo ? "Reply" : "New email"}</div>
+              <button onClick={() => setCompose(null)} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted, display: "flex" }}><X size={18} /></button>
+            </div>
+            {!compose.replyTo && (
+              <>
+                <input value={compose.to} onChange={e => setCompose({ ...compose, to: e.target.value })} placeholder="To" style={{ ...inp, marginBottom: 8 }} />
+                <input value={compose.cc} onChange={e => setCompose({ ...compose, cc: e.target.value })} placeholder="Cc (optional)" style={{ ...inp, marginBottom: 8 }} />
+                <input value={compose.subject} onChange={e => setCompose({ ...compose, subject: e.target.value })} placeholder="Subject" style={{ ...inp, marginBottom: 8 }} />
+              </>
+            )}
+            {compose.replyTo && <div style={{ fontSize: 12, color: COLORS.textMuted, marginBottom: 8 }}>To: {fromName(compose.to)} · {compose.subject}</div>}
+            <textarea value={compose.body} onChange={e => setCompose({ ...compose, body: e.target.value })} rows={8} placeholder="Write your message…" autoFocus style={{ ...inp, resize: "vertical" }} />
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 14 }}>
+              <button onClick={() => setCompose(null)} style={{ padding: "9px 16px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "transparent", color: COLORS.textSecondary, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Cancel</button>
+              <button onClick={send} disabled={busy} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 18px", borderRadius: 10, border: "none", background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentDark})`, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}><Send size={14} /> {busy ? "Sending…" : "Send"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const NAV_ITEMS = [
   { id: "_divider_workspace", label: "WORKSPACE", isDivider: true },
   { id: "agent", label: "Ask Me Anything", icon: Bot, component: AgentPage, requiresFeature: "agent" },
   { id: "reports", label: "Report Builder", icon: FileText, component: ReportsPage, requiresFeature: "reportbuilder" },
   { id: "dashboards", label: "Dashboard Builder", icon: LayoutDashboard, component: DashboardsPage, requiresFeature: "dashboards" },
   { id: "calendar", label: "Calendar", icon: Calendar, component: CalendarPage },
+  { id: "inbox", label: "Inbox", icon: Mail, component: InboxPage },
   { id: "_divider_intelligence", label: "INTELLIGENCE", isDivider: true },
   { id: "availability", label: "Availability Engine", icon: Activity, component: AvailabilityEnginePage, requiresFeature: "availability" },
   { id: "projects", label: "Delivery Engine", icon: Layers, component: ProjectsPage, requiresFeature: "availability" },
@@ -12641,6 +12877,7 @@ export default function App() {
               <div style={{ fontSize: 12, color: COLORS.textMuted }}>
                 {activePage === "agent" ? "Enterprise AI · Connected to your data sources"
                   : activePage === "calendar" ? "Your Google Calendar — today and the week ahead"
+                  : activePage === "inbox" ? "Your Gmail — read, search, send and manage email"
                   : activePage === "reports" ? "Build, edit, and download tabular reports as Excel or PDF"
                   : activePage === "rules" ? "Automated alerts & notifications"
                   : activePage === "dashboards" ? "Build, view, and refine your custom dashboards"
