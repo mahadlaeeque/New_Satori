@@ -13097,6 +13097,57 @@ _GMAIL_TOOL_DECLS = [
 _GMAIL_TOOL = genai.types.Tool(function_declarations=[_decl_to_genai(d) for d in _GMAIL_TOOL_DECLS])
 
 
+# ── Unified "needs attention" notifications (top-bar bell) ──
+# Aggregates the urgent stuff in one place: important UNREAD emails + today's
+# critical/heads-up operational insights. Cached 60s per user (polled by the UI).
+_NOTIF_CACHE: dict = {}
+
+
+@app.get("/api/notifications")
+def notifications(user: dict = Depends(get_current_user)):
+    uid = int(user["sub"])
+    import time as _t
+    now = _t.time()
+    cached = _NOTIF_CACHE.get(uid)
+    if cached and now - cached[0] < 60:
+        return cached[1]
+    items = []
+    # 1) Important unread emails (Gmail's own importance markers).
+    try:
+        row = _gcal_row(uid)
+        if row and _gmail_scope_ok(row):
+            for m in (_gmail_list(uid, q="is:important is:unread", max_results=8) or []):
+                frm = (m.get("from") or "")
+                name = (frm.split("<")[0].strip().strip('"')) or frm
+                items.append({
+                    "id": "mail:" + (m.get("id") or ""), "type": "email",
+                    "title": m.get("subject") or "(no subject)",
+                    "subtitle": name, "severity": "info", "time": m.get("date"),
+                })
+    except Exception as e:
+        print(f"[notifications] email error: {e}")
+    # 2) Today's urgent operational insights (critical / heads-up), dept-scoped.
+    try:
+        day = datetime.now().strftime("%Y-%m-%d")
+        if not _insights_for_day(day):
+            with _INSIGHTS_LOCK:
+                if not _insights_for_day(day):
+                    try: _generate_insights(day)
+                    except Exception: pass
+        for r in (_scoped_insights(user, day) or []):
+            if (r.get("severity") or "") in ("critical", "warn"):
+                items.append({
+                    "id": "insight:" + str(r.get("id")), "type": "insight",
+                    "title": r.get("title"), "subtitle": r.get("body"),
+                    "severity": r.get("severity"), "time": None,
+                })
+    except Exception as e:
+        print(f"[notifications] insight error: {e}")
+    payload = {"count": len(items), "items": items[:25]}
+    _NOTIF_CACHE[uid] = (now, payload)
+    return payload
+
+
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 

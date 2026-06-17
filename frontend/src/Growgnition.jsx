@@ -12502,6 +12502,71 @@ const SatoriBootSplash = ({ onDone, userName }) => {
   );
 };
 
+// Top-bar notifications bell — important unread emails + urgent operational
+// insights, aggregated in one place. Polls /api/notifications.
+const NotificationsBell = ({ onNavigate }) => {
+  const [items, setItems] = useState([]);
+  const [open, setOpen] = useState(false);
+  const load = async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/notifications`, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } });
+      if (r.ok) setItems((await r.json()).items || []);
+    } catch { /* non-blocking */ }
+  };
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 90000);
+    const onVis = () => { if (!document.hidden) load(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { clearInterval(t); document.removeEventListener("visibilitychange", onVis); };
+  }, []);
+  const count = items.length;
+  const sevColor = (s) => s === "critical" ? "var(--sem-danger-fg)" : s === "warn" ? "var(--sem-warn-fg, #B45309)" : COLORS.accent;
+  const go = (it) => { setOpen(false); onNavigate?.(it.type === "email" ? "inbox" : "agent"); };
+  return (
+    <div style={{ position: "relative" }}>
+      <button onClick={() => setOpen(o => !o)} title="Notifications" style={{
+        position: "relative", width: 38, height: 38, borderRadius: 10, border: `1px solid ${COLORS.border}`,
+        background: COLORS.surface, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: COLORS.textSecondary,
+      }}
+        onMouseEnter={e => e.currentTarget.style.borderColor = COLORS.accent}
+        onMouseLeave={e => e.currentTarget.style.borderColor = COLORS.border}>
+        <Bell size={17} />
+        {count > 0 && (
+          <span style={{ position: "absolute", top: -5, right: -5, minWidth: 17, height: 17, padding: "0 4px", borderRadius: 9, background: "#EF4444", color: "#fff", fontSize: 10, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center" }}>{count > 9 ? "9+" : count}</span>
+        )}
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 60 }} />
+          <div style={{ position: "absolute", top: "118%", right: 0, width: 350, maxHeight: 460, overflowY: "auto", background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14, boxShadow: "0 16px 40px rgba(0,0,0,0.22)", zIndex: 61, padding: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px 10px" }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: COLORS.textPrimary, display: "flex", alignItems: "center", gap: 6 }}><Bell size={14} color={COLORS.accent} /> Needs attention</div>
+              <button onClick={load} title="Refresh" style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted, display: "flex" }}><RefreshCw size={13} /></button>
+            </div>
+            {items.length === 0 ? (
+              <div style={{ fontSize: 12, color: COLORS.textMuted, padding: "20px 12px", textAlign: "center" }}>You're all caught up — nothing urgent right now.</div>
+            ) : items.map(it => (
+              <div key={it.id} onClick={() => go(it)} style={{ display: "flex", gap: 9, padding: "9px 10px", borderRadius: 9, cursor: "pointer" }}
+                onMouseEnter={e => e.currentTarget.style.background = COLORS.surfaceAlt}
+                onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                <div style={{ width: 7, paddingTop: 5, flexShrink: 0 }}><div style={{ width: 7, height: 7, borderRadius: "50%", background: sevColor(it.severity) }} /></div>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.4px", textTransform: "uppercase", color: it.type === "email" ? COLORS.accent : sevColor(it.severity), marginBottom: 1 }}>
+                    {it.type === "email" ? "Email" : it.severity === "critical" ? "Critical" : "Heads-up"}
+                  </div>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: COLORS.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.title}</div>
+                  <div style={{ fontSize: 11, color: COLORS.textMuted, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{it.subtitle}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(() => !!localStorage.getItem("token"));
   // Boot splash: show once per browser session when arriving with a live token,
@@ -12898,6 +12963,8 @@ export default function App() {
                 background: COLORS.surfaceAlt,
               }} />
             </span>
+            {/* Notifications — important emails + urgent insights in one place */}
+            <NotificationsBell onNavigate={setActivePage} />
             {/* Dark mode toggle */}
             <button
               onClick={() => setDarkMode(!darkMode)}
