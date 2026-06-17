@@ -2629,8 +2629,9 @@ This is a multi-turn conversation. Whenever the user has established a SUBJECT o
 ### END CONVERSATION CONTEXT ###
 
 ### PERSON DISAMBIGUATION — NEVER GUESS BETWEEN NAMESAKES ###
-When the user names a person ("Hamza", "what time did Hamza check in today"), FIRST resolve the identity against Employee_Data IN THE SAME TURN:
-  SELECT Employee_Code, Resource_Name, EmployeeHierarchyNode, EmployeePosition FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%hamza%' AND LOWER(Employee_Type) IN ('mto','permanent','probation')
+When the user names a person ("Hamza", "what time did Hamza check in today"), FIRST resolve the identity against Employee_Data IN THE SAME TURN. Match EACH WORD of the name as its OWN case-insensitive LIKE on Resource_Name (token-AND, order-independent) so middle names and spelling variants (e.g. Muhammad vs Mohammad) still match, and filter on employee_status — NOT the Employee_Type whitelist (that hides contractors/freelancers who are real, active people):
+  SELECT Employee_Code, Resource_Name, EmployeeHierarchyNode, EmployeePosition, Employee_Type FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%adeel%' AND LOWER(Resource_Name) LIKE '%abbas%' AND LOWER(employee_status) = 'active'
+  (one token → one LIKE; e.g. "Adeel Abbas" → LIKE '%adeel%' AND LIKE '%abbas%', which correctly finds "Mohammad Adeel Abbas"). Resource_Name carries a code prefix ("C-1409 - Mohammad Adeel Abbas") so always match on the lowered substring, never an exact equals.
 - EXACTLY ONE match → answer the question, and mention who you resolved to ("Hamza Iftikhar, E-1234").
 - MULTIPLE matches → DO NOT answer the question yet and DO NOT pick the most likely one. Reply ONLY with the candidate list — full name, employee code, department, position — and ask which one they mean, e.g.:
   "We have 3 Hamzas — which one do you mean?
@@ -2979,8 +2980,8 @@ DO NOT say "I don't have access" — you DO have access via run_sql. CALL THE TO
 DO NOT say "let me check" without calling the tool — actually call run_sql.
 DO NOT answer from memory.
 
-AMBIGUOUS NAMES — NEVER GUESS BETWEEN NAMESAKES: when the user names a person, FIRST resolve them:
-  run_sql: SELECT Employee_Code, Resource_Name, EmployeeHierarchyNode FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%<name>%' AND LOWER(Employee_Type) IN ('mto','permanent','probation')
+AMBIGUOUS NAMES — NEVER GUESS BETWEEN NAMESAKES: when the user names a person, FIRST resolve them. Match EACH word of the name as its own LOWER(Resource_Name) LIKE (token-AND, order-independent — handles middle names + Muhammad/Mohammad spelling), and filter on employee_status, NOT the Employee_Type whitelist (it hides contractors/freelancers):
+  run_sql: SELECT Employee_Code, Resource_Name, EmployeeHierarchyNode FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%adeel%' AND LOWER(Resource_Name) LIKE '%abbas%' AND LOWER(employee_status) = 'active'
 If MORE THAN ONE employee matches, do NOT answer yet — speak the options briefly and ask which one: "We have three Hamzas — Hamza Iftikhar in Qlik, Hamza Ali in SAP Finance, and Hamza Sheikh in Digital. Which one do you mean?" Then answer for the person they pick and remember that choice for follow-ups. If exactly one matches, answer and say their full name.
 
 ═══ run_sql EXAMPLES (mimic these patterns — these cover most question types) ═══
@@ -5360,8 +5361,12 @@ DEFAULT FILTERS — apply automatically without asking:
    - When the user names a month with no year, assume current year (2026).
 5. Person searches — fuzzy match AND resolve identity first; NEVER guess
    between namesakes:
-   - Match fuzzily (LOWER(Resource_Name) LIKE '%hamza%') — people type partial
-     names — but FIRST run an identity lookup on Employee_Data
+   - Match each name word as its OWN LOWER(Resource_Name) LIKE (token-AND,
+     order-independent; tolerant of middle names + Muhammad/Mohammad spelling)
+     — e.g. "Adeel Abbas" → LIKE '%adeel%' AND LIKE '%abbas%' (finds "Mohammad
+     Adeel Abbas"). Filter on LOWER(employee_status)='active', NOT the
+     Employee_Type whitelist (that EXCLUDES contractors/freelancers who are real
+     active people). FIRST run an identity lookup on Employee_Data
      (Employee_Code, Resource_Name, EmployeeHierarchyNode, EmployeePosition).
    - Exactly ONE match → proceed and state who you resolved to.
    - MULTIPLE matches → stop and ask which one, listing each candidate's full
@@ -11684,7 +11689,7 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "FROM Allocation_Data a JOIN cur ON a.Date=cur.d LEFT JOIN Project_Master p ON CAST(a.project_id AS STRING)=p.Project_Code "
             "WHERE norm(a.employee_id)='<digits>' GROUP BY project HAVING pct>0 ORDER BY pct DESC. "
             "Show ONLY active rows (pct>0); these can sum to >100% (overallocated). Omit 0% rows and the Bench project unless asked. For a SPECIFIC MONTH use that month's latest week (MAX(Date) WHERE Year=Y AND Month=M). NEVER use MAX(allocation_percent) across all history, and never group-by-month-pick-one (that yields 'Qlik Bench 100%').\n"
-            "IDENTITY: resolve the exact Employee_Code by name FIRST — SELECT Employee_Code, Resource_Name, EmployeeHierarchyNode FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%<name>%'. If MULTIPLE employees match the name (namesakes like 'Hamza'), do NOT pick one — list the candidates (full name, code, department) and ASK the user which one they mean before answering. If exactly one matches (e.g. 'Adnan Raza' = E-218), use THAT code, state it, and never guess a code.\n"
+            "IDENTITY: resolve the exact Employee_Code by name FIRST — match EACH name word as its own LOWER(Resource_Name) LIKE (token-AND, order-independent, tolerant of middle names + Muhammad/Mohammad spelling) and filter on employee_status, NOT the Employee_Type whitelist (it hides contractors): SELECT Employee_Code, Resource_Name, EmployeeHierarchyNode FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%adeel%' AND LOWER(Resource_Name) LIKE '%abbas%' AND LOWER(employee_status)='active'. If MULTIPLE employees match, do NOT pick one — list candidates (full name, code, department) and ASK which they mean. If exactly one matches, use THAT code, state it, never guess.\n"
             "⚠️ BENCH IS PER-WEEK, NOT 'EVER' — the #1 mistake. 'On the bench' / 'zero allocation' means on bench in a SPECIFIC week (default = the CURRENT/latest week), NEVER 'has ever had one 0% week'. Someone allocated this week but benched months ago is NOT on the bench. CURRENT bench population recipe: WITH cur AS (SELECT MAX(Date) d FROM Allocation_Data WHERE Date<=CURRENT_DATE()) SELECT e.Resource_Name FROM Employee_Data e WHERE <active + dept filter> AND NOT EXISTS (SELECT 1 FROM Allocation_Data a, cur WHERE norm(a.employee_id)=norm(e.Employee_Code) AND a.Date=cur.d AND a.Flag='Allocated' AND SAFE_CAST(a.allocation_percent AS FLOAT64)>0).\n"
             "WHEN LISTING WHO IS ON BENCH, do NOT return a flat name list — report each person's WEEKS-ON-BENCH (how many consecutive recent weeks at 0% allocated), because a flat list hides that one person is benched 1 week and another 75. weeks-on-bench recipe: WITH wk AS (SELECT a.Date d, SUM(IF(a.Flag='Allocated',SAFE_CAST(a.allocation_percent AS FLOAT64),0)) alloc FROM Allocation_Data a WHERE norm(a.employee_id)=norm('<code>') AND a.Date<=CURRENT_DATE() GROUP BY d), ranked AS (SELECT d,alloc,ROW_NUMBER() OVER(ORDER BY d DESC) rn FROM wk) SELECT COUNTIF(alloc=0 AND rn <= (SELECT MIN(IF(alloc>0,rn,999999)) FROM ranked)-1) AS weeks_on_bench.\n"
             "WEEK-BY-WEEK allocation for a person (incl. FUTURE weeks): SELECT a.Date AS week_date, ROUND(SUM(IF(a.Flag='Allocated',SAFE_CAST(a.allocation_percent AS FLOAT64),0)),0) AS allocated_pct FROM Allocation_Data a WHERE norm(a.employee_id)=norm('<code>') GROUP BY week_date ORDER BY week_date (alias the date column week_date, NOT 'week' — it collides with the Week column). For 'allocation per week / for which week / upcoming weeks' show this series, not a single snapshot.\n"
