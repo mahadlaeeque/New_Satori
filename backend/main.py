@@ -13143,6 +13143,34 @@ def notifications(user: dict = Depends(get_current_user)):
                 })
     except Exception as e:
         print(f"[notifications] insight error: {e}")
+    # 3) Meetings starting within the next 15 minutes (most urgent → front of list).
+    try:
+        if _gcal_row(uid):
+            start = _gcal_pkt_now()
+            end = start + timedelta(minutes=15)
+            for e in (_gcal_fetch_events(uid, start.isoformat(), end.isoformat(), max_results=5) or []):
+                if e.get("all_day"):
+                    continue
+                mins = None
+                try:
+                    st = datetime.fromisoformat((e.get("start") or "").replace("Z", "+00:00"))
+                    if st.tzinfo is not None:
+                        st = st.astimezone(_PKT)
+                    mins = int((st - start).total_seconds() // 60)
+                except Exception:
+                    mins = None
+                if mins is not None and mins < -1:
+                    continue  # already well underway
+                label = "Starting now" if (mins is None or mins <= 0) else f"Starts in {mins} min"
+                loc = e.get("location") or ("Google Meet" if e.get("meet_link") else "")
+                items.insert(0, {
+                    "id": "meet:" + (e.get("id") or ""), "type": "meeting",
+                    "title": e.get("summary") or "(meeting)",
+                    "subtitle": label + (f" · {loc}" if loc else ""),
+                    "severity": "critical", "time": e.get("start"), "meet_link": e.get("meet_link"),
+                })
+    except Exception as e:
+        print(f"[notifications] meeting error: {e}")
     payload = {"count": len(items), "items": items[:25]}
     _NOTIF_CACHE[uid] = (now, payload)
     return payload

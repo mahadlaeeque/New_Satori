@@ -12502,40 +12502,101 @@ const SatoriBootSplash = ({ onDone, userName }) => {
   );
 };
 
-// Top-bar notifications bell — important unread emails + urgent operational
-// insights, aggregated in one place. Polls /api/notifications.
+// Top-bar notifications bell — important unread emails, urgent insights, and
+// meetings starting soon. The badge shows UNSEEN items (clears when you open
+// the panel); high-priority items (meetings/critical) auto-ping once via a
+// browser notification + in-app toast even if you don't open the bell.
+const _notifReadSet = (k) => { try { return new Set(JSON.parse(localStorage.getItem(k) || "[]")); } catch { return new Set(); } };
+const _notifWriteSet = (k, s) => { try { localStorage.setItem(k, JSON.stringify([...s])); } catch { /* noop */ } };
+
 const NotificationsBell = ({ onNavigate }) => {
   const [items, setItems] = useState([]);
   const [open, setOpen] = useState(false);
+  const [unseen, setUnseen] = useState(0);
+  const [toast, setToast] = useState(null);
+  const seenRef = useRef(_notifReadSet("satori_notif_seen"));
+  const alertedRef = useRef(_notifReadSet("satori_notif_alerted"));
+
   const load = async () => {
     try {
       const r = await fetch(`${API_BASE}/api/notifications`, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } });
-      if (r.ok) setItems((await r.json()).items || []);
+      if (!r.ok) return;
+      const its = ((await r.json()).items) || [];
+      setItems(its);
+      const ids = new Set(its.map(i => i.id));
+      // Prune seen/alerted to current ids so the sets stay bounded.
+      seenRef.current = new Set([...seenRef.current].filter(id => ids.has(id)));
+      alertedRef.current = new Set([...alertedRef.current].filter(id => ids.has(id)));
+      _notifWriteSet("satori_notif_seen", seenRef.current);
+      _notifWriteSet("satori_notif_alerted", alertedRef.current);
+      setUnseen(its.filter(i => !seenRef.current.has(i.id)).length);
+
+      // Auto-ping high-priority items (meetings starting soon / critical) once.
+      const high = its.filter(i => (i.type === "meeting" || i.severity === "critical") && !alertedRef.current.has(i.id));
+      if (high.length) {
+        const top = high[0];
+        setToast({ title: top.title, subtitle: top.subtitle, type: top.type, meet_link: top.meet_link });
+        setTimeout(() => setToast(t => (t && t.title === top.title) ? null : t), 14000);
+        try {
+          if (window.Notification && Notification.permission === "granted") {
+            high.forEach(h => new Notification((h.type === "meeting" ? "⏰ " : "⚠️ ") + h.title, { body: h.subtitle || "", tag: h.id }));
+          }
+        } catch { /* noop */ }
+        high.forEach(h => alertedRef.current.add(h.id));
+        _notifWriteSet("satori_notif_alerted", alertedRef.current);
+      }
     } catch { /* non-blocking */ }
   };
+
   useEffect(() => {
+    if (window.Notification && Notification.permission === "default") { try { Notification.requestPermission(); } catch { /* noop */ } }
     load();
-    const t = setInterval(load, 90000);
+    const t = setInterval(load, 60000);
     const onVis = () => { if (!document.hidden) load(); };
     document.addEventListener("visibilitychange", onVis);
     return () => { clearInterval(t); document.removeEventListener("visibilitychange", onVis); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const count = items.length;
+
+  const markSeen = () => { items.forEach(i => seenRef.current.add(i.id)); _notifWriteSet("satori_notif_seen", seenRef.current); setUnseen(0); };
+  const toggle = () => {
+    if (window.Notification && Notification.permission === "default") { try { Notification.requestPermission(); } catch { /* noop */ } }
+    setOpen(o => { const n = !o; if (n) markSeen(); return n; });
+  };
   const sevColor = (s) => s === "critical" ? "var(--sem-danger-fg)" : s === "warn" ? "var(--sem-warn-fg, #B45309)" : COLORS.accent;
-  const go = (it) => { setOpen(false); onNavigate?.(it.type === "email" ? "inbox" : "agent"); };
+  const go = (it) => {
+    setOpen(false); setToast(null);
+    if (it.type === "meeting" && it.meet_link) { try { window.open(it.meet_link, "_blank", "noopener"); } catch { /* noop */ } return; }
+    onNavigate?.(it.type === "email" ? "inbox" : it.type === "meeting" ? "calendar" : "agent");
+  };
+  const kind = (it) => it.type === "meeting" ? "Meeting" : it.type === "email" ? "Email" : it.severity === "critical" ? "Critical" : "Heads-up";
+
   return (
     <div style={{ position: "relative" }}>
-      <button onClick={() => setOpen(o => !o)} title="Notifications" style={{
+      <button onClick={toggle} title="Notifications" style={{
         position: "relative", width: 38, height: 38, borderRadius: 10, border: `1px solid ${COLORS.border}`,
         background: COLORS.surface, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: COLORS.textSecondary,
       }}
         onMouseEnter={e => e.currentTarget.style.borderColor = COLORS.accent}
         onMouseLeave={e => e.currentTarget.style.borderColor = COLORS.border}>
         <Bell size={17} />
-        {count > 0 && (
-          <span style={{ position: "absolute", top: -5, right: -5, minWidth: 17, height: 17, padding: "0 4px", borderRadius: 9, background: "#EF4444", color: "#fff", fontSize: 10, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center" }}>{count > 9 ? "9+" : count}</span>
+        {unseen > 0 && (
+          <span style={{ position: "absolute", top: -5, right: -5, minWidth: 17, height: 17, padding: "0 4px", borderRadius: 9, background: "#EF4444", color: "#fff", fontSize: 10, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center" }}>{unseen > 9 ? "9+" : unseen}</span>
         )}
       </button>
+
+      {/* Auto-ping toast (shows even if the bell isn't opened) */}
+      {toast && (
+        <div onClick={() => go(toast)} style={{ position: "absolute", top: "120%", right: 0, width: 320, background: COLORS.surface, border: `1px solid ${COLORS.accent}`, borderLeft: `4px solid var(--sem-danger-fg)`, borderRadius: 12, boxShadow: "0 16px 40px rgba(0,0,0,0.28)", zIndex: 62, padding: "12px 14px", cursor: "pointer", animation: "fadeIn 0.2s ease" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+            <div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: "0.4px", textTransform: "uppercase", color: "var(--sem-danger-fg)" }}>{toast.type === "meeting" ? "⏰ Meeting soon" : "⚠️ Urgent"}</div>
+            <button onClick={(e) => { e.stopPropagation(); setToast(null); }} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted, display: "flex" }}><X size={13} /></button>
+          </div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: COLORS.textPrimary, marginTop: 2 }}>{toast.title}</div>
+          <div style={{ fontSize: 11.5, color: COLORS.textSecondary, marginTop: 1 }}>{toast.subtitle}{toast.type === "meeting" && toast.meet_link ? " · click to join" : ""}</div>
+        </div>
+      )}
+
       {open && (
         <>
           <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 60 }} />
@@ -12552,9 +12613,7 @@ const NotificationsBell = ({ onNavigate }) => {
                 onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
                 <div style={{ width: 7, paddingTop: 5, flexShrink: 0 }}><div style={{ width: 7, height: 7, borderRadius: "50%", background: sevColor(it.severity) }} /></div>
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.4px", textTransform: "uppercase", color: it.type === "email" ? COLORS.accent : sevColor(it.severity), marginBottom: 1 }}>
-                    {it.type === "email" ? "Email" : it.severity === "critical" ? "Critical" : "Heads-up"}
-                  </div>
+                  <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.4px", textTransform: "uppercase", color: it.type === "email" ? COLORS.accent : sevColor(it.severity), marginBottom: 1 }}>{kind(it)}</div>
                   <div style={{ fontSize: 12.5, fontWeight: 700, color: COLORS.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.title}</div>
                   <div style={{ fontSize: 11, color: COLORS.textMuted, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{it.subtitle}</div>
                 </div>
