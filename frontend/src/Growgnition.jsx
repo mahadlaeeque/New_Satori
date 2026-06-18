@@ -11243,7 +11243,7 @@ const FeedbackAdminPage = () => {
       <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "auto", maxHeight: "62vh" }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead><tr>
-            {["Date", "User", "Rating", "Rec.", "Time saved", "Category", "Most-used", "Helped", "Comments"].map(h => <th key={h} style={th}>{h}</th>)}
+            {["Date", "User", "Rating", "Rec.", "Time saved", "Category", "Most-used", "👍 Working well", "👎 Not working", "Other"].map(h => <th key={h} style={th}>{h}</th>)}
           </tr></thead>
           <tbody>
             {(d.feedback || []).map(f => (
@@ -11254,13 +11254,14 @@ const FeedbackAdminPage = () => {
                 <td style={{ ...td, textAlign: "center" }}>{f.recommend != null ? f.recommend : "—"}</td>
                 <td style={{ ...td, whiteSpace: "nowrap" }}>{f.time_saved || "—"}</td>
                 <td style={{ ...td, whiteSpace: "nowrap" }}>{f.category || "—"}</td>
-                <td style={{ ...td, maxWidth: 180, color: COLORS.textSecondary }}>{f.features || "—"}</td>
-                <td style={{ ...td, maxWidth: 260, color: COLORS.textSecondary }}>{f.helped || "—"}</td>
-                <td style={{ ...td, maxWidth: 260, color: COLORS.textSecondary }}>{f.comments || "—"}</td>
+                <td style={{ ...td, maxWidth: 160, color: COLORS.textSecondary }}>{f.features || "—"}</td>
+                <td style={{ ...td, maxWidth: 240, color: COLORS.textSecondary }}>{f.helped || "—"}</td>
+                <td style={{ ...td, maxWidth: 240, color: COLORS.textSecondary }}>{f.disliked || "—"}</td>
+                <td style={{ ...td, maxWidth: 220, color: COLORS.textSecondary }}>{f.comments || "—"}</td>
               </tr>
             ))}
             {(!d.feedback || d.feedback.length === 0) && (
-              <tr><td colSpan={9} style={{ ...td, textAlign: "center", color: COLORS.textMuted, padding: 28 }}>No feedback submitted yet.</td></tr>
+              <tr><td colSpan={10} style={{ ...td, textAlign: "center", color: COLORS.textMuted, padding: 28 }}>No feedback submitted yet.</td></tr>
             )}
           </tbody>
         </table>
@@ -12656,6 +12657,7 @@ const FeedbackModal = ({ onClose, onSubmitted, prompted }) => {
   const [recommend, setRecommend] = useState(null);
   const [features, setFeatures] = useState([]);
   const [helped, setHelped] = useState("");
+  const [disliked, setDisliked] = useState("");
   const [comments, setComments] = useState("");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
@@ -12667,12 +12669,12 @@ const FeedbackModal = ({ onClose, onSubmitted, prompted }) => {
   const toggleFeature = (f) => setFeatures(fs => fs.includes(f) ? fs.filter(x => x !== f) : [...fs, f]);
 
   const submit = async () => {
-    if (!rating && recommend == null && !helped.trim() && !comments.trim()) { setError("Give a rating or a few words."); return; }
+    if (!rating && recommend == null && !helped.trim() && !disliked.trim() && !comments.trim()) { setError("Give a rating or a few words."); return; }
     setBusy(true); setError(null);
     try {
       const r = await fetch(`${API_BASE}/api/feedback/submit`, {
         method: "POST", headers: { Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ rating: rating || null, category, helped, comments, time_saved: timeSaved, recommend, features: features.join(", ") }),
+        body: JSON.stringify({ rating: rating || null, category, helped, disliked, comments, time_saved: timeSaved, recommend, features: features.join(", ") }),
       });
       if (!r.ok) { const j = await r.json().catch(() => ({})); setError(j.detail || "Couldn't submit."); setBusy(false); return; }
       setDone(true);
@@ -12737,10 +12739,12 @@ const FeedbackModal = ({ onClose, onSubmitted, prompted }) => {
               ))}
             </div>
 
-            <label style={{ fontSize: 12, fontWeight: 700, color: COLORS.textSecondary, marginBottom: 5, display: "block" }}>How has Satori helped or saved you time?</label>
-            <textarea value={helped} onChange={e => setHelped(e.target.value)} rows={3} placeholder="e.g. I get attendance answers in seconds instead of waiting on a report…" style={{ ...inp, marginBottom: 12 }} />
-            <label style={{ fontSize: 12, fontWeight: 700, color: COLORS.textSecondary, marginBottom: 5, display: "block" }}>Anything else? (suggestions, issues)</label>
-            <textarea value={comments} onChange={e => setComments(e.target.value)} rows={3} placeholder="Optional" style={{ ...inp }} />
+            <label style={{ ...label, color: "var(--sem-ok-fg, #047857)" }}>👍 What's working well? <span style={{ color: COLORS.textMuted, fontWeight: 500 }}>(what you like / time it saves)</span></label>
+            <textarea value={helped} onChange={e => setHelped(e.target.value)} rows={3} placeholder="e.g. I get attendance answers in seconds instead of waiting on a report…" style={{ ...inp, marginBottom: 14 }} />
+            <label style={{ ...label, color: "var(--sem-danger-fg)" }}>👎 What's not working or could be better? <span style={{ color: COLORS.textMuted, fontWeight: 500 }}>(bugs, gaps, frustrations)</span></label>
+            <textarea value={disliked} onChange={e => setDisliked(e.target.value)} rows={3} placeholder="e.g. it sometimes can't find a contractor by name; I wish it could…" style={{ ...inp, marginBottom: 14 }} />
+            <label style={label}>💬 Any other feedback or ideas?</label>
+            <textarea value={comments} onChange={e => setComments(e.target.value)} rows={2} placeholder="Optional" style={{ ...inp }} />
 
             {error && <div style={{ fontSize: 12, color: "var(--sem-danger-fg)", marginTop: 10 }}>{error}</div>}
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 16 }}>

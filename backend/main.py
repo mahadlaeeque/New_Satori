@@ -9763,11 +9763,12 @@ def run_due_subscriptions(request: Request):
 class _FeedbackIn(BaseModel):
     rating: Optional[int] = None
     category: Optional[str] = ""
-    helped: Optional[str] = ""
-    comments: Optional[str] = ""
-    time_saved: Optional[str] = ""        # e.g. "3-5h/week"
-    recommend: Optional[int] = None       # NPS-style 0-10
-    features: Optional[str] = ""          # comma-separated most-used features
+    helped: Optional[str] = ""             # 👍 what's working well
+    disliked: Optional[str] = ""           # 👎 what's not working / could be better
+    comments: Optional[str] = ""           # general / ideas
+    time_saved: Optional[str] = ""         # e.g. "3-5h/week"
+    recommend: Optional[int] = None        # NPS-style 0-10
+    features: Optional[str] = ""           # comma-separated most-used features
 
 
 @app.post("/api/feedback/submit")
@@ -9785,10 +9786,11 @@ def submit_feedback(body: _FeedbackIn, user: dict = Depends(get_current_user)):
         except Exception: recommend = None
     category   = (body.category or "").strip()[:60]
     helped     = (body.helped or "").strip()[:4000]
+    disliked   = (body.disliked or "").strip()[:4000]
     comments   = (body.comments or "").strip()[:4000]
     time_saved = (body.time_saved or "").strip()[:40]
     features   = (body.features or "").strip()[:300]
-    if rating is None and recommend is None and not helped and not comments:
+    if rating is None and recommend is None and not helped and not disliked and not comments:
         raise HTTPException(status_code=400, detail="Add a rating or a few words of feedback.")
     uid = int(user.get("sub") or 0) or None
     email = (user.get("email") or "").strip().lower()
@@ -9801,9 +9803,9 @@ def submit_feedback(body: _FeedbackIn, user: dict = Depends(get_current_user)):
             if r:
                 full_name = (r["full_name"] if isinstance(r, dict) else r[0]) or email
         cur.execute(
-            "INSERT INTO satori_feedback (user_id, user_email, full_name, rating, category, helped, comments, time_saved, recommend, features) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (uid, email, full_name, rating, category, helped, comments, time_saved, recommend, features))
+            "INSERT INTO satori_feedback (user_id, user_email, full_name, rating, category, helped, comments, time_saved, recommend, features, disliked) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (uid, email, full_name, rating, category, helped, comments, time_saved, recommend, features, disliked))
         db.commit()
     finally:
         db.close()
@@ -9812,7 +9814,7 @@ def submit_feedback(body: _FeedbackIn, user: dict = Depends(get_current_user)):
         subject = f"Satori feedback {stars} — {full_name}"
         text = (f"From: {full_name} <{email}>\nRating: {rating or '-'}/5  ·  Recommend (0-10): {recommend if recommend is not None else '-'}\n"
                 f"Category: {category or '-'}  ·  Time saved: {time_saved or '-'}\nMost-used: {features or '-'}\n\n"
-                f"How Satori helped / saved time:\n{helped or '-'}\n\nComments:\n{comments or '-'}")
+                f"👍 Working well:\n{helped or '-'}\n\n👎 Not working / could be better:\n{disliked or '-'}\n\nOther feedback:\n{comments or '-'}")
         emailer.send_email(_SUPPORT_EMAIL_TO, subject, text)
     except Exception as e:
         print(f"[feedback] email failed: {e}")
@@ -9843,7 +9845,7 @@ def admin_feedback(user: dict = Depends(require_superadmin)):
     db = get_db(); cur = db.cursor()
     rows = []
     try:
-        cur.execute("SELECT id, user_email, full_name, rating, category, helped, comments, "
+        cur.execute("SELECT id, user_email, full_name, rating, category, helped, disliked, comments, "
                     "time_saved, recommend, features, created_at "
                     "FROM satori_feedback ORDER BY created_at DESC LIMIT 1000")
         rows = [dict(r) for r in cur.fetchall()]

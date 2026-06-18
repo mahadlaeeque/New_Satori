@@ -296,7 +296,7 @@ def _migrate_add_satori_feedback():
                 )
             """)
         # Add the deeper-feedback columns to pre-existing tables (idempotent).
-        for col, typ in (("time_saved", "TEXT"), ("recommend", "INTEGER"), ("features", "TEXT")):
+        for col, typ in (("time_saved", "TEXT"), ("recommend", "INTEGER"), ("features", "TEXT"), ("disliked", "TEXT")):
             try:
                 if USE_POSTGRES:
                     cur.execute(f"ALTER TABLE satori_feedback ADD COLUMN IF NOT EXISTS {col} {typ}")
