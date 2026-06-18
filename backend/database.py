@@ -317,24 +317,31 @@ _SEED_NAMED_USERS = [
 
 
 def _migrate_seed_named_users():
-    """Idempotent: provision the named TMC users as regular, DEPARTMENT-SCOPED
-    accounts (default password 'welcome', 2FA enrolled on first login). Each
-    gets the standard feature set and a user_data_scope row pinned + enforced to
-    their own department so they only ever see their team's data. Skips any
-    email that already exists."""
+    """Idempotent + race-safe: provision the named TMC users as regular,
+    DEPARTMENT-SCOPED accounts (default password 'welcome', 2FA on first login).
+    Each gets the standard feature set + a user_data_scope row pinned and
+    enforced to their own department. Uses a FRESH connection per user so a
+    duplicate (e.g. two Cloud Run instances starting at once) only skips that
+    one row instead of rolling back the rest. Existing users are left untouched."""
     try:
-        conn = get_db(); cur = conn.cursor()
-        cur.execute("SELECT id FROM companies WHERE short_code = ?", ("TMC",))
-        row = cur.fetchone()
+        c0 = get_db(); cur0 = c0.cursor()
+        cur0.execute("SELECT id FROM companies WHERE short_code = ?", ("TMC",))
+        row = cur0.fetchone(); c0.close()
         if not row:
-            conn.close(); return
+            return
         company_id = row["id"] if isinstance(row, dict) else row[0]
-        pw_hash = _bcrypt.hashpw(b"welcome", _bcrypt.gensalt()).decode()
-        created = 0
-        for email, full_name, dept in _SEED_NAMED_USERS:
+    except Exception as e:
+        print(f"[DB] Named-user seed: no company yet ({e})")
+        return
+    pw_hash = _bcrypt.hashpw(b"welcome", _bcrypt.gensalt()).decode()
+    created = 0
+    for email, full_name, dept in _SEED_NAMED_USERS:
+        conn = None
+        try:
+            conn = get_db(); cur = conn.cursor()
             cur.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (email,))
             if cur.fetchone():
-                continue  # already provisioned — leave their password/scope alone
+                conn.close(); continue  # already provisioned — leave password/scope alone
             if USE_POSTGRES:
                 cur.execute(
                     "INSERT INTO users (email, password, full_name, role, company_id) VALUES (?, ?, ?, ?, ?) RETURNING id",
@@ -351,18 +358,21 @@ def _migrate_seed_named_users():
                     cur.execute("INSERT INTO user_features (user_id, feature_id) VALUES (?, ?) ON CONFLICT DO NOTHING", (uid, fid))
                 else:
                     cur.execute("INSERT OR IGNORE INTO user_features (user_id, feature_id) VALUES (?, ?)", (uid, fid))
-            # Department scope: pin the value + enforce it.
             if USE_POSTGRES:
                 cur.execute("INSERT INTO user_data_scope (user_id, dimension, value) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", (uid, "department", dept))
                 cur.execute("INSERT INTO user_data_scope_policy (user_id, dimension, enforced) VALUES (?, ?, 1) ON CONFLICT (user_id, dimension) DO UPDATE SET enforced = 1", (uid, "department"))
             else:
                 cur.execute("INSERT OR IGNORE INTO user_data_scope (user_id, dimension, value) VALUES (?, ?, ?)", (uid, "department", dept))
                 cur.execute("INSERT OR REPLACE INTO user_data_scope_policy (user_id, dimension, enforced) VALUES (?, ?, 1)", (uid, "department"))
+            conn.commit(); conn.close()
             created += 1
-        conn.commit(); conn.close()
-        print(f"[DB] Migration: named users provisioned ({created} new, dept-scoped)")
-    except Exception as e:
-        print(f"[DB] Named-user seed error (safe to ignore on fresh DB): {e}")
+        except Exception as e:
+            try:
+                if conn: conn.close()
+            except Exception:
+                pass
+            print(f"[DB] Named-user seed: skipped {email} ({e})")
+    print(f"[DB] Migration: named users provisioned ({created} new, dept-scoped)")
 
 
 def _migrate_add_google_calendar():
