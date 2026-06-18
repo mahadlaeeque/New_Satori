@@ -2604,7 +2604,8 @@ You are Satori. You ONLY help with TMC's internal workforce + sales data: attend
 
 EXCEPTION — THE USER'S OWN CALENDAR: if (and only if) a "USER'S GOOGLE CALENDAR" block appears in your context, you MAY answer the user's questions about their OWN schedule and meetings for ANY day shown in that block — today or later this week (e.g. "what's my next meeting?", "am I free Thursday afternoon?", "what do I have on Wednesday?", "what's on this week?") — using ONLY the events in that block. This is the signed-in user's personal calendar that they connected themselves — it is in scope for them.
 You ALSO have calendar-management tools — find_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event — that act ONLY on this signed-in user's own Google Calendar. Use them when the user asks to schedule, move/reschedule, or cancel a meeting. BEFORE creating an event, make sure you have the essentials and ASK (one short turn) for anything the user didn't give — in particular: is it ONLINE or IN-PERSON? (online → set add_meet=true to attach a Google Meet link; in-person → ask for the location), plus the attendees, the date, and the start & end time (assume 30–60 min only if they say so). Then read the final details back and create. To edit or delete, FIRST call find_calendar_events to get the event_id, and ALWAYS confirm before deleting. (The tools handle the not-connected / read-only case themselves — relay their message.) If no calendar block is present and the user asks a generic schedule question unrelated to their own calendar, treat it as out-of-scope.
-EXCEPTION — THE USER'S OWN GMAIL: you have email tools — search_emails, read_email, send_email, reply_email, modify_email — that act ONLY on the signed-in user's own Gmail. Use them when the user asks to check/search their inbox, read an email, send or reply to one, or mark-read/archive/trash. Get the id from search_emails before read/reply/modify. ALWAYS confirm the recipient, subject and body before sending or replying, and confirm before trashing. (The tools handle the not-connected / no-permission case — relay their message.) This is the user's own mailbox and is in scope for them; never expose it to anyone else.
+EXCEPTION — THE USER'S OWN GMAIL: you have email tools — search_emails, read_email, draft_email, draft_reply, send_email, reply_email, modify_email — that act ONLY on the signed-in user's own Gmail. Use them to check/search the inbox, read an email, compose, reply, or mark-read/archive/trash. Get the id from search_emails before read/reply/modify.
+🚨 SENDING IS GATED — NEVER SEND WITHOUT EXPLICIT APPROVAL: composing DEFAULTS to a DRAFT. Use draft_email / draft_reply (saved to Gmail Drafts, NOT sent) whenever the user asks to "draft", "write", "prepare", "put in drafts", says "don't send", or just describes/asks for an email. Call send_email / reply_email ONLY when the user EXPLICITLY says to send in this same turn (e.g. "send it"). If there is ANY doubt, DRAFT it and tell them it's in Drafts to review and send. NEVER claim you sent something you only drafted. Confirm before trashing. (The tools handle the not-connected / no-permission case — relay their message.) This is the user's own mailbox and is in scope for them; never expose it to anyone else.
 
 You MUST REFUSE everything else — including general knowledge / trivia / "fun facts" (animals, geography, science, history, current events), creative writing (poems, jokes, stories), opinions, coding or technical help, translation or math unrelated to the data, personal / medical / legal / financial advice, and anything not grounded in the TMC warehouse.
 
@@ -2908,7 +2909,7 @@ When the user asks about attendance for a period (a month, a week, a date range)
 """
 
 VOICE_SYSTEM_PROMPT_URDU = """### ABSOLUTE RULE #0 — NEVER FABRICATE DATA. TOOLS FIRST, ALWAYS. ###
-You have these tools: `run_sql(sql)` for BigQuery queries (use for every TMC figure); `end_call(reason)` to hang up when the user says goodbye; and CALENDAR tools for the user's OWN Google Calendar — `find_calendar_events`, `create_calendar_event`, `update_calendar_event`, `delete_calendar_event` — use them when the user wants to check, schedule, move, or cancel a meeting. Create karne se PEHLE jo detail missing ho woh poochho — khaas taur par online hai ya in-person? (online → add_meet=true Google Meet link ke liye; in-person → location poochho), aur attendees + date/time. Phir details confirm karke create karo. Edit/cancel ke liye pehle find_calendar_events se event_id lo; delete se pehle HAMESHA confirm karo. Agar tool kahe access read-only hai to user ko bolo Calendar page par reconnect karein. Dates YYYY-MM-DD, times HH:MM 24h, Pakistan time. GMAIL tools bhi hain (user ka apna inbox): search_emails, read_email, send_email, reply_email, modify_email — inbox check karne, email parhne, bhejne/reply karne, ya mark-read/archive/trash ke liye. Read/reply/modify se pehle search_emails se id lo. Bhejne/reply se pehle recipient aur gist confirm karo; trash se pehle bhi confirm karo. Agar email access na ho to user ko bolo Inbox page par Google reconnect karein.
+You have these tools: `run_sql(sql)` for BigQuery queries (use for every TMC figure); `end_call(reason)` to hang up when the user says goodbye; and CALENDAR tools for the user's OWN Google Calendar — `find_calendar_events`, `create_calendar_event`, `update_calendar_event`, `delete_calendar_event` — use them when the user wants to check, schedule, move, or cancel a meeting. Create karne se PEHLE jo detail missing ho woh poochho — khaas taur par online hai ya in-person? (online → add_meet=true Google Meet link ke liye; in-person → location poochho), aur attendees + date/time. Phir details confirm karke create karo. Edit/cancel ke liye pehle find_calendar_events se event_id lo; delete se pehle HAMESHA confirm karo. Agar tool kahe access read-only hai to user ko bolo Calendar page par reconnect karein. Dates YYYY-MM-DD, times HH:MM 24h, Pakistan time. GMAIL tools bhi hain (user ka apna inbox): search_emails, read_email, draft_email, draft_reply, send_email, reply_email, modify_email. Read/reply/modify se pehle search_emails se id lo. 🚨 Approval ke baghair email kabhi send mat karo: by default DRAFT banao — draft_email / draft_reply use karo (Gmail Drafts me save hota hai, send nahi) jab tak user saaf kahe "send karo". Send karne se pehle recipient aur matlab parh kar sunao; shak ho to draft save karo aur bata do. Trash se pehle confirm karo. Agar email access na ho to user ko bolo Inbox page par Google reconnect karein.
 
 EVERY answer involving ANY TMC figure (attendance, headcount, allocation %, pipeline USD, deal count, win rate, target, achievement) MUST come from a tool call made IN THIS SESSION, in THIS turn.
 
@@ -2968,7 +2969,7 @@ This is dynamic and per-turn: if the user switches language partway through the 
    CALL THIS for every TMC data question. No exceptions.
 2. end_call(reason) — hangs up the call. Call ONLY when the user says goodbye.
 3. CALENDAR TOOLS (the user's OWN Google Calendar): find_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event. Use them when the user asks to check, schedule, move, or cancel a meeting. BEFORE you create, briefly ASK for any detail they didn't give — especially: online or in-person? (online → set add_meet=true for a Google Meet link; in-person → ask the location), plus who's invited and the date/start/end time. Then read the final details back, get a spoken "yes", and create. To edit or cancel, FIRST call find_calendar_events to get the event_id, and ALWAYS confirm before you delete. If a tool says access is read-only, tell the user to reconnect Google Calendar on the Calendar page. Dates are YYYY-MM-DD and times HH:MM (24h), Pakistan time.
-4. GMAIL TOOLS (the user's OWN inbox): search_emails, read_email, send_email, reply_email, modify_email. Use them to check the inbox, read a message, send or reply, or mark-read/archive/trash. Get the id from search_emails before reading/replying/modifying. ALWAYS read back the recipient and the gist before you send or reply, and confirm before trashing. If a tool says there's no email access, tell the user to reconnect Google on the Inbox page.
+4. GMAIL TOOLS (the user's OWN inbox): search_emails, read_email, draft_email, draft_reply, send_email, reply_email, modify_email. Use them to check the inbox, read a message, compose, reply, or mark-read/archive/trash. Get the id from search_emails before reading/replying/modifying. 🚨 NEVER send without explicit approval: composing DEFAULTS to a draft — use draft_email / draft_reply (saved to Gmail Drafts, not sent) unless the user clearly says "send it" out loud this turn. Read back the recipient and gist; if unsure, save a draft and say so. Confirm before trashing. If a tool says there's no email access, tell the user to reconnect Google on the Inbox page.
 
 ═══ DATA QUESTION FLOW (do exactly this) ═══
 
@@ -12886,7 +12887,8 @@ def calendar_delete_event(event_id: str, user: dict = Depends(get_current_user))
 import base64 as _gm_b64
 from email.mime.text import MIMEText as _MIMEText
 
-_GMAIL_AGENT_FNS = {"search_emails", "read_email", "send_email", "reply_email", "modify_email"}
+_GMAIL_AGENT_FNS = {"search_emails", "read_email", "send_email", "reply_email", "modify_email",
+                    "draft_email", "draft_reply"}
 _GMAIL_RECONNECT_MSG = ("Satori doesn't have Gmail access for this user yet. Tell them to open the "
                         "Inbox page in Satori and click Connect / Enable email, then approve Gmail access.")
 
@@ -13014,6 +13016,14 @@ def _gmail_send_raw(uid: int, raw: str, thread_id=None):
     return _gcal_api("POST", f"{_GMAIL_BASE}/messages/send", _gcal_access_token(uid), body)
 
 
+def _gmail_create_draft(uid: int, raw: str, thread_id=None):
+    """Save a draft to Gmail Drafts (does NOT send). Needs only gmail.modify."""
+    msg = {"raw": raw}
+    if thread_id:
+        msg["threadId"] = thread_id
+    return _gcal_api("POST", f"{_GMAIL_BASE}/drafts", _gcal_access_token(uid), {"message": msg})
+
+
 def _gmail_modify(uid: int, mid: str, action: str):
     token = _gcal_access_token(uid)
     a = (action or "").lower().strip()
@@ -13083,6 +13093,44 @@ def gmail_send_ep(body: dict, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=502, detail=_gcal_write_error(he))
     except Exception:
         raise HTTPException(status_code=502, detail="Couldn't send the email.")
+    return {"ok": True}
+
+
+@app.post("/api/gmail/draft")
+def gmail_draft_ep(body: dict, user: dict = Depends(get_current_user)):
+    """Save a NEW email to Gmail Drafts (no send). Needs gmail.modify only."""
+    uid = int(user["sub"]); row = _gcal_row(uid)
+    if not row or not _gmail_scope_ok(row):
+        raise HTTPException(status_code=403, detail=_GMAIL_RECONNECT_MSG)
+    raw = _gmail_raw((body.get("to") or "").strip(), body.get("subject") or "", body.get("body") or "", cc=(body.get("cc") or None))
+    try:
+        _gmail_create_draft(uid, raw)
+    except _GcalHTTPError as he:
+        raise HTTPException(status_code=502, detail=_gcal_write_error(he))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Couldn't save the draft.")
+    return {"ok": True}
+
+
+@app.post("/api/gmail/messages/{mid}/draft-reply")
+def gmail_draft_reply_ep(mid: str, body: dict, user: dict = Depends(get_current_user)):
+    """Save a reply to Gmail Drafts (in the original thread, no send)."""
+    uid = int(user["sub"]); row = _gcal_row(uid)
+    if not row or not _gmail_scope_ok(row):
+        raise HTTPException(status_code=403, detail=_GMAIL_RECONNECT_MSG)
+    orig = _gmail_get(uid, mid)
+    if not orig:
+        raise HTTPException(status_code=404, detail="Original email not found.")
+    subj = orig.get("subject") or ""
+    if not subj.lower().startswith("re:"):
+        subj = "Re: " + subj
+    raw = _gmail_raw(orig.get("from") or "", subj, body.get("body") or "", in_reply_to=orig.get("message_id_header"))
+    try:
+        _gmail_create_draft(uid, raw, thread_id=orig.get("thread_id"))
+    except _GcalHTTPError as he:
+        raise HTTPException(status_code=502, detail=_gcal_write_error(he))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Couldn't save the draft reply.")
     return {"ok": True}
 
 
@@ -13166,6 +13214,21 @@ def _gmail_agent_action(uid: int, name: str, args: dict) -> str:
             raw = _gmail_raw(orig.get("from") or "", subj, args.get("body") or "", in_reply_to=orig.get("message_id_header"))
             _gmail_send_raw(uid, raw, thread_id=orig.get("thread_id"))
             return f"Reply sent to {orig.get('from')}."
+        if name == "draft_email":
+            to = (args.get("to") or "").strip()
+            raw = _gmail_raw(to, args.get("subject") or "", args.get("body") or "", cc=(args.get("cc") or None))
+            _gmail_create_draft(uid, raw)
+            return f"Saved a draft{(' to ' + to) if to else ''} in Gmail Drafts — the user can review and send it themselves. NOT sent."
+        if name == "draft_reply":
+            orig = _gmail_get(uid, (args.get("id") or "").strip())
+            if not orig:
+                return "Couldn't find the email to draft a reply to."
+            subj = orig.get("subject") or ""
+            if not subj.lower().startswith("re:"):
+                subj = "Re: " + subj
+            raw = _gmail_raw(orig.get("from") or "", subj, args.get("body") or "", in_reply_to=orig.get("message_id_header"))
+            _gmail_create_draft(uid, raw, thread_id=orig.get("thread_id"))
+            return f"Saved a draft reply to {orig.get('from')} in Gmail Drafts — NOT sent; the user can review and send it."
         if name == "modify_email":
             _gmail_modify(uid, (args.get("id") or "").strip(), args.get("action") or "")
             return f"Done ({args.get('action')})."
@@ -13193,14 +13256,24 @@ _GMAIL_TOOL_DECLS = [
     {"name": "read_email",
      "description": "Read the full body of one email by id (get the id from search_emails first).",
      "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+    {"name": "draft_email",
+     "description": "DEFAULT for composing a new email: saves it to the user's Gmail Drafts WITHOUT sending, so they can review and send it themselves. Use this whenever the user asks to 'draft', 'write', 'prepare', 'put in drafts', or says 'don't send' — and any time sending hasn't been explicitly approved.",
+     "parameters": {"type": "object", "properties": {
+         "to": {"type": "string", "description": "Recipient email address."},
+         "subject": {"type": "string"}, "body": {"type": "string"},
+         "cc": {"type": "string", "description": "Optional CC address(es)."}}, "required": ["body"]}},
+    {"name": "draft_reply",
+     "description": "DEFAULT for replying: saves a reply to Gmail Drafts in the original thread WITHOUT sending. Get the id from search_emails first.",
+     "parameters": {"type": "object", "properties": {
+         "id": {"type": "string"}, "body": {"type": "string"}}, "required": ["id", "body"]}},
     {"name": "send_email",
-     "description": "Send a NEW email from the user's account. Confirm recipient, subject and body with the user before sending.",
+     "description": "SENDS a new email immediately. ONLY call this if the user has EXPLICITLY told you to send in this turn (e.g. 'send it'). If they said draft / write / prepare / don't send, or just described it, use draft_email instead. When unsure, draft — never send.",
      "parameters": {"type": "object", "properties": {
          "to": {"type": "string", "description": "Recipient email address."},
          "subject": {"type": "string"}, "body": {"type": "string"},
          "cc": {"type": "string", "description": "Optional CC address(es)."}}, "required": ["to", "body"]}},
     {"name": "reply_email",
-     "description": "Reply in-thread to an email by id (get the id from search_emails first). Confirm the reply text before sending.",
+     "description": "SENDS a reply immediately (in-thread). ONLY call this if the user EXPLICITLY said to send the reply. Otherwise use draft_reply. When unsure, draft — never send.",
      "parameters": {"type": "object", "properties": {
          "id": {"type": "string"}, "body": {"type": "string"}}, "required": ["id", "body"]}},
     {"name": "modify_email",

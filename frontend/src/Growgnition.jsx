@@ -11029,6 +11029,19 @@ const InboxPage = () => {
     finally { setBusy(false); }
   };
 
+  const saveDraft = async () => {
+    const c = compose;
+    setBusy(true);
+    try {
+      const r = c.replyTo
+        ? await fetch(`${API_BASE}/api/gmail/messages/${encodeURIComponent(c.replyTo)}/draft-reply`, { method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ body: c.body }) })
+        : await fetch(`${API_BASE}/api/gmail/draft`, { method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ to: c.to, cc: c.cc, subject: c.subject, body: c.body }) });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); setBanner({ type: "error", msg: j.detail || "Couldn't save the draft." }); setBusy(false); return; }
+      setCompose(null); setOpen(null); setBanner({ type: "ok", msg: "Saved to Gmail Drafts." });
+    } catch { setBanner({ type: "error", msg: "Couldn't save the draft." }); }
+    finally { setBusy(false); }
+  };
+
   const fmtDate = (d) => { try { return new Date(d).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); } catch { return d || ""; } };
   const fromName = (f) => { if (!f) return ""; const m = f.match(/^\s*"?([^"<]+?)"?\s*</); return (m ? m[1] : f).trim(); };
   const inp = { width: "100%", padding: "9px 11px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt, color: COLORS.textPrimary, fontSize: 13, outline: "none", boxSizing: "border-box", fontFamily: "inherit" };
@@ -11166,8 +11179,10 @@ const InboxPage = () => {
             )}
             {compose.replyTo && <div style={{ fontSize: 12, color: COLORS.textMuted, marginBottom: 8 }}>To: {fromName(compose.to)} · {compose.subject}</div>}
             <textarea value={compose.body} onChange={e => setCompose({ ...compose, body: e.target.value })} rows={8} placeholder="Write your message…" autoFocus style={{ ...inp, resize: "vertical" }} />
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14 }}>
               <button onClick={() => setCompose(null)} style={{ padding: "9px 16px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "transparent", color: COLORS.textSecondary, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Cancel</button>
+              <div style={{ flex: 1 }} />
+              <button onClick={saveDraft} disabled={busy} title="Save to Gmail Drafts without sending" style={{ padding: "9px 16px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "transparent", color: COLORS.textSecondary, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Save draft</button>
               <button onClick={send} disabled={busy} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 18px", borderRadius: 10, border: "none", background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentDark})`, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}><Send size={14} /> {busy ? "Sending…" : "Send"}</button>
             </div>
           </div>
