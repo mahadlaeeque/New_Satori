@@ -293,6 +293,9 @@ const ONBOARDING_STEPS = [
   { selector: '[data-tour="data-as-of"]', placement: "bottom", page: "agent", title: "Know how fresh your data is",
     body: "The warehouse refreshes every 30 minutes. This pill always shows when data was last loaded, so you know exactly how current every answer is.",
     narration: "One more thing — the data behind all of this refreshes every thirty minutes, and this pill always shows when it was last loaded. So you know exactly how current every answer is." },
+  { selector: '[data-tour="profile"]', placement: "bottom", page: "agent", title: "Tell us how it's going",
+    body: "Your feedback shapes Satori. Open your profile menu and pick “Share feedback” to rate it, tell us how much time it saves you, and flag anything — the good and the bad. It only takes a few seconds.",
+    narration: "And please tell us how it's going — from your profile menu, pick Share feedback to rate Satori, say how much time it saves you, and flag anything good or bad. Your feedback genuinely shapes what we build next." },
   { selector: '[data-tour="help"]', placement: "left", page: "agent", title: "Help & support, anytime",
     body: "Open Help for guidance, to replay this tour, or to report an issue straight to the team. That's the tour — you're ready!",
     narration: "If you ever need a hand, the Help menu has guidance, lets you replay this tour, and can send an issue report straight to the team. That's the tour — now go ahead and ask me anything!" },
@@ -11192,6 +11195,80 @@ const InboxPage = () => {
   );
 };
 
+// Superadmin-only feedback "sheet" — every submission + the scores in one place.
+const FeedbackAdminPage = () => {
+  const [d, setD] = useState(null);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/admin/feedback`, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        setD(await r.json());
+      } catch (e) { setError(String(e.message || e)); }
+    })();
+  }, []);
+  if (error) return <div style={{ padding: 32, color: "var(--sem-danger-fg)", fontSize: 14 }}>Couldn't load feedback: {error}</div>;
+  if (!d) return <div style={{ padding: 32, color: COLORS.textMuted, fontSize: 14 }}>Loading feedback…</div>;
+
+  const cards = [
+    { label: "Avg rating", value: d.avg_rating != null ? `${d.avg_rating}/5` : "—", sub: `${d.rated_count || 0} ratings` },
+    { label: "Avg recommend", value: d.avg_recommend != null ? `${d.avg_recommend}/10` : "—", sub: "likelihood to recommend" },
+    { label: "NPS", value: d.nps != null ? d.nps : "—", sub: "promoters − detractors" },
+    { label: "Responses", value: d.count || 0, sub: "total feedback" },
+  ];
+  const th = { textAlign: "left", fontSize: 10.5, fontWeight: 800, letterSpacing: "0.4px", textTransform: "uppercase", color: COLORS.textMuted, padding: "8px 10px", borderBottom: `1px solid ${COLORS.border}`, whiteSpace: "nowrap", position: "sticky", top: 0, background: COLORS.surface };
+  const td = { fontSize: 12, color: COLORS.textPrimary, padding: "9px 10px", borderBottom: `1px solid ${COLORS.border}`, verticalAlign: "top" };
+
+  return (
+    <div style={{ padding: 24, maxWidth: 1500, margin: "0 auto" }}>
+      <div style={{ marginBottom: 16 }}>
+        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: COLORS.textPrimary, display: "flex", alignItems: "center", gap: 8 }}><Star size={20} color={COLORS.accent} /> Feedback</h1>
+        <p style={{ margin: "4px 0 0", fontSize: 13, color: COLORS.textMuted }}>Every Satori feedback submission and the effectiveness scores · visible to superadmins only</p>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
+        {cards.map(c => (
+          <div key={c.label} style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: "14px 16px" }}>
+            <div style={{ fontSize: 24, fontWeight: 800, color: COLORS.textPrimary }}>{c.value}</div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.textSecondary, marginTop: 2 }}>{c.label}</div>
+            <div style={{ fontSize: 10.5, color: COLORS.textMuted }}>{c.sub}</div>
+          </div>
+        ))}
+      </div>
+      {d.time_saved && Object.keys(d.time_saved).length > 0 && (
+        <div style={{ fontSize: 12, color: COLORS.textSecondary, marginBottom: 14 }}>
+          <b style={{ color: COLORS.textPrimary }}>Time saved / week:</b> {Object.entries(d.time_saved).map(([k, v]) => `${k}: ${v}`).join("  ·  ")}
+        </div>
+      )}
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "auto", maxHeight: "62vh" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr>
+            {["Date", "User", "Rating", "Rec.", "Time saved", "Category", "Most-used", "Helped", "Comments"].map(h => <th key={h} style={th}>{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {(d.feedback || []).map(f => (
+              <tr key={f.id}>
+                <td style={{ ...td, whiteSpace: "nowrap", color: COLORS.textMuted }}>{String(f.created_at).slice(0, 10)}</td>
+                <td style={{ ...td, whiteSpace: "nowrap" }}>{f.full_name || f.user_email}</td>
+                <td style={{ ...td, color: COLORS.accent, fontWeight: 700, whiteSpace: "nowrap" }}>{f.rating ? "★".repeat(f.rating) : "—"}</td>
+                <td style={{ ...td, textAlign: "center" }}>{f.recommend != null ? f.recommend : "—"}</td>
+                <td style={{ ...td, whiteSpace: "nowrap" }}>{f.time_saved || "—"}</td>
+                <td style={{ ...td, whiteSpace: "nowrap" }}>{f.category || "—"}</td>
+                <td style={{ ...td, maxWidth: 180, color: COLORS.textSecondary }}>{f.features || "—"}</td>
+                <td style={{ ...td, maxWidth: 260, color: COLORS.textSecondary }}>{f.helped || "—"}</td>
+                <td style={{ ...td, maxWidth: 260, color: COLORS.textSecondary }}>{f.comments || "—"}</td>
+              </tr>
+            ))}
+            {(!d.feedback || d.feedback.length === 0) && (
+              <tr><td colSpan={9} style={{ ...td, textAlign: "center", color: COLORS.textMuted, padding: 28 }}>No feedback submitted yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
 const NAV_ITEMS = [
   { id: "_divider_workspace", label: "WORKSPACE", isDivider: true },
   { id: "agent", label: "Ask Me Anything", icon: Bot, component: AgentPage, requiresFeature: "agent" },
@@ -11206,6 +11283,7 @@ const NAV_ITEMS = [
   { id: "users", label: "User Management", icon: Users, component: UserManagementPage, superAdminOnly: true },
   { id: "audit", label: "Audit Log", icon: Shield, component: AuditLogPage, superAdminOnly: true },
   { id: "usage", label: "Usage Analytics", icon: BarChart3, component: UsageAnalyticsPage, superAdminOnly: true },
+  { id: "feedback", label: "Feedback", icon: Star, component: FeedbackAdminPage, superAdminOnly: true },
   { id: "support", label: "Support Tickets", icon: MessageSquare, component: SupportTicketsPage, superAdminOnly: true },
   { id: "settings", label: "System Settings", icon: Settings, component: SystemSettingsPage, superAdminOnly: true },
 ];
@@ -12570,34 +12648,42 @@ const SatoriBootSplash = ({ onDone, userName }) => {
 };
 
 // Share-feedback modal — star rating + how Satori helped / saved time + comments.
-const FeedbackModal = ({ onClose }) => {
+const FeedbackModal = ({ onClose, onSubmitted, prompted }) => {
   const [rating, setRating] = useState(0);
   const [hover, setHover] = useState(0);
   const [category, setCategory] = useState("Praise");
+  const [timeSaved, setTimeSaved] = useState("");
+  const [recommend, setRecommend] = useState(null);
+  const [features, setFeatures] = useState([]);
   const [helped, setHelped] = useState("");
   const [comments, setComments] = useState("");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState(null);
   const inp = { width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt, color: COLORS.textPrimary, fontSize: 13, fontFamily: "inherit", outline: "none", boxSizing: "border-box", resize: "vertical" };
+  const chip = (active) => ({ padding: "5px 12px", borderRadius: 999, fontSize: 12, fontWeight: 700, cursor: "pointer", border: `1px solid ${active ? COLORS.accent : COLORS.border}`, background: active ? `${COLORS.accent}15` : COLORS.surface, color: active ? COLORS.accent : COLORS.textMuted });
+  const label = { fontSize: 12, fontWeight: 700, color: COLORS.textSecondary, margin: "0 0 7px", display: "block" };
+  const FEATURES = ["Ask Me Anything", "Voice", "Reports", "Dashboards", "Availability", "Delivery", "Calendar", "Inbox"];
+  const toggleFeature = (f) => setFeatures(fs => fs.includes(f) ? fs.filter(x => x !== f) : [...fs, f]);
 
   const submit = async () => {
-    if (!rating && !helped.trim() && !comments.trim()) { setError("Give a rating or a few words."); return; }
+    if (!rating && recommend == null && !helped.trim() && !comments.trim()) { setError("Give a rating or a few words."); return; }
     setBusy(true); setError(null);
     try {
       const r = await fetch(`${API_BASE}/api/feedback/submit`, {
         method: "POST", headers: { Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ rating: rating || null, category, helped, comments }),
+        body: JSON.stringify({ rating: rating || null, category, helped, comments, time_saved: timeSaved, recommend, features: features.join(", ") }),
       });
       if (!r.ok) { const j = await r.json().catch(() => ({})); setError(j.detail || "Couldn't submit."); setBusy(false); return; }
       setDone(true);
+      try { onSubmitted && onSubmitted(); } catch { /* noop */ }
       setTimeout(onClose, 1400);
     } catch { setError("Couldn't reach the server."); setBusy(false); }
   };
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 1800, background: "rgba(15,23,42,0.55)", backdropFilter: "blur(5px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, animation: "fadeIn 0.2s ease" }}>
-      <div onClick={e => e.stopPropagation()} style={{ width: "100%", maxWidth: 480, background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 18, padding: 24, boxShadow: "0 28px 70px rgba(0,0,0,0.45)" }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: "100%", maxWidth: 480, background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 18, padding: 24, boxShadow: "0 28px 70px rgba(0,0,0,0.45)", maxHeight: "90vh", overflowY: "auto" }}>
         {done ? (
           <div style={{ textAlign: "center", padding: "24px 8px" }}>
             <div style={{ fontSize: 40 }}>🙏</div>
@@ -12619,14 +12705,35 @@ const FeedbackModal = ({ onClose }) => {
               ))}
             </div>
 
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14, justifyContent: "center" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 18, justifyContent: "center" }}>
               {["Praise", "Time saved", "Idea", "Bug", "Other"].map(c => (
-                <button key={c} onClick={() => setCategory(c)} style={{
-                  padding: "5px 13px", borderRadius: 999, fontSize: 12, fontWeight: 700, cursor: "pointer",
-                  border: `1px solid ${category === c ? COLORS.accent : COLORS.border}`,
-                  background: category === c ? `${COLORS.accent}15` : COLORS.surface,
-                  color: category === c ? COLORS.accent : COLORS.textMuted,
-                }}>{c}</button>
+                <button key={c} onClick={() => setCategory(c)} style={chip(category === c)}>{c}</button>
+              ))}
+            </div>
+
+            <label style={label}>How much time does Satori save you per week?</label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+              {["Not yet", "<1 hr", "1–3 hrs", "3–5 hrs", "5+ hrs"].map(o => (
+                <button key={o} onClick={() => setTimeSaved(o)} style={chip(timeSaved === o)}>{o}</button>
+              ))}
+            </div>
+
+            <label style={label}>How likely are you to recommend Satori to a colleague? <span style={{ color: COLORS.textMuted, fontWeight: 500 }}>(0–10)</span></label>
+            <div style={{ display: "flex", gap: 4, marginBottom: 16, flexWrap: "wrap" }}>
+              {Array.from({ length: 11 }, (_, n) => (
+                <button key={n} onClick={() => setRecommend(n)} style={{
+                  width: 30, height: 30, borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer",
+                  border: `1px solid ${recommend === n ? COLORS.accent : COLORS.border}`,
+                  background: recommend === n ? COLORS.accent : COLORS.surface,
+                  color: recommend === n ? "#fff" : COLORS.textMuted,
+                }}>{n}</button>
+              ))}
+            </div>
+
+            <label style={label}>Which features do you use most? <span style={{ color: COLORS.textMuted, fontWeight: 500 }}>(pick any)</span></label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+              {FEATURES.map(f => (
+                <button key={f} onClick={() => toggleFeature(f)} style={chip(features.includes(f))}>{f}</button>
               ))}
             </div>
 
@@ -13039,6 +13146,30 @@ export default function App() {
     if (isLoggedIn && routeHash.startsWith("#calendar")) setActivePage("calendar");
   }, [isLoggedIn, routeHash]);
 
+  // Once-a-day feedback nudge: if the user has NEVER submitted feedback, gently
+  // open the feedback modal once per day. The moment they submit once, it never
+  // prompts again (server says has_submitted → we set a permanent local flag).
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    try { if (localStorage.getItem("satori_feedback_done") === "1") return; } catch { /* noop */ }
+    const today = new Date().toISOString().slice(0, 10);
+    try { if (localStorage.getItem("satori_feedback_pinged") === today) return; } catch { /* noop */ }
+    let timer;
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/feedback/mine`, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } });
+        if (!r.ok) return;
+        const j = await r.json();
+        if (j.has_submitted) { try { localStorage.setItem("satori_feedback_done", "1"); } catch { /* noop */ } return; }
+        timer = setTimeout(() => {
+          setFeedbackOpen(true);
+          try { localStorage.setItem("satori_feedback_pinged", today); } catch { /* noop */ }
+        }, 5000);  // let the app settle first, then nudge
+      } catch { /* non-blocking */ }
+    })();
+    return () => { if (timer) clearTimeout(timer); };
+  }, [isLoggedIn]);
+
   // Password-reset page is reachable from the emailed link even when logged out.
   if (routeHash.startsWith("#reset")) return <ResetPasswordPage />;
   // Public, token-gated usage dashboard — no login required.
@@ -13186,7 +13317,7 @@ export default function App() {
               {darkMode ? <Sun size={17} /> : <Moon size={17} />}
             </button>
             {/* Profile with dropdown */}
-            <div style={{ position: "relative" }}>
+            <div style={{ position: "relative" }} data-tour="profile">
               <div onClick={() => setProfileMenuOpen(!profileMenuOpen)} style={{
                 display: "flex", alignItems: "center", gap: 10, padding: "6px 12px 6px 6px",
                 borderRadius: 10, border: profileMenuOpen ? `1px solid ${COLORS.accent}` : "1px solid #E2E8F0",
@@ -13319,7 +13450,7 @@ export default function App() {
 
       {/* First-run product tour (replayable from Help) */}
       <OnboardingTour onNavigate={setActivePage} />
-      {feedbackOpen && <FeedbackModal onClose={() => setFeedbackOpen(false)} />}
+      {feedbackOpen && <FeedbackModal onClose={() => setFeedbackOpen(false)} onSubmitted={() => { try { localStorage.setItem("satori_feedback_done", "1"); } catch { /* noop */ } }} />}
 
       {/* Pulse survey + welcome-back nudge */}
       <EngagementPrompts />

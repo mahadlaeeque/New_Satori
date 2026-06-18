@@ -9765,20 +9765,30 @@ class _FeedbackIn(BaseModel):
     category: Optional[str] = ""
     helped: Optional[str] = ""
     comments: Optional[str] = ""
+    time_saved: Optional[str] = ""        # e.g. "3-5h/week"
+    recommend: Optional[int] = None       # NPS-style 0-10
+    features: Optional[str] = ""          # comma-separated most-used features
 
 
 @app.post("/api/feedback/submit")
 def submit_feedback(body: _FeedbackIn, user: dict = Depends(get_current_user)):
-    """Any user shares feedback on Satori — a 1-5 star rating plus how it helped /
-    saved time and any comments. Stored for the superadmin and emailed to Mahad."""
+    """Any user shares feedback on Satori — star rating, how-it-helped, time
+    saved, likelihood-to-recommend (0-10), most-used features, and comments.
+    Stored for the superadmin and emailed to Mahad."""
     rating = body.rating
     if rating is not None:
         try: rating = max(1, min(5, int(rating)))
         except Exception: rating = None
-    category = (body.category or "").strip()[:60]
-    helped   = (body.helped or "").strip()[:4000]
-    comments = (body.comments or "").strip()[:4000]
-    if rating is None and not helped and not comments:
+    recommend = body.recommend
+    if recommend is not None:
+        try: recommend = max(0, min(10, int(recommend)))
+        except Exception: recommend = None
+    category   = (body.category or "").strip()[:60]
+    helped     = (body.helped or "").strip()[:4000]
+    comments   = (body.comments or "").strip()[:4000]
+    time_saved = (body.time_saved or "").strip()[:40]
+    features   = (body.features or "").strip()[:300]
+    if rating is None and recommend is None and not helped and not comments:
         raise HTTPException(status_code=400, detail="Add a rating or a few words of feedback.")
     uid = int(user.get("sub") or 0) or None
     email = (user.get("email") or "").strip().lower()
@@ -9791,16 +9801,17 @@ def submit_feedback(body: _FeedbackIn, user: dict = Depends(get_current_user)):
             if r:
                 full_name = (r["full_name"] if isinstance(r, dict) else r[0]) or email
         cur.execute(
-            "INSERT INTO satori_feedback (user_id, user_email, full_name, rating, category, helped, comments) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (uid, email, full_name, rating, category, helped, comments))
+            "INSERT INTO satori_feedback (user_id, user_email, full_name, rating, category, helped, comments, time_saved, recommend, features) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (uid, email, full_name, rating, category, helped, comments, time_saved, recommend, features))
         db.commit()
     finally:
         db.close()
     try:
         stars = ("★" * rating + "☆" * (5 - rating)) if rating else "(no rating)"
         subject = f"Satori feedback {stars} — {full_name}"
-        text = (f"From: {full_name} <{email}>\nRating: {rating or '-'}/5\nCategory: {category or '-'}\n\n"
+        text = (f"From: {full_name} <{email}>\nRating: {rating or '-'}/5  ·  Recommend (0-10): {recommend if recommend is not None else '-'}\n"
+                f"Category: {category or '-'}  ·  Time saved: {time_saved or '-'}\nMost-used: {features or '-'}\n\n"
                 f"How Satori helped / saved time:\n{helped or '-'}\n\nComments:\n{comments or '-'}")
         emailer.send_email(_SUPPORT_EMAIL_TO, subject, text)
     except Exception as e:
@@ -9808,13 +9819,33 @@ def submit_feedback(body: _FeedbackIn, user: dict = Depends(get_current_user)):
     return {"ok": True}
 
 
+@app.get("/api/feedback/mine")
+def my_feedback_status(user: dict = Depends(get_current_user)):
+    """Has THIS user ever submitted feedback? Drives the once-a-day prompt
+    (which stops permanently after the first submission)."""
+    uid = int(user.get("sub") or 0) or None
+    if not uid:
+        return {"has_submitted": True}  # can't attribute → don't nag
+    db = get_db(); cur = db.cursor(); n = 0
+    try:
+        cur.execute("SELECT COUNT(*) AS c FROM satori_feedback WHERE user_id = ?", (uid,))
+        r = cur.fetchone()
+        n = int((r["c"] if isinstance(r, dict) else r[0]) or 0)
+    except Exception:
+        n = 1  # on error, don't nag
+    finally:
+        db.close()
+    return {"has_submitted": n > 0}
+
+
 @app.get("/api/admin/feedback")
 def admin_feedback(user: dict = Depends(require_superadmin)):
     db = get_db(); cur = db.cursor()
     rows = []
     try:
-        cur.execute("SELECT id, user_email, full_name, rating, category, helped, comments, created_at "
-                    "FROM satori_feedback ORDER BY created_at DESC LIMIT 500")
+        cur.execute("SELECT id, user_email, full_name, rating, category, helped, comments, "
+                    "time_saved, recommend, features, created_at "
+                    "FROM satori_feedback ORDER BY created_at DESC LIMIT 1000")
         rows = [dict(r) for r in cur.fetchall()]
     except Exception as e:
         print(f"[admin feedback] {e}")
@@ -9823,8 +9854,19 @@ def admin_feedback(user: dict = Depends(require_superadmin)):
     ratings = [r["rating"] for r in rows if r.get("rating")]
     avg = round(sum(ratings) / len(ratings), 2) if ratings else None
     dist = {str(i): sum(1 for x in ratings if x == i) for i in range(1, 6)}
-    return {"feedback": rows, "count": len(rows), "avg_rating": avg,
-            "rated_count": len(ratings), "distribution": dist}
+    recs = [r["recommend"] for r in rows if r.get("recommend") is not None]
+    avg_rec = round(sum(recs) / len(recs), 1) if recs else None
+    # NPS = %promoters(9-10) - %detractors(0-6)
+    nps = None
+    if recs:
+        prom = sum(1 for x in recs if x >= 9); det = sum(1 for x in recs if x <= 6)
+        nps = round((prom - det) / len(recs) * 100)
+    ts_dist = {}
+    for r in rows:
+        if r.get("time_saved"):
+            ts_dist[r["time_saved"]] = ts_dist.get(r["time_saved"], 0) + 1
+    return {"feedback": rows, "count": len(rows), "avg_rating": avg, "rated_count": len(ratings),
+            "distribution": dist, "avg_recommend": avg_rec, "nps": nps, "time_saved": ts_dist}
 
 
 # ─── Usage analytics (superadmin-only: superadmin, Mahad, Numair) ───────────

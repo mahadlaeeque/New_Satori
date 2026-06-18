@@ -295,8 +295,20 @@ def _migrate_add_satori_feedback():
                     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+        # Add the deeper-feedback columns to pre-existing tables (idempotent).
+        for col, typ in (("time_saved", "TEXT"), ("recommend", "INTEGER"), ("features", "TEXT")):
+            try:
+                if USE_POSTGRES:
+                    cur.execute(f"ALTER TABLE satori_feedback ADD COLUMN IF NOT EXISTS {col} {typ}")
+                else:
+                    cur.execute("PRAGMA table_info(satori_feedback)")
+                    have = {r["name"] for r in cur.fetchall()}
+                    if col not in have:
+                        cur.execute(f"ALTER TABLE satori_feedback ADD COLUMN {col} {typ}")
+            except Exception:
+                pass
         conn.commit(); conn.close()
-        print("[DB] Migration: satori_feedback table present")
+        print("[DB] Migration: satori_feedback table present (+ time_saved/recommend/features)")
     except Exception as e:
         print(f"[DB] Feedback migration error (safe to ignore on fresh DB): {e}")
 
