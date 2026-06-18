@@ -10243,18 +10243,22 @@ const SystemSettingsPage = () => {
 const UsageAnalyticsPage = () => {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [fbk, setFbk] = useState(null);   // product feedback (star ratings)
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      const hdr = { Authorization: `Bearer ${localStorage.getItem("token")}` };
       try {
-        const r = await fetch(`${API_BASE}/api/admin/usage-analytics?days=30`, {
-          headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
-        });
+        const r = await fetch(`${API_BASE}/api/admin/usage-analytics?days=30`, { headers: hdr });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const j = await r.json();
         if (!cancelled) setData(j);
       } catch (e) { if (!cancelled) setError(String(e.message || e)); }
+      try {
+        const rf = await fetch(`${API_BASE}/api/admin/feedback`, { headers: hdr });
+        if (rf.ok) { const jf = await rf.json(); if (!cancelled) setFbk(jf); }
+      } catch { /* feedback section is additive */ }
     })();
     return () => { cancelled = true; };
   }, []);
@@ -10271,6 +10275,7 @@ const UsageAnalyticsPage = () => {
     { label: "Active / 7 days", value: t.active_7d, sub: "weekly actives" },
     { label: `Active / ${data.days} days`, value: t.active_users, sub: "monthly actives" },
     { label: "AI questions", value: t.ai_questions, sub: `last ${data.days} days` },
+    { label: "Hours used", value: data.total_hours != null ? `${data.total_hours}h` : "—", sub: "est. active time (top users)" },
     { label: "Total events", value: t.events, sub: "all activity" },
     { label: "Answer rating", value: fbRate != null ? `${fbRate}%` : "—", sub: `👍 ${fb.up} · 👎 ${fb.down}`, color: fbRate == null ? undefined : fbRate >= 80 ? "var(--sem-ok-fg)" : fbRate >= 60 ? "var(--sem-warn-fg)" : "var(--sem-danger-fg)" },
   ];
@@ -10338,16 +10343,63 @@ const UsageAnalyticsPage = () => {
           <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
             <Users size={16} color={COLORS.accent} /> Most active users
           </div>
+          <div style={{ display: "grid", gridTemplateColumns: "20px 1fr 64px 64px 116px", gap: 10, padding: "0 0 6px", fontSize: 10, fontWeight: 800, letterSpacing: "0.4px", textTransform: "uppercase", color: COLORS.textMuted, borderBottom: `1px solid ${COLORS.border}` }}>
+            <span>#</span><span>User</span><span style={{ textAlign: "right" }}>Events</span><span style={{ textAlign: "right" }}>Hours</span><span style={{ textAlign: "right" }}>Last seen</span>
+          </div>
           {(data.top_users || []).map((u, i) => (
-            <div key={u.email} style={{ display: "grid", gridTemplateColumns: "20px 1fr 70px 130px", gap: 10, alignItems: "center", padding: "7px 0", borderTop: i === 0 ? "none" : `1px solid ${COLORS.border}` }}>
+            <div key={u.email} style={{ display: "grid", gridTemplateColumns: "20px 1fr 64px 64px 116px", gap: 10, alignItems: "center", padding: "7px 0", borderTop: i === 0 ? "none" : `1px solid ${COLORS.border}` }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.textMuted }}>{i + 1}</span>
               <span style={{ fontSize: 12.5, fontWeight: 600, color: COLORS.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.email}</span>
               <span style={{ fontSize: 12, fontWeight: 700, color: COLORS.textSecondary, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{u.events.toLocaleString()}</span>
+              <span style={{ fontSize: 12, fontWeight: 800, color: COLORS.accent, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{u.hours != null ? `${u.hours}h` : "—"}</span>
               <span style={{ fontSize: 11, color: COLORS.textMuted, textAlign: "right" }}>{String(u.last_seen).slice(0, 16)}</span>
             </div>
           ))}
+          <div style={{ fontSize: 10.5, color: COLORS.textMuted, marginTop: 10 }}>Hours are estimated active time (activity sessionized; not literal tab-open time).</div>
         </div>
       </div>
+
+      {/* Satori effectiveness — product feedback (star ratings) */}
+      {fbk && (
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 20, marginTop: 16 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
+            <Star size={16} color={COLORS.accent} /> Satori effectiveness — user feedback
+          </div>
+          <div style={{ display: "flex", gap: 28, flexWrap: "wrap", alignItems: "center", marginBottom: fbk.feedback?.length ? 18 : 0 }}>
+            <div>
+              <div style={{ fontSize: 34, fontWeight: 800, color: COLORS.textPrimary, lineHeight: 1 }}>{fbk.avg_rating != null ? fbk.avg_rating : "—"}<span style={{ fontSize: 16, color: COLORS.textMuted }}> / 5</span></div>
+              <div style={{ fontSize: 15, color: COLORS.accent, marginTop: 4 }}>{fbk.avg_rating != null ? "★".repeat(Math.round(fbk.avg_rating)) + "☆".repeat(5 - Math.round(fbk.avg_rating)) : "no ratings yet"}</div>
+              <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 3 }}>{fbk.rated_count || 0} ratings · {fbk.count || 0} total responses</div>
+            </div>
+            <div style={{ flex: 1, minWidth: 200, maxWidth: 320 }}>
+              {[5, 4, 3, 2, 1].map(s => {
+                const c = (fbk.distribution || {})[String(s)] || 0;
+                const pct = fbk.rated_count ? Math.round((c / fbk.rated_count) * 100) : 0;
+                return (
+                  <div key={s} style={{ display: "grid", gridTemplateColumns: "28px 1fr 30px", gap: 8, alignItems: "center", padding: "2px 0" }}>
+                    <span style={{ fontSize: 11, color: COLORS.textMuted }}>{s}★</span>
+                    <div style={{ height: 7, background: COLORS.surfaceAlt, borderRadius: 999, overflow: "hidden" }}><div style={{ height: "100%", width: `${pct}%`, background: COLORS.accent }} /></div>
+                    <span style={{ fontSize: 11, color: COLORS.textMuted, textAlign: "right" }}>{c}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {(fbk.feedback || []).slice(0, 12).map(f => (
+              <div key={f.id} style={{ border: `1px solid ${COLORS.border}`, borderRadius: 10, padding: "10px 12px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 3 }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: COLORS.textPrimary }}>{f.full_name || f.user_email} {f.rating ? <span style={{ color: COLORS.accent, fontWeight: 600 }}>{"★".repeat(f.rating)}</span> : null} {f.category ? <span style={{ fontSize: 10, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase" }}>· {f.category}</span> : null}</span>
+                  <span style={{ fontSize: 11, color: COLORS.textMuted, whiteSpace: "nowrap" }}>{String(f.created_at).slice(0, 10)}</span>
+                </div>
+                {f.helped && <div style={{ fontSize: 12, color: COLORS.textSecondary, lineHeight: 1.5 }}><b style={{ color: COLORS.textPrimary }}>Helped:</b> {f.helped}</div>}
+                {f.comments && <div style={{ fontSize: 12, color: COLORS.textSecondary, lineHeight: 1.5, marginTop: 2 }}>{f.comments}</div>}
+              </div>
+            ))}
+            {(!fbk.feedback || fbk.feedback.length === 0) && <div style={{ fontSize: 12.5, color: COLORS.textMuted }}>No written feedback yet.</div>}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -12502,6 +12554,84 @@ const SatoriBootSplash = ({ onDone, userName }) => {
   );
 };
 
+// Share-feedback modal — star rating + how Satori helped / saved time + comments.
+const FeedbackModal = ({ onClose }) => {
+  const [rating, setRating] = useState(0);
+  const [hover, setHover] = useState(0);
+  const [category, setCategory] = useState("Praise");
+  const [helped, setHelped] = useState("");
+  const [comments, setComments] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState(null);
+  const inp = { width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt, color: COLORS.textPrimary, fontSize: 13, fontFamily: "inherit", outline: "none", boxSizing: "border-box", resize: "vertical" };
+
+  const submit = async () => {
+    if (!rating && !helped.trim() && !comments.trim()) { setError("Give a rating or a few words."); return; }
+    setBusy(true); setError(null);
+    try {
+      const r = await fetch(`${API_BASE}/api/feedback/submit`, {
+        method: "POST", headers: { Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ rating: rating || null, category, helped, comments }),
+      });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); setError(j.detail || "Couldn't submit."); setBusy(false); return; }
+      setDone(true);
+      setTimeout(onClose, 1400);
+    } catch { setError("Couldn't reach the server."); setBusy(false); }
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 1800, background: "rgba(15,23,42,0.55)", backdropFilter: "blur(5px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, animation: "fadeIn 0.2s ease" }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: "100%", maxWidth: 480, background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 18, padding: 24, boxShadow: "0 28px 70px rgba(0,0,0,0.45)" }}>
+        {done ? (
+          <div style={{ textAlign: "center", padding: "24px 8px" }}>
+            <div style={{ fontSize: 40 }}>🙏</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: COLORS.textPrimary, marginTop: 8 }}>Thank you!</div>
+            <div style={{ fontSize: 13, color: COLORS.textSecondary, marginTop: 4 }}>Your feedback was sent to the Satori team.</div>
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+              <div style={{ fontSize: 17, fontWeight: 800, color: COLORS.textPrimary }}>How's Satori working for you?</div>
+              <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted, display: "flex" }}><X size={18} /></button>
+            </div>
+            <div style={{ fontSize: 12.5, color: COLORS.textMuted, marginBottom: 16 }}>The good, the bad, time saved — anything helps us make it better.</div>
+
+            <div style={{ display: "flex", gap: 6, marginBottom: 18, justifyContent: "center" }}>
+              {[1, 2, 3, 4, 5].map(s => (
+                <button key={s} onClick={() => setRating(s)} onMouseEnter={() => setHover(s)} onMouseLeave={() => setHover(0)}
+                  style={{ background: "none", border: "none", cursor: "pointer", fontSize: 34, lineHeight: 1, color: (hover || rating) >= s ? COLORS.accent : COLORS.border, transition: "color 0.1s" }}>★</button>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14, justifyContent: "center" }}>
+              {["Praise", "Time saved", "Idea", "Bug", "Other"].map(c => (
+                <button key={c} onClick={() => setCategory(c)} style={{
+                  padding: "5px 13px", borderRadius: 999, fontSize: 12, fontWeight: 700, cursor: "pointer",
+                  border: `1px solid ${category === c ? COLORS.accent : COLORS.border}`,
+                  background: category === c ? `${COLORS.accent}15` : COLORS.surface,
+                  color: category === c ? COLORS.accent : COLORS.textMuted,
+                }}>{c}</button>
+              ))}
+            </div>
+
+            <label style={{ fontSize: 12, fontWeight: 700, color: COLORS.textSecondary, marginBottom: 5, display: "block" }}>How has Satori helped or saved you time?</label>
+            <textarea value={helped} onChange={e => setHelped(e.target.value)} rows={3} placeholder="e.g. I get attendance answers in seconds instead of waiting on a report…" style={{ ...inp, marginBottom: 12 }} />
+            <label style={{ fontSize: 12, fontWeight: 700, color: COLORS.textSecondary, marginBottom: 5, display: "block" }}>Anything else? (suggestions, issues)</label>
+            <textarea value={comments} onChange={e => setComments(e.target.value)} rows={3} placeholder="Optional" style={{ ...inp }} />
+
+            {error && <div style={{ fontSize: 12, color: "var(--sem-danger-fg)", marginTop: 10 }}>{error}</div>}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 16 }}>
+              <button onClick={onClose} style={{ padding: "9px 16px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "transparent", color: COLORS.textSecondary, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Cancel</button>
+              <button onClick={submit} disabled={busy} style={{ padding: "9px 20px", borderRadius: 10, border: "none", background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentDark})`, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", boxShadow: `0 6px 16px ${COLORS.accent}44` }}>{busy ? "Sending…" : "Send feedback"}</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // Top-bar notifications bell — important unread emails, urgent insights, and
 // meetings starting soon. The badge shows UNSEEN items (clears when you open
 // the panel); high-priority items (meetings/critical) auto-ping once via a
@@ -12650,6 +12780,7 @@ export default function App() {
   const [voiceActive, setVoiceActive] = useState(false);
   const [notifications] = useState(5);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   // Dark mode — persisted in localStorage. Applied via a CSS filter
   // injection so we don't have to refactor every inline-styled component
   // to read from a theme context.
@@ -13081,6 +13212,18 @@ export default function App() {
                         call; this toggle additionally suppresses the BigQuery
                         context-injection that the chat agent uses. */}
                     <AiOptOutToggle />
+                    {/* Share feedback on Satori */}
+                    <button onClick={() => { setProfileMenuOpen(false); setFeedbackOpen(true); }}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", width: "100%",
+                        fontSize: 13, color: COLORS.textSecondary, background: "transparent", border: "none",
+                        borderTop: `1px solid ${COLORS.border}`, cursor: "pointer", textAlign: "left",
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.background = COLORS.surfaceAlt; e.currentTarget.style.color = COLORS.textPrimary; }}
+                      onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = COLORS.textSecondary; }}
+                    >
+                      <Star size={15} /> Share feedback
+                    </button>
                     {/* Privacy / governance disclosure */}
                     <a href="#privacy" onClick={(e) => { e.preventDefault(); setProfileMenuOpen(false); window.location.hash = "#privacy"; }}
                       style={{
@@ -13161,6 +13304,7 @@ export default function App() {
 
       {/* First-run product tour (replayable from Help) */}
       <OnboardingTour onNavigate={setActivePage} />
+      {feedbackOpen && <FeedbackModal onClose={() => setFeedbackOpen(false)} />}
 
       {/* Pulse survey + welcome-back nudge */}
       <EngagementPrompts />

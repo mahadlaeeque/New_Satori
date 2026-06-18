@@ -101,6 +101,8 @@ def init_db():
     _migrate_finalize_tmc_superadmin()
     _migrate_add_api_keys()
     _migrate_add_google_calendar()
+    _migrate_add_satori_feedback()
+    _migrate_seed_named_users()
 
 
 def _migrate_rename_polypack_to_ffc():
@@ -256,6 +258,111 @@ def _migrate_add_governance_tables():
         print("[DB] Migration: governance tables present (data_access_log, user_settings)")
     except Exception as e:
         print(f"[DB] Governance migration error (safe to ignore on fresh DB): {e}")
+
+
+def _migrate_add_satori_feedback():
+    """Idempotent: a richer product-feedback table (star rating + category +
+    'how it helped / saved time' + comments) so users can praise OR flag Satori
+    and the superadmin can gauge effectiveness. Separate from the per-answer
+    thumbs (response_feedback) and the welcome-back pulse."""
+    try:
+        conn = get_db(); cur = conn.cursor()
+        if USE_POSTGRES:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS satori_feedback (
+                    id          SERIAL PRIMARY KEY,
+                    user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    user_email  TEXT,
+                    full_name   TEXT,
+                    rating      INTEGER,
+                    category    TEXT,
+                    helped      TEXT,
+                    comments    TEXT,
+                    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        else:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS satori_feedback (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    user_email  TEXT,
+                    full_name   TEXT,
+                    rating      INTEGER,
+                    category    TEXT,
+                    helped      TEXT,
+                    comments    TEXT,
+                    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        conn.commit(); conn.close()
+        print("[DB] Migration: satori_feedback table present")
+    except Exception as e:
+        print(f"[DB] Feedback migration error (safe to ignore on fresh DB): {e}")
+
+
+# Named TMC users to provision, each scoped to their own department
+# (EmployeeHierarchyNode, resolved from Employee_Data 2026-06-17).
+_SEED_NAMED_USERS = [
+    ("arif.waheed@tmcltd.com",    "Muhammad Arif Waheed",   "Capability (Functional)"),
+    ("faisal.masood@tmcltd.com",  "Faisal Masood",          "Capability (Functional)"),
+    ("arshad.sharif@tmcltd.com",  "Arshad Sharif",          "Capability (Functional)"),
+    ("sohaib.amjad@tmcltd.com",   "Rai Sohaib Amjad",       "Capability (Functional)"),
+    ("yousuf.muhammad@tmcltd.com","Yousuf Muhammad",        "Capability (Functional)"),
+    ("saroosh.saeed@tmcltd.com",  "Saroosh Saeed",          "Capability (Technical)"),
+    ("salik.hussain@tmcltd.com",  "Syed Salik Hussain",     "SLA"),
+    ("salik.qureshi@tmcltd.com",  "Muhammad Salik Qureshi", "SAP Basis"),
+    ("zeeshan.asani@tmcltd.com",  "Zeeshan Asani",          "Custom Dev"),
+]
+
+
+def _migrate_seed_named_users():
+    """Idempotent: provision the named TMC users as regular, DEPARTMENT-SCOPED
+    accounts (default password 'welcome', 2FA enrolled on first login). Each
+    gets the standard feature set and a user_data_scope row pinned + enforced to
+    their own department so they only ever see their team's data. Skips any
+    email that already exists."""
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("SELECT id FROM companies WHERE short_code = ?", ("TMC",))
+        row = cur.fetchone()
+        if not row:
+            conn.close(); return
+        company_id = row["id"] if isinstance(row, dict) else row[0]
+        pw_hash = _bcrypt.hashpw(b"welcome", _bcrypt.gensalt()).decode()
+        created = 0
+        for email, full_name, dept in _SEED_NAMED_USERS:
+            cur.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (email,))
+            if cur.fetchone():
+                continue  # already provisioned — leave their password/scope alone
+            if USE_POSTGRES:
+                cur.execute(
+                    "INSERT INTO users (email, password, full_name, role, company_id) VALUES (?, ?, ?, ?, ?) RETURNING id",
+                    (email, pw_hash, full_name, "user", company_id))
+                r = cur.fetchone()
+                uid = r["id"] if isinstance(r, dict) else r[0]
+            else:
+                cur.execute(
+                    "INSERT INTO users (email, password, full_name, role, company_id) VALUES (?, ?, ?, ?, ?)",
+                    (email, pw_hash, full_name, "user", company_id))
+                uid = cur.lastrowid
+            for fid in ("agent", "reportbuilder", "dashboards", "availability"):
+                if USE_POSTGRES:
+                    cur.execute("INSERT INTO user_features (user_id, feature_id) VALUES (?, ?) ON CONFLICT DO NOTHING", (uid, fid))
+                else:
+                    cur.execute("INSERT OR IGNORE INTO user_features (user_id, feature_id) VALUES (?, ?)", (uid, fid))
+            # Department scope: pin the value + enforce it.
+            if USE_POSTGRES:
+                cur.execute("INSERT INTO user_data_scope (user_id, dimension, value) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", (uid, "department", dept))
+                cur.execute("INSERT INTO user_data_scope_policy (user_id, dimension, enforced) VALUES (?, ?, 1) ON CONFLICT (user_id, dimension) DO UPDATE SET enforced = 1", (uid, "department"))
+            else:
+                cur.execute("INSERT OR IGNORE INTO user_data_scope (user_id, dimension, value) VALUES (?, ?, ?)", (uid, "department", dept))
+                cur.execute("INSERT OR REPLACE INTO user_data_scope_policy (user_id, dimension, enforced) VALUES (?, ?, 1)", (uid, "department"))
+            created += 1
+        conn.commit(); conn.close()
+        print(f"[DB] Migration: named users provisioned ({created} new, dept-scoped)")
+    except Exception as e:
+        print(f"[DB] Named-user seed error (safe to ignore on fresh DB): {e}")
 
 
 def _migrate_add_google_calendar():

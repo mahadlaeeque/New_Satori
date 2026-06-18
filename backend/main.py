@@ -9758,10 +9758,113 @@ def run_due_subscriptions(request: Request):
     return {"sent": sent, "skipped": skipped, "failed": failed, "at": now_pkt.isoformat()}
 
 
+# ─── Product feedback (star rating + praise / time-saved / flaws) ───────────
+class _FeedbackIn(BaseModel):
+    rating: Optional[int] = None
+    category: Optional[str] = ""
+    helped: Optional[str] = ""
+    comments: Optional[str] = ""
+
+
+@app.post("/api/feedback/submit")
+def submit_feedback(body: _FeedbackIn, user: dict = Depends(get_current_user)):
+    """Any user shares feedback on Satori — a 1-5 star rating plus how it helped /
+    saved time and any comments. Stored for the superadmin and emailed to Mahad."""
+    rating = body.rating
+    if rating is not None:
+        try: rating = max(1, min(5, int(rating)))
+        except Exception: rating = None
+    category = (body.category or "").strip()[:60]
+    helped   = (body.helped or "").strip()[:4000]
+    comments = (body.comments or "").strip()[:4000]
+    if rating is None and not helped and not comments:
+        raise HTTPException(status_code=400, detail="Add a rating or a few words of feedback.")
+    uid = int(user.get("sub") or 0) or None
+    email = (user.get("email") or "").strip().lower()
+    db = get_db(); cur = db.cursor()
+    full_name = email
+    try:
+        if uid:
+            cur.execute("SELECT full_name FROM users WHERE id = ?", (uid,))
+            r = cur.fetchone()
+            if r:
+                full_name = (r["full_name"] if isinstance(r, dict) else r[0]) or email
+        cur.execute(
+            "INSERT INTO satori_feedback (user_id, user_email, full_name, rating, category, helped, comments) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (uid, email, full_name, rating, category, helped, comments))
+        db.commit()
+    finally:
+        db.close()
+    try:
+        stars = ("★" * rating + "☆" * (5 - rating)) if rating else "(no rating)"
+        subject = f"Satori feedback {stars} — {full_name}"
+        text = (f"From: {full_name} <{email}>\nRating: {rating or '-'}/5\nCategory: {category or '-'}\n\n"
+                f"How Satori helped / saved time:\n{helped or '-'}\n\nComments:\n{comments or '-'}")
+        emailer.send_email(_SUPPORT_EMAIL_TO, subject, text)
+    except Exception as e:
+        print(f"[feedback] email failed: {e}")
+    return {"ok": True}
+
+
+@app.get("/api/admin/feedback")
+def admin_feedback(user: dict = Depends(require_superadmin)):
+    db = get_db(); cur = db.cursor()
+    rows = []
+    try:
+        cur.execute("SELECT id, user_email, full_name, rating, category, helped, comments, created_at "
+                    "FROM satori_feedback ORDER BY created_at DESC LIMIT 500")
+        rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[admin feedback] {e}")
+    finally:
+        db.close()
+    ratings = [r["rating"] for r in rows if r.get("rating")]
+    avg = round(sum(ratings) / len(ratings), 2) if ratings else None
+    dist = {str(i): sum(1 for x in ratings if x == i) for i in range(1, 6)}
+    return {"feedback": rows, "count": len(rows), "avg_rating": avg,
+            "rated_count": len(ratings), "distribution": dist}
+
+
 # ─── Usage analytics (superadmin-only: superadmin, Mahad, Numair) ───────────
 def _ua_val(r, key, idx):
     """Row value that works for both dict-style (PG) and tuple-style (SQLite) rows."""
     return r.get(key) if isinstance(r, dict) else r[idx]
+
+
+def _ua_to_dt(v):
+    """Parse an app-DB timestamp (datetime on PG, string on SQLite) to datetime."""
+    if v is None:
+        return None
+    if hasattr(v, "timestamp"):
+        return v
+    s = str(v).replace("T", " ").split(".")[0].split("+")[0].strip()
+    try:
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        try:
+            return datetime.strptime(s[:10], "%Y-%m-%d")
+        except Exception:
+            return None
+
+
+def _ua_est_hours(timestamps) -> float:
+    """Estimate active hours by sessionizing activity timestamps: a >30-min gap
+    starts a new session; each session = its span + a 3-min tail (so a single
+    click still counts as a few minutes of use). Approximate by design — we
+    don't track tab-open time."""
+    ts = sorted([t for t in timestamps if t])
+    if not ts:
+        return 0.0
+    total = 0.0
+    start = prev = ts[0]
+    for t in ts[1:]:
+        if (t - prev).total_seconds() > 1800:
+            total += (prev - start).total_seconds() + 180
+            start = t
+        prev = t
+    total += (prev - start).total_seconds() + 180
+    return round(total / 3600.0, 1)
 
 
 @app.get("/api/admin/usage-analytics")
@@ -9811,6 +9914,19 @@ def admin_usage_analytics(days: int = 30, user: dict = Depends(require_superadmi
                     f"ORDER BY c DESC LIMIT 10")
         out["top_users"] = [{"email": _ua_val(r, "e", 0), "events": int(_ua_val(r, "c", 1) or 0),
                              "last_seen": str(_ua_val(r, "last", 2) or "")} for r in cur.fetchall()]
+
+        # Estimated active HOURS per top user (sessionized from the activity log).
+        emails = [u["email"] for u in out["top_users"] if u["email"] and u["email"] != "unknown"]
+        if emails:
+            ph = ",".join(["?"] * len(emails))
+            cur.execute(f"SELECT user_email AS e, created_at AS t FROM data_access_log "
+                        f"WHERE created_at >= {since} AND user_email IN ({ph}) ORDER BY user_email, created_at", emails)
+            by_user = {}
+            for r in cur.fetchall():
+                by_user.setdefault(_ua_val(r, "e", 0), []).append(_ua_to_dt(_ua_val(r, "t", 1)))
+            for u in out["top_users"]:
+                u["hours"] = _ua_est_hours(by_user.get(u["email"], []))
+            out["total_hours"] = round(sum(u.get("hours", 0) for u in out["top_users"]), 1)
 
         cur.execute(f"SELECT rating, COUNT(*) AS c FROM response_feedback WHERE created_at >= {since} GROUP BY rating")
         fb = {str(_ua_val(r, "rating", 0)).lower(): int(_ua_val(r, "c", 1) or 0) for r in cur.fetchall()}
