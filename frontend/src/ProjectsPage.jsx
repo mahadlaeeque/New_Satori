@@ -388,6 +388,11 @@ const ProjectsPage = () => {
                 <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 9px", borderRadius: 999, background: "var(--sem-info-bg)", color: "var(--sem-info-fg)" }}>
                   {p.wp_active} active WP{p.wp_active === 1 ? "" : "s"}
                 </span>
+                {p.wp_completed > 0 && (
+                  <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 9px", borderRadius: 999, background: "var(--sem-ok-bg)", color: "var(--sem-ok-fg)" }}>
+                    {p.wp_completed} completed
+                  </span>
+                )}
                 {p.wp_behind > 0 && (
                   <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 9px", borderRadius: 999, background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)" }}>
                     {p.wp_behind} behind
@@ -407,7 +412,7 @@ const ProjectsPage = () => {
               <div style={{ display: "flex", gap: 14, marginTop: 12, fontSize: 11.5, color: C.textSecondary }}>
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Clock size={12} /> {Math.round(p.hrs_90d).toLocaleString()}h / 90d</span>
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Users size={12} /> {p.team_90d} people</span>
-                {p.wp_total > 0 && <span><FileText size={12} style={{ verticalAlign: "-2px" }} /> {p.wp_total} WPs total</span>}
+                {p.wp_total > 0 && <span><FileText size={12} style={{ verticalAlign: "-2px" }} /> {p.wp_total} WPs total{p.wp_completed > 0 ? ` · ${Math.round(100 * p.wp_completed / p.wp_total)}% complete` : ""}</span>}
               </div>
             </div>
           ))}

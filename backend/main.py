@@ -5481,6 +5481,13 @@ BIGQUERY (GoogleSQL) DIALECT — this warehouse is BigQuery, NOT MySQL/T-SQL:
   TIMESTAMP_DIFF(parse(checkout), parse(checkin), MINUTE)/60.0 where both non-null.
 
 SANITY CHECK YOUR OWN NUMBERS BEFORE EMITTING SQL:
+- Timesheet hours: Timesheet_Data is ONE ROW PER TICKET PER DAY and TICKET_HOURS
+  is often a flat per-ticket placeholder (e.g. 8). A resource with many open
+  tickets gets many 8h rows on the SAME day, so a raw SUM(TICKET_HOURS) yields
+  100h+/day and impossible monthly totals. For ANY "hours worked / logged"
+  figure, first aggregate per (employee[, project], DATE_KEY) and cap
+  LEAST(daily_sum, 12), then SUM the days. A person's monthly logged hours
+  above ~250 is a red flag you forgot the daily cap.
 - TMC has roughly 1,190 active employees. A "Total Employees" KPI in the
   tens of thousands means you counted attendance rows, not people — fix the SQL.
 - Attendance rates under 70% almost always mean weekends/holidays slipped into
@@ -9121,6 +9128,7 @@ def projects_list(user: dict = Depends(get_current_user)):
           -- leading number ('1105-B1-…' → 1105) — verified 4321/4329 actives.
           SELECT REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') AS pid,
                  COUNT(DISTINCT WP_CODE) AS wp_total,
+                 COUNT(DISTINCT IF(Progress_Status = 'Completed', WP_CODE, NULL)) AS wp_completed,
                  COUNT(DISTINCT IF(COALESCE(Progress_Status,'') != 'Completed', WP_CODE, NULL)) AS wp_active,
                  COUNT(DISTINCT IF(Performance_Status = 'Behind' AND COALESCE(Progress_Status,'') != 'Completed', WP_CODE, NULL)) AS wp_behind,
                  COUNT(DISTINCT IF(WP_END_DATE < CURRENT_DATE() AND COALESCE(Progress_Status,'') != 'Completed', WP_CODE, NULL)) AS wp_overdue
@@ -9149,6 +9157,7 @@ def projects_list(user: dict = Depends(get_current_user)):
                COALESCE(NULLIF(TRIM(p.Location), ''), '') AS location,
                COALESCE(NULLIF(TRIM(p.Competency), ''), '') AS competency,
                COALESCE(wp.wp_total, 0) AS wp_total,
+               COALESCE(wp.wp_completed, 0) AS wp_completed,
                COALESCE(wp.wp_active, 0) AS wp_active,
                COALESCE(wp.wp_behind, 0) AS wp_behind,
                COALESCE(wp.wp_overdue, 0) AS wp_overdue,
@@ -9175,6 +9184,7 @@ def projects_list(user: dict = Depends(get_current_user)):
             "location": row.get("location") or "",
             "competency": row.get("competency") or "",
             "wp_total": int(float(row.get("wp_total") or 0)),
+            "wp_completed": int(float(row.get("wp_completed") or 0)),
             "wp_active": int(float(row.get("wp_active") or 0)),
             "wp_behind": int(float(row.get("wp_behind") or 0)),
             "wp_overdue": int(float(row.get("wp_overdue") or 0)),
@@ -11164,7 +11174,7 @@ WORKFORCE TABLES:
 - `ai-vertex-mahad.Satori_Project.Timesheet_Data`  (ticketing / effort log)
     EMPLOYEE_CODE (= Employee_Code — THE employee join key; digit-normalise. ⚠️ TICKET_USER_ID is an unrelated internal id that matches almost nothing — never join on it),
     TICKET_PROJECT_CODE (= Project_Master.Project_Code), TICKET_PROJECT_LABEL (project name text),
-    TICKET_HOURS (FLOAT64 — actual hours LOGGED), TICKET_PLANNED_HOURS (STRING — SAFE_CAST AS FLOAT64; PLANNED/budgeted hours. ⚠️ SPARSE — many rows are 0/blank, so a raw "logged > planned" mostly reflects a missing plan, not a real overrun; confirm scope and exclude/flag planned=0 rows when comparing),
+    TICKET_HOURS (FLOAT64 — hours LOGGED on this ticket-day. ⚠️ ONE ROW PER TICKET PER DAY and the value is often a flat per-ticket placeholder (e.g. 8); a resource with many open tickets gets many 8h rows on the SAME day, so a raw SUM hits 100h+/day and impossible monthly totals. For any "hours worked" metric, FIRST aggregate per (employee, project, DATE_KEY) and cap LEAST(daily_sum, 12), THEN sum the days — never SUM(TICKET_HOURS) raw), TICKET_PLANNED_HOURS (STRING — SAFE_CAST AS FLOAT64; PLANNED/budgeted hours. ⚠️ SPARSE — many rows are 0/blank, so a raw "logged > planned" mostly reflects a missing plan, not a real overrun; confirm scope and exclude/flag planned=0 rows when comparing),
     TICKET_STATUS, DATE_KEY (DATE), TICKET_WP_ID (work-package id — see WP_Report join rule below),
     FLAG ('Assigned' / 'Un-Assigned'), TICKET_TYPE ('Task' / 'Ticket').
 
@@ -11231,10 +11241,11 @@ This dataset DOES NOT contain SAP/MRP concepts (plant, storage_location, materia
 
 ═══ HOURS — LOGGED (Timesheet) vs ASSIGNED/PLANNED (Allocation), OVERRUN & COST ═══
 🚨 LOGGED hours and PLANNED/ASSIGNED hours come from TWO DIFFERENT datasets — keep them separate, compute each on its own, then join per resource per project:
-    • LOGGED / ACTUAL hours → **Timesheet_Data**: SUM(TICKET_HOURS), grouped by EMPLOYEE_CODE (+ TICKET_PROJECT_CODE). NEVER use TICKET_PLANNED_HOURS as the plan — it is sparse/unreliable; the plan comes from Allocation.
+    • LOGGED / ACTUAL hours → **Timesheet_Data** (SUM of TICKET_HOURS). ⚠️ CRITICAL GRAIN ISSUE: Timesheet_Data has ONE ROW PER TICKET PER DAY, and TICKET_HOURS is frequently a flat per-ticket placeholder (e.g. exactly 8). Some resources have 10-15 open tickets in a single day, so a naive SUM(TICKET_HOURS) balloons to 100h+ in one day and produces physically-impossible monthly totals (2,000h+). These corrupted rows then dominate any "overrun DESC" ranking. YOU MUST CAP DAILY: aggregate per (employee, project, DATE_KEY) first, take LEAST(daily_sum, 12) — no one logs more than ~12h of real work in a day — then SUM the capped days. NEVER sum TICKET_HOURS raw for an "hours worked" figure. NEVER use TICKET_PLANNED_HOURS as the plan (sparse/unreliable; the plan comes from Allocation).
     • ASSIGNED / PLANNED hours → **Allocation_Data**, derived from allocation_percent. Each row is ONE WEEKLY snapshot, so planned_hours ≈ SUM(allocation_percent / 100 * 40) over that resource's weekly rows for the project in the period (40h = one work-week; Flag='Allocated', Date <= CURRENT_DATE() and within the period). allocation_percent is a planning %, so this is an ESTIMATE of assigned capacity — say so to the user. (If the user gives a different weekly-hours figure, use it instead of 40.)
-- Build it as two CTEs and JOIN on the digit-normalised employee code (+ project code):
-    WITH logged AS (SELECT norm(EMPLOYEE_CODE) emp, norm(TICKET_PROJECT_CODE) proj, SUM(TICKET_HOURS) logged_hours FROM Timesheet_Data WHERE <period> GROUP BY emp, proj),
+- Build it as two CTEs and JOIN on the digit-normalised employee code (+ project code). The logged CTE MUST cap per day before summing:
+    WITH logged_day AS (SELECT norm(EMPLOYEE_CODE) emp, norm(TICKET_PROJECT_CODE) proj, DATE_KEY, LEAST(SUM(TICKET_HOURS), 12) day_hours FROM Timesheet_Data WHERE <period> GROUP BY emp, proj, DATE_KEY),
+         logged AS (SELECT emp, proj, SUM(day_hours) logged_hours FROM logged_day GROUP BY emp, proj),
          planned AS (SELECT norm(employee_id) emp, norm(project_id) proj, SUM(allocation_percent/100*40) planned_hours FROM Allocation_Data WHERE Flag='Allocated' AND Date <= CURRENT_DATE() AND <period> GROUP BY emp, proj)
     SELECT … logged_hours, COALESCE(planned_hours,0) AS planned_hours, logged_hours - COALESCE(planned_hours,0) AS overrun_hours
     FROM logged LEFT JOIN planned USING (emp, proj) …  — where norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0'). Resolve names via Employee_Data, project names via Project_Master (Project_Code).
