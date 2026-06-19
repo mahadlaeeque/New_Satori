@@ -13404,6 +13404,28 @@ def notifications(user: dict = Depends(get_current_user)):
                 })
     except Exception as e:
         print(f"[notifications] meeting error: {e}")
+    # 4) Gentle "share feedback" reminder — only if this user has NEVER submitted
+    #    product feedback. Low-priority (info → never toasts). The id is keyed to a
+    #    3-day bucket so the bell badge re-nudges roughly once every few days, then
+    #    goes quiet once seen, instead of nagging on every login.
+    try:
+        db = get_db(); cur = db.cursor()
+        try:
+            cur.execute("SELECT COUNT(*) AS c FROM satori_feedback WHERE user_id = ?", (uid,))
+            r = cur.fetchone()
+            n = int((r["c"] if isinstance(r, dict) else r[0]) or 0)
+        finally:
+            db.close()
+        if n == 0:
+            bucket = int(now // (3 * 86400))  # rolls over every 3 days
+            items.append({
+                "id": f"feedback:{bucket}", "type": "feedback",
+                "title": "How's Satori working for you?",
+                "subtitle": "Share quick feedback so we can keep improving it — it only takes a few seconds.",
+                "severity": "info", "time": None,
+            })
+    except Exception as e:
+        print(f"[notifications] feedback nudge error: {e}")
     payload = {"count": len(items), "items": items[:25]}
     _NOTIF_CACHE[uid] = (now, payload)
     return payload

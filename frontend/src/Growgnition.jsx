@@ -12765,7 +12765,7 @@ const FeedbackModal = ({ onClose, onSubmitted, prompted }) => {
 const _notifReadSet = (k) => { try { return new Set(JSON.parse(localStorage.getItem(k) || "[]")); } catch { return new Set(); } };
 const _notifWriteSet = (k, s) => { try { localStorage.setItem(k, JSON.stringify([...s])); } catch { /* noop */ } };
 
-const NotificationsBell = ({ onNavigate }) => {
+const NotificationsBell = ({ onNavigate, onFeedback }) => {
   const [items, setItems] = useState([]);
   const [open, setOpen] = useState(false);
   const [unseen, setUnseen] = useState(0);
@@ -12822,10 +12822,11 @@ const NotificationsBell = ({ onNavigate }) => {
   const sevColor = (s) => s === "critical" ? "var(--sem-danger-fg)" : s === "warn" ? "var(--sem-warn-fg, #B45309)" : COLORS.accent;
   const go = (it) => {
     setOpen(false); setToast(null);
+    if (it.type === "feedback") { onFeedback?.(); return; }
     if (it.type === "meeting" && it.meet_link) { try { window.open(it.meet_link, "_blank", "noopener"); } catch { /* noop */ } return; }
     onNavigate?.(it.type === "email" ? "inbox" : it.type === "meeting" ? "calendar" : "agent");
   };
-  const kind = (it) => it.type === "meeting" ? "Meeting" : it.type === "email" ? "Email" : it.severity === "critical" ? "Critical" : "Heads-up";
+  const kind = (it) => it.type === "meeting" ? "Meeting" : it.type === "email" ? "Email" : it.type === "feedback" ? "Feedback" : it.severity === "critical" ? "Critical" : "Heads-up";
 
   return (
     <div style={{ position: "relative" }}>
@@ -13150,29 +13151,10 @@ export default function App() {
     if (isLoggedIn && routeHash.startsWith("#calendar")) setActivePage("calendar");
   }, [isLoggedIn, routeHash]);
 
-  // Once-a-day feedback nudge: if the user has NEVER submitted feedback, gently
-  // open the feedback modal once per day. The moment they submit once, it never
-  // prompts again (server says has_submitted → we set a permanent local flag).
-  useEffect(() => {
-    if (!isLoggedIn) return;
-    try { if (localStorage.getItem("satori_feedback_done") === "1") return; } catch { /* noop */ }
-    const today = new Date().toISOString().slice(0, 10);
-    try { if (localStorage.getItem("satori_feedback_pinged") === today) return; } catch { /* noop */ }
-    let timer;
-    (async () => {
-      try {
-        const r = await fetch(`${API_BASE}/api/feedback/mine`, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } });
-        if (!r.ok) return;
-        const j = await r.json();
-        if (j.has_submitted) { try { localStorage.setItem("satori_feedback_done", "1"); } catch { /* noop */ } return; }
-        timer = setTimeout(() => {
-          setFeedbackOpen(true);
-          try { localStorage.setItem("satori_feedback_pinged", today); } catch { /* noop */ }
-        }, 5000);  // let the app settle first, then nudge
-      } catch { /* non-blocking */ }
-    })();
-    return () => { if (timer) clearTimeout(timer); };
-  }, [isLoggedIn]);
+  // Feedback nudge: we no longer auto-open the modal on login (it was annoying).
+  // Instead, if the user has never submitted feedback, the notifications bell
+  // quietly surfaces a "Share feedback" reminder that re-nudges once every ~3
+  // days (see /api/notifications, type "feedback"). Clicking it opens the modal.
 
   // Password-reset page is reachable from the emailed link even when logged out.
   if (routeHash.startsWith("#reset")) return <ResetPasswordPage />;
@@ -13304,7 +13286,7 @@ export default function App() {
               }} />
             </span>
             {/* Notifications — important emails + urgent insights in one place */}
-            <NotificationsBell onNavigate={setActivePage} />
+            <NotificationsBell onNavigate={setActivePage} onFeedback={() => setFeedbackOpen(true)} />
             {/* Dark mode toggle */}
             <button
               onClick={() => setDarkMode(!darkMode)}
