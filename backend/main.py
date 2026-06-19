@@ -5488,6 +5488,11 @@ SANITY CHECK YOUR OWN NUMBERS BEFORE EMITTING SQL:
   figure, first aggregate per (employee[, project], DATE_KEY) and cap
   LEAST(daily_sum, 12), then SUM the days. A person's monthly logged hours
   above ~250 is a red flag you forgot the daily cap.
+- Logged-vs-planned (Timesheet vs Allocation): Allocation_Data is WEEKLY
+  (100% ≈ 40h/week ≈ 160h/month ≈ 2,000h/year). When comparing logged vs
+  planned, BOTH sides MUST cover the SAME date range — never compare one
+  month of plan (160h) against many months of logs (2,000h). Default the
+  window to the months that actually have logged time.
 - TMC has roughly 1,190 active employees. A "Total Employees" KPI in the
   tens of thousands means you counted attendance rows, not people — fix the SQL.
 - Attendance rates under 70% almost always mean weekends/holidays slipped into
@@ -11242,13 +11247,15 @@ This dataset DOES NOT contain SAP/MRP concepts (plant, storage_location, materia
 ═══ HOURS — LOGGED (Timesheet) vs ASSIGNED/PLANNED (Allocation), OVERRUN & COST ═══
 🚨 LOGGED hours and PLANNED/ASSIGNED hours come from TWO DIFFERENT datasets — keep them separate, compute each on its own, then join per resource per project:
     • LOGGED / ACTUAL hours → **Timesheet_Data** (SUM of TICKET_HOURS). ⚠️ CRITICAL GRAIN ISSUE: Timesheet_Data has ONE ROW PER TICKET PER DAY, and TICKET_HOURS is frequently a flat per-ticket placeholder (e.g. exactly 8). Some resources have 10-15 open tickets in a single day, so a naive SUM(TICKET_HOURS) balloons to 100h+ in one day and produces physically-impossible monthly totals (2,000h+). These corrupted rows then dominate any "overrun DESC" ranking. YOU MUST CAP DAILY: aggregate per (employee, project, DATE_KEY) first, take LEAST(daily_sum, 12) — no one logs more than ~12h of real work in a day — then SUM the capped days. NEVER sum TICKET_HOURS raw for an "hours worked" figure. NEVER use TICKET_PLANNED_HOURS as the plan (sparse/unreliable; the plan comes from Allocation).
-    • ASSIGNED / PLANNED hours → **Allocation_Data**, derived from allocation_percent. Each row is ONE WEEKLY snapshot, so planned_hours ≈ SUM(allocation_percent / 100 * 40) over that resource's weekly rows for the project in the period (40h = one work-week; Flag='Allocated', Date <= CURRENT_DATE() and within the period). allocation_percent is a planning %, so this is an ESTIMATE of assigned capacity — say so to the user. (If the user gives a different weekly-hours figure, use it instead of 40.)
-- Build it as two CTEs and JOIN on the digit-normalised employee code (+ project code). The logged CTE MUST cap per day before summing:
-    WITH logged_day AS (SELECT norm(EMPLOYEE_CODE) emp, norm(TICKET_PROJECT_CODE) proj, DATE_KEY, LEAST(SUM(TICKET_HOURS), 12) day_hours FROM Timesheet_Data WHERE <period> GROUP BY emp, proj, DATE_KEY),
+    • ASSIGNED / PLANNED hours → **Allocation_Data**, derived from allocation_percent. Each row is ONE WEEKLY snapshot (Date steps by 7 days; Week 1,2,3…), so planned_hours ≈ SUM(allocation_percent / 100 * 40) over that resource's weekly rows IN THE PERIOD (40h = one work-week; Flag='Allocated'). A resource at 100% is ~40h/WEEK ≈ 160h/MONTH ≈ 2,000h/YEAR — so summing only one month's weeks gives ~160h, NOT the full plan. allocation_percent is a planning %, so this is an ESTIMATE of assigned capacity — say so. (If the user gives a different weekly-hours figure, use it instead of 40.)
+- 🚨 SAME PERIOD ON BOTH SIDES — the #1 bug to avoid: planned (Allocation, filter `Date`) and logged (Timesheet, filter `DATE_KEY`) MUST cover the IDENTICAL date range. Restricting the plan to one month (160h) while the logged hours span many months (→2,000h) makes a nonsense overrun. If the user names a month/quarter, apply it to BOTH. Otherwise DEFAULT the period to the span where timesheet hours actually EXIST for the scope (timesheet coverage is usually narrower than the allocation plan, which runs into future weeks) and apply that same span to the allocation — do NOT use Date <= CURRENT_DATE() alone, as that pulls the whole multi-year plan against a few months of logs.
+- Build it as CTEs and JOIN on the digit-normalised employee code (+ project code). The logged CTE MUST cap per day before summing; a `period` CTE anchors both sides to the same window:
+    WITH period AS (SELECT MIN(DATE_KEY) d0, MAX(DATE_KEY) d1 FROM Timesheet_Data WHERE <same scope filters as logged> ),  -- or replace with the user's explicit month/quarter on both sides
+         logged_day AS (SELECT norm(EMPLOYEE_CODE) emp, norm(TICKET_PROJECT_CODE) proj, DATE_KEY, LEAST(SUM(TICKET_HOURS), 12) day_hours FROM Timesheet_Data, period WHERE DATE_KEY BETWEEN period.d0 AND period.d1 GROUP BY emp, proj, DATE_KEY),
          logged AS (SELECT emp, proj, SUM(day_hours) logged_hours FROM logged_day GROUP BY emp, proj),
-         planned AS (SELECT norm(employee_id) emp, norm(project_id) proj, SUM(allocation_percent/100*40) planned_hours FROM Allocation_Data WHERE Flag='Allocated' AND Date <= CURRENT_DATE() AND <period> GROUP BY emp, proj)
+         planned AS (SELECT norm(employee_id) emp, norm(project_id) proj, SUM(allocation_percent/100*40) planned_hours FROM Allocation_Data a, period WHERE Flag='Allocated' AND a.Date BETWEEN period.d0 AND period.d1 GROUP BY emp, proj)
     SELECT … logged_hours, COALESCE(planned_hours,0) AS planned_hours, logged_hours - COALESCE(planned_hours,0) AS overrun_hours
-    FROM logged LEFT JOIN planned USING (emp, proj) …  — where norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0'). Resolve names via Employee_Data, project names via Project_Master (Project_Code).
+    FROM logged LEFT JOIN planned USING (emp, proj) …  — where norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0'). Resolve names via Employee_Data, project names via Project_Master (Project_Code). Always STATE the period you used (e.g. "over Apr–Jun 2026, the months with logged time").
 - "Logged MORE than assigned" = HAVING / WHERE overrun_hours > 0, ORDER BY overrun_hours DESC. ⚠️ A resource with NO allocation row has planned_hours = NULL→0, so they'd show their FULL logged hours as overrun — note this, and if the user wants only true over-allocation, restrict to rows where a planned allocation exists (planned_hours > 0).
 - EXTRA COST / WHAT-IF: an hourly cost per resource is NOT in the warehouse — the USER provides it. When they give a rate, add a computed column:
     • FLAT rate: extra_cost = ROUND(overrun_hours * <rate>, 0).
