@@ -103,6 +103,7 @@ def init_db():
     _migrate_add_google_calendar()
     _migrate_add_satori_feedback()
     _migrate_seed_named_users()
+    _migrate_seed_admin_users()
 
 
 def _migrate_rename_polypack_to_ffc():
@@ -385,6 +386,60 @@ def _migrate_seed_named_users():
                 pass
             print(f"[DB] Named-user seed: skipped {email} ({e})")
     print(f"[DB] Migration: named users provisioned ({created} new, dept-scoped)")
+
+
+_SEED_ADMIN_USERS = [
+    # Regular admins: all departments' data + all features + sales, UNSCOPED.
+    # NOT superadmins (not in main.py _SUPERADMIN_EMAILS) → no Admin/Settings tab.
+    ("salman.sohail@tmcltd.com", "Salman Sohail"),
+    ("anas.wahab@tmcltd.com",    "Anas Wahab"),
+]
+
+
+def _migrate_seed_admin_users():
+    """Idempotent + race-safe: provision named ADMIN accounts (role='admin',
+    default password 'welcome', 2FA on first login). Admins are unscoped and
+    see every department + every feature automatically, so no user_features /
+    user_data_scope rows are needed. They are NOT superadmins (their emails are
+    absent from main.py's _SUPERADMIN_EMAILS), so the Admin/Settings tab stays
+    restricted. Existing users are left completely untouched."""
+    try:
+        c0 = get_db(); cur0 = c0.cursor()
+        cur0.execute("SELECT id FROM companies WHERE short_code = ?", ("TMC",))
+        row = cur0.fetchone(); c0.close()
+        if not row:
+            return
+        company_id = row["id"] if isinstance(row, dict) else row[0]
+    except Exception as e:
+        print(f"[DB] Admin-user seed: no company yet ({e})")
+        return
+    pw_hash = _bcrypt.hashpw(b"welcome", _bcrypt.gensalt()).decode()
+    created = 0
+    for email, full_name in _SEED_ADMIN_USERS:
+        conn = None
+        try:
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (email,))
+            if cur.fetchone():
+                conn.close(); continue  # already provisioned — leave it alone
+            if USE_POSTGRES:
+                cur.execute(
+                    "INSERT INTO users (email, password, full_name, role, company_id) VALUES (?, ?, ?, ?, ?) RETURNING id",
+                    (email, pw_hash, full_name, "admin", company_id))
+                _ = cur.fetchone()
+            else:
+                cur.execute(
+                    "INSERT INTO users (email, password, full_name, role, company_id) VALUES (?, ?, ?, ?, ?)",
+                    (email, pw_hash, full_name, "admin", company_id))
+            conn.commit(); conn.close()
+            created += 1
+        except Exception as e:
+            try:
+                if conn: conn.close()
+            except Exception:
+                pass
+            print(f"[DB] Admin-user seed: skipped {email} ({e})")
+    print(f"[DB] Migration: admin users provisioned ({created} new)")
 
 
 def _migrate_add_google_calendar():
