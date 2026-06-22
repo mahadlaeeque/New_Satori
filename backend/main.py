@@ -5686,10 +5686,15 @@ def refine_dashboard(user_message: str, history: list, existing_config=None, sco
     tables = discover_tables()
     tables_str = "\n".join(f"- {t['table']} ({t['type']})" for t in tables[:20]) or "(no tables discovered yet)"
 
+    # NOTE: use .replace() (NOT .format()) — these prompts embed _DASHBOARD_SAP_SCHEMAS
+    # which contains regex literals like {4,} that str.format would mis-parse as
+    # fields (KeyError: '4,'). .replace only touches our explicit placeholders.
     if existing_config:
-        system = DASHBOARD_EDIT_PROMPT.format(current_config=json.dumps(existing_config, indent=2), tables=tables_str)
+        system = (DASHBOARD_EDIT_PROMPT
+                  .replace("{current_config}", json.dumps(existing_config, indent=2))
+                  .replace("{tables}", tables_str))
     else:
-        system = DASHBOARD_REFINE_PROMPT.format(tables=tables_str)
+        system = DASHBOARD_REFINE_PROMPT.replace("{tables}", tables_str)
     # Inject analyst common-sense defaults + admin-curated schema notes + live
     # warehouse snapshot so the AI behaves like a senior analyst (active-only,
     # working days, distinct employees, sane numbers) by default.
