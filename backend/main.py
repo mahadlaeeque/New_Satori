@@ -7179,6 +7179,16 @@ def _substitute_where(sql: str, user_filters: dict) -> str:
     Filter values are matched case-insensitively against the columns they
     target so users see real data even when the table stores mixed case.
     """
+    # Self-heal dashboards generated during the brace-escaping bug: their stored
+    # SQL carries a DOUBLED placeholder {{where}} (the prompt examples weren't
+    # un-doubled). Collapsing it to a single {where} BEFORE substitution avoids
+    # the inner-token replace that otherwise leaves a literal {} → BigQuery
+    # "Unexpected braced constructor". Also strip any stray empty {} already
+    # baked into a saved config. Both are no-ops on healthy SQL.
+    if "{{where}}" in sql:
+        sql = sql.replace("{{where}}", "{where}")
+    if "{}" in sql:
+        sql = sql.replace("{}", "")
     if "{where}" not in sql:
         return sql
     parts = []
