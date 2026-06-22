@@ -5572,7 +5572,16 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
 - Always emit `id`, `title`, `format` for KPIs and `id`, `title`, `type`, `labelKey`, `valueKeys` for charts.
 
 ═══ LIMITS & OPTIONS ═══
-- Chart types: "bar" (variants: "vertical" default, "horizontal", "stacked"), "line", "pie"
+- Chart types (pick the one that best fits the question — all use the same labelKey/valueKeys contract):
+  • "bar" — categories vs a value. variants: "vertical" (default), "horizontal" (long labels / many categories), "stacked" (multiple series summed).
+  • "line" / "area" — trend over an ordered or time axis ("area" is a filled line, nice for volume).
+  • "pie" / "donut" — part-to-whole for a SMALL set of categories (donut = pie with a hollow centre, more modern).
+  • "pyramid" — seniority / hierarchy levels — apex (top) = the SMALLEST group (e.g. the most-senior Growth Level GL 01), widest at the base. Single series.
+  • "funnel" — sequential stage drop-off, widest at the TOP. Single series.
+  • "radar" — compare categories across one OR MORE metrics on radial spokes.
+  • "radialBar" — concentric rings ranking ONE metric across a handful of groups; striking. Single series.
+  • "treemap" — nested tiles sized by value; best for part-to-whole across MANY categories. Single series.
+  Single-series types (pie/donut/pyramid/funnel/radialBar/treemap) use only valueKeys[0]; bar/line/area/radar can take multiple valueKeys. When the user names a chart type, USE IT — never tell them a type is unsupported.
 - KPI formats: "number", "usd", "percent"
 - KPI icons (use these exact strings): Users, UserCheck, Briefcase, Calendar, Clock, TrendingUp, DollarSign, Target, Award, Activity
 - KPI colors: primary, accent, info, danger, success, purple, teal
@@ -5670,7 +5679,7 @@ CRITICAL — KPI + CHART CONTRACT (every field must match the SQL):
 
 SQL RULES (same as the refine prompt — fully qualify with `ai-vertex-mahad.Satori_Project.<table>`, SAFE_CAST every STRING-typed numeric, multiply Hist_Win_Rate by 100, COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified') for department, CAST-to-STRING joins, LIMIT 50, and place the {{where}} placeholder right after your last WHERE condition with a leading space so the runtime can append filters).
 
-DASHBOARD LIMITS & OPTIONS: bar (variants: vertical, horizontal, stacked) / line / pie; KPI formats number/usd/percent; KPI icons (Users, UserCheck, Briefcase, Calendar, Clock, TrendingUp, DollarSign, Target, Award, Activity); max 6 KPIs / 4 charts / 5 filters.
+DASHBOARD LIMITS & OPTIONS: chart types = bar (variants: vertical, horizontal, stacked) / line / area / pie / donut / pyramid (seniority/hierarchy, apex = smallest group) / funnel (stage drop-off) / radar / radialBar / treemap — all share the labelKey/valueKeys contract (pie, donut, pyramid, funnel, radialBar, treemap use a single series). When the user asks for a specific chart type, switch to it — never say a type is unsupported. KPI formats number/usd/percent; KPI icons (Users, UserCheck, Briefcase, Calendar, Clock, TrendingUp, DollarSign, Target, Award, Activity); max 6 KPIs / 4 charts / 5 filters.
 
 CRITICAL RULES:
 - NEVER expose technical details (table names, column names, SQL) to the user.

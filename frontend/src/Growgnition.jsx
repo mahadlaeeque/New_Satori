@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } fro
 import {
   BarChart, Bar, LineChart, Line, AreaChart, Area, PieChart, Pie, Cell,
   RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
+  FunnelChart, Funnel, RadialBarChart, RadialBar, Treemap, LabelList,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart
 } from "recharts";
 import {
@@ -6354,9 +6355,16 @@ const DashboardRenderer = ({ spec, onBack }) => {
     }
 
     // Hint shown under every drillable chart so users know to click.
+    const clickNoun =
+      (type === "pie" || type === "donut") ? "slice"
+      : (type === "line" || type === "area") ? "point"
+      : (type === "funnel" || type === "pyramid") ? "segment"
+      : type === "treemap" ? "tile"
+      : type === "radialBar" ? "ring"
+      : "bar";
     const drillHint = (
       <div style={{ fontSize: 11, color: COLORS.textMuted, textAlign: "center", marginTop: 4 }}>
-        Click any {type === "pie" ? "slice" : type === "line" ? "point" : "bar"} to see the breakdown
+        Click any {clickNoun} to see the breakdown
       </div>
     );
 
@@ -6393,7 +6401,7 @@ const DashboardRenderer = ({ spec, onBack }) => {
     const yTickFmt = allTime ? hoursToClock : fmtAxisShort;
     const valTooltipFmt = allTime ? ((v) => hoursToClock(v)) : ((v) => fmtTooltip(v));
 
-    if (type === "pie") {
+    if (type === "pie" || type === "donut") {
       const pieData = compactPieData(plotData, labelKey, valueKeys[0]);
       return (
         <ChartCard key={idx} title={title}>
@@ -6405,7 +6413,9 @@ const DashboardRenderer = ({ spec, onBack }) => {
                 nameKey={labelKey}
                 cx="50%"
                 cy="50%"
+                innerRadius={type === "donut" ? 58 : 0}
                 outerRadius={100}
+                paddingAngle={type === "donut" ? 2 : 0}
                 label={(entry) => clipLabel(entry?.[labelKey], 18)}
                 onClick={(d) => openDrill(chart, d?.[labelKey] ?? d?.name)}
                 style={{ cursor: "pointer" }}
@@ -6442,6 +6452,162 @@ const DashboardRenderer = ({ spec, onBack }) => {
                 <Line key={vk} type="monotone" dataKey={vk} stroke={colors[vi % colors.length]} strokeWidth={2} dot={{ r: 3 }} activeDot={{ r: 6, cursor: "pointer" }} />
               ))}
             </LineChart>
+          </ResponsiveContainer>
+          {drillHint}
+        </ChartCard>
+      );
+    }
+
+    // ── Area chart — like a line but filled; good for trends/volume over time.
+    if (type === "area") {
+      return (
+        <ChartCard key={idx} title={title}>
+          <ResponsiveContainer width="100%" height={300}>
+            <AreaChart
+              data={plotData}
+              onClick={(state) => { const lbl = state?.activeLabel ?? state?.activePayload?.[0]?.payload?.[labelKey]; if (lbl != null) openDrill(chart, lbl); }}
+              style={{ cursor: "pointer" }}
+            >
+              <defs>
+                {valueKeys.map((vk, vi) => (
+                  <linearGradient key={vk} id={`area-${idx}-${vi}`} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor={colors[vi % colors.length]} stopOpacity={0.7} />
+                    <stop offset="95%" stopColor={colors[vi % colors.length]} stopOpacity={0.05} />
+                  </linearGradient>
+                ))}
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
+              <XAxis dataKey={labelKey} tick={{ fontSize: 11 }} />
+              <YAxis tick={{ fontSize: 11 }} tickFormatter={yTickFmt} width={allTime ? 64 : 56} domain={allTime ? ["dataMin", "dataMax"] : undefined} />
+              <Tooltip formatter={valTooltipFmt} />
+              <Legend />
+              {valueKeys.map((vk, vi) => (
+                <Area key={vk} type="monotone" dataKey={vk} stroke={colors[vi % colors.length]} strokeWidth={2} fill={`url(#area-${idx}-${vi})`} activeDot={{ r: 6, cursor: "pointer" }} />
+              ))}
+            </AreaChart>
+          </ResponsiveContainer>
+          {drillHint}
+        </ChartCard>
+      );
+    }
+
+    // ── Radar chart — compare categories across one or more series at a glance.
+    if (type === "radar") {
+      return (
+        <ChartCard key={idx} title={title}>
+          <ResponsiveContainer width="100%" height={320}>
+            <RadarChart data={plotData} outerRadius="72%">
+              <PolarGrid stroke={COLORS.border} />
+              <PolarAngleAxis dataKey={labelKey} tick={{ fontSize: 10, fill: COLORS.textMuted }} tickFormatter={(v) => clipLabel(v, 12)} />
+              <PolarRadiusAxis tick={{ fontSize: 9, fill: COLORS.textMuted }} tickFormatter={fmtAxisShort} />
+              <Tooltip formatter={valTooltipFmt} />
+              <Legend />
+              {valueKeys.map((vk, vi) => (
+                <Radar key={vk} name={vk} dataKey={vk} stroke={colors[vi % colors.length]} fill={colors[vi % colors.length]} fillOpacity={0.4} />
+              ))}
+            </RadarChart>
+          </ResponsiveContainer>
+        </ChartCard>
+      );
+    }
+
+    // ── Funnel / Pyramid — stacked trapezoids sized by value. Funnel is widest
+    // at the top (stage drop-off); pyramid is widest at the bottom (apex = the
+    // smallest group, e.g. the most-senior growth level). Same data, opposite sort.
+    if (type === "funnel" || type === "pyramid") {
+      const vk = valueKeys[0];
+      const funnelData = [...plotData]
+        .filter((r) => r?.[vk] != null)
+        .sort((a, b) => (type === "pyramid" ? (a[vk] - b[vk]) : (b[vk] - a[vk])))
+        .map((r, i) => ({ ...r, _fill: colors[i % colors.length] }));
+      return (
+        <ChartCard key={idx} title={title}>
+          <ResponsiveContainer width="100%" height={340}>
+            <FunnelChart>
+              <Tooltip formatter={valTooltipFmt} />
+              <Funnel
+                dataKey={vk}
+                nameKey={labelKey}
+                data={funnelData}
+                isAnimationActive
+                onClick={(d) => { const lbl = d?.[labelKey] ?? d?.payload?.[labelKey]; if (lbl != null) openDrill(chart, lbl); }}
+                style={{ cursor: "pointer" }}
+              >
+                {funnelData.map((entry, i) => <Cell key={i} fill={entry._fill} />)}
+                <LabelList position="right" dataKey={labelKey} fill={COLORS.textSecondary} stroke="none" fontSize={11} formatter={(v) => clipLabel(v, 22)} />
+                <LabelList position="inside" dataKey={vk} fill="#fff" stroke="none" fontSize={11} />
+              </Funnel>
+            </FunnelChart>
+          </ResponsiveContainer>
+          {drillHint}
+        </ChartCard>
+      );
+    }
+
+    // ── Radial bar — concentric rings, one per category. Striking for ranking
+    // a single metric across a handful of groups.
+    if (type === "radialBar") {
+      const vk = valueKeys[0];
+      const rbData = plotData.map((r, i) => ({ ...r, _fill: colors[i % colors.length] }));
+      return (
+        <ChartCard key={idx} title={title}>
+          <ResponsiveContainer width="100%" height={340}>
+            <RadialBarChart data={rbData} innerRadius="18%" outerRadius="100%" startAngle={90} endAngle={-270}>
+              <RadialBar
+                dataKey={vk}
+                background={{ fill: COLORS.surfaceAlt }}
+                cornerRadius={5}
+                onClick={(d) => { const lbl = d?.[labelKey] ?? d?.payload?.[labelKey]; if (lbl != null) openDrill(chart, lbl); }}
+                style={{ cursor: "pointer" }}
+              >
+                {rbData.map((entry, i) => <Cell key={i} fill={entry._fill} />)}
+              </RadialBar>
+              <Tooltip formatter={valTooltipFmt} />
+              <Legend
+                iconSize={9}
+                layout="vertical"
+                align="right"
+                verticalAlign="middle"
+                payload={rbData.map((r, i) => ({ value: clipLabel(r[labelKey], 16), type: "circle", color: colors[i % colors.length] }))}
+              />
+            </RadialBarChart>
+          </ResponsiveContainer>
+          {drillHint}
+        </ChartCard>
+      );
+    }
+
+    // ── Treemap — nested tiles sized by value. Great for part-to-whole across
+    // many categories (e.g. headcount share by department/level).
+    if (type === "treemap") {
+      const vk = valueKeys[0];
+      const treeData = plotData
+        .filter((r) => r?.[vk] != null && Number(r[vk]) > 0)
+        .map((r) => ({ name: String(r?.[labelKey] ?? ""), [vk]: Number(r[vk]) }));
+      const TreemapTile = (props) => {
+        const { x, y, width, height, index } = props;
+        const nm = props.name ?? props.payload?.name ?? "";
+        const val = props.value ?? props.payload?.[vk];
+        const fill = colors[(index ?? 0) % colors.length];
+        if (x == null || width == null) return null;
+        return (
+          <g style={{ cursor: "pointer" }} onClick={() => { if (nm) openDrill(chart, nm); }}>
+            <rect x={x} y={y} width={width} height={height} fill={fill} stroke={COLORS.surface} strokeWidth={2} />
+            {width > 56 && height > 30 && (
+              <>
+                <text x={x + 7} y={y + 19} fill="#fff" fontSize={11} fontWeight={700}>{clipLabel(nm, Math.floor(width / 8))}</text>
+                {val != null && <text x={x + 7} y={y + 34} fill="#ffffffcc" fontSize={10}>{fmtTooltip(val)}</text>}
+              </>
+            )}
+          </g>
+        );
+      };
+      return (
+        <ChartCard key={idx} title={title}>
+          <ResponsiveContainer width="100%" height={320}>
+            <Treemap data={treeData} dataKey={vk} nameKey="name" stroke={COLORS.surface} content={<TreemapTile />}>
+              <Tooltip formatter={valTooltipFmt} />
+            </Treemap>
           </ResponsiveContainer>
           {drillHint}
         </ChartCard>
