@@ -2656,6 +2656,7 @@ CAMELCASE columns (these have NO underscore in the middle):
 - EmployeeEmail          (NOT Employee_Email)
 - EmployeeHierarchyNode  (NOT Employee_Hierarchy, NOT Employee_HierarchyNode - department)
 - EmployeeLocation       (NOT Employee_Location)
+- Employee_GL            (exact spelling 'Employee_GL' — Growth Level / seniority band; values like 'GL-1','GL-2',…; GL-1 = MOST senior, higher number = more junior. To rank by seniority use the numeric part: SAFE_CAST(REGEXP_EXTRACT(Employee_GL, r'([0-9]+)') AS INT64) — ASC = most senior first.)
 
 DO NOT WRITE: Employee_HierarchyNode, Employee_Email, Employee_Position, Employee_Location. These columns DO NOT EXIST. BigQuery rejects them with 'Name X not found'. Use the CamelCase form WITHOUT the underscore for those four. The other four columns DO have underscores. There is no consistency rule - copy the names verbatim from this block.
 
@@ -2716,7 +2717,7 @@ You help users analyse attendance, employee availability, project allocation, ti
 DATA WAREHOUSE — `ai-vertex-mahad.Satori_Project` (10 tables):
 
 WORKFORCE TABLES
-1. `Employee_Data` — Employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name, EmployeePosition, EmployeeEmail, EmployeeHierarchyNode (department), EmployeeLocation (city), Employee_Status, Employee_Type ('MTO'/'Permanent'/'Probation'/'Contract'). Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
+1. `Employee_Data` — Employee master. Cols: Employee_Code (STRING, "E-2141"), Resource_Name, EmployeePosition, EmployeeEmail, EmployeeHierarchyNode (department), EmployeeLocation (city), Employee_Status, Employee_Type ('MTO'/'Permanent'/'Probation'/'Contract'), Employee_GL (Growth Level / seniority band — 'GL-1','GL-2',…; GL-1 = MOST senior, higher number = more junior; rank seniority via SAFE_CAST(REGEXP_EXTRACT(Employee_GL,r'([0-9]+)') AS INT64) ASC). Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
 2. `Attendance_Data` — Daily attendance per employee. Cols: attendance_date (DATE), personal_no (STRING, 'E-902' format — JOIN to Employee_Data on this), employee_id (INT64 sequence, NOT a JOIN key), employee_name, employee_email, checkin_time (STRING — FULL datetime '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'; clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time))), checkout_time (STRING — same format), attendance_status_text ('Present'/'Absent'/'On Leave'/'Holiday'/'Weekend'/'Missing Punch'/'Remote Work' + 'Submitted …' variants; no 'Late' value — a late arrival = check-in after 09:30: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00'), is_present (0/1), is_absent (0/1), is_on_leave (0/1), is_remote (0/1), is_holiday (0/1), is_weekend (0/1), leave_type_name, checkin_is_permitted_location / checkout_is_permitted_location (STRING '1'/'0' — was the punch from an approved location: IF(SAFE_CAST(checkin_is_permitted_location AS INT64)=1,'Permitted','Not Permitted') AS PunchInLocationStatus; same for checkout).
 3. `Allocation_Data` — Weekly project allocation (one row per employee × project × week). Cols: project_id (**JOIN to Project_Master.Project_Code for the project NAME**), employee_id (STRING "E-1234" — JOIN to Employee_Data.employee_code, digit-normalised), allocation_percent (0-100 — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Allocated' = real billable project / 'Bench' = bench project), Forecast_Flag (0 = ACTUAL, 1 = forecast — for CURRENT state ALWAYS filter Forecast_Flag=0), Date (DATE), Week/Year/Month. **Bench logic:** an employee is ON BENCH when they have NO Flag='Allocated' row with allocation_percent>0 in the recent actual weeks — a bench-project row can show allocation_percent=100 yet means they're benched, so NEVER classify on raw allocation_percent alone. Allocated = has a Flag='Allocated' row ≥100%; Partial = 1-99%.
 4. `Timesheet_Data` — Logged ticket/project hours. Cols: EMPLOYEE_CODE (the 'E-1571' code — **JOIN to Employee_Data.employee_code, digit-normalised; this is the employee link, NOT TICKET_USER_ID** which is a different internal numeric id), TICKET_USER_ID (internal id — do NOT join on it), TICKET_PROJECT_CODE (**JOIN to Project_Master.Project_Code for the project name**), TICKET_PROJECT_LABEL, TICKET_HOURS (FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT.
@@ -3066,7 +3067,7 @@ CRITICAL: If you are not sure which exact column to use, STILL CALL run_sql with
 ═══ KEY TABLES (ai-vertex-mahad.Satori_Project) ═══
 
 WORKFORCE
-  • Employee_Data — Employee_Code, Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Joining_Date, Gender. Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation','contractual fixed term').
+  • Employee_Data — Employee_Code, Resource_Name, EmployeePosition, EmployeeHierarchyNode (department), EmployeeLocation, Employee_Type, Employee_GL (Growth Level / seniority — 'GL-1'=most senior … higher number=more junior; rank via SAFE_CAST(REGEXP_EXTRACT(Employee_GL,r'([0-9]+)') AS INT64) ASC), Joining_Date, Gender. Active filter: LOWER(Employee_Type) IN ('mto','permanent','probation','contractual fixed term').
   • Attendance_Data — attendance_date (DATE), personal_no (STRING 'E-902' — JOIN to Employee_Data on this), employee_id (INT64 sequence, not a JOIN key), employee_name, employee_email, checkin_time / checkout_time (STRING — FULL datetime '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'; clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)); can be NULL on non-working days), attendance_status_text ('Present'/'Absent'/'Weekend'/'Holiday'/'On Leave'/'Missing Punch'/'Remote Work'), is_present, is_absent, is_on_leave, is_remote, is_holiday, is_weekend (all 0/1), checkin_is_permitted_location / checkout_is_permitted_location (STRING '1'/'0' — approved-location punch: IF(SAFE_CAST(checkin_is_permitted_location AS INT64)=1,'Permitted','Not Permitted')). No 'Late' value — late arrival = check-in after 09:30: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00' (any day with a check-in, incl. Missing Punch — filter checkin_time IS NOT NULL, NOT a status whitelist).
   • Allocation_Data — project_id (STRING), employee_id (STRING 'E-2141'), emp_name, allocation_percent (INT64 — compare directly, e.g. >0), emp_competency, Flag ('Allocated'/'Bench'), Forecast_Flag (INT64 0/1), Date (DATE), Year (INT64), Month (INT64 1-12), Week (INT64). NO year_id/week_id/Data_Type. Filter Year/Month with integers (Year=2026, Month=5), never strings/PARSE_DATE. CURRENT allocation = the LATEST week at/before today (WITH cur AS (SELECT MAX(Date) d ... WHERE Date<=CURRENT_DATE()), read a.Date=cur.d, pct>0) — NOT MAX across all weeks (that shows stale projects). Per month → that month's latest week.
   • Timesheet_Data — EMPLOYEE_CODE ('E-1571' — the employee key; JOIN/filter on this digit-normalised, NOT TICKET_USER_ID which is an unrelated internal id matching no employee), TICKET_USER_ID, TICKET_NUMBER, TICKET_PROJECT_CODE (JOIN to Project_Master.Project_Code), TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (DATE — filter via COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING)))).
@@ -5631,6 +5632,7 @@ AVAILABLE DATA (use this knowledge internally — never show the user table/colu
 - 🚨 GROUP BY CORRECTNESS: in any grouped query, EVERY selected column that is NOT a GROUP BY key MUST be wrapped in an aggregate (ANY_VALUE / MAX / MIN / SUM / COUNT). A bare ungrouped, unaggregated column is a hard BigQuery error that blanks the widget.
 - WORK PACKAGES (WP_Report): a work package spans many rows → use COUNT(DISTINCT WP_CODE) and GROUP BY WP_CODE (wrap every other attribute in ANY_VALUE/MAX). The project of a WP = its leading number: REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Master.Project_Code AS STRING) (resolve a named project via Project_Master first). Hours logged per WP = LEFT JOIN Timesheet_Data ON UPPER(TRIM(WP_CODE)) = REGEXP_REPLACE(UPPER(TRIM(TICKET_WP_ID)), r'(-[0-9]{{4,}})+$', '') then SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) — NEVER a direct WP_CODE=TICKET_WP_ID equality. The ACTUAL column is unusable; planned progress = PLAN (0-100). Statuses: Progress_Status / WP_PORTAL_STATUS / Performance_Status.
 - EmployeeHierarchyNode is the DEPARTMENT — never call it anything else.
+- Employee_GL is the GROWTH LEVEL / seniority band ('GL-1','GL-2',…). GL-1 is the MOST senior; a HIGHER number = MORE junior. "most senior / highest GL / top growth level" = smallest number; to rank or sort by seniority, order by the numeric part SAFE_CAST(REGEXP_EXTRACT(Employee_GL,r'([0-9]+)') AS INT64) ASC — never sort the raw string (it sorts GL-10 before GL-2).
 - 📅 Relative dates: resolve "today" / "this month" / "last month" against the CURRENT date with BigQuery functions, never hardcoded months — this month = BETWEEN DATE_TRUNC(CURRENT_DATE(),MONTH) AND CURRENT_DATE(); last month = DATE_TRUNC(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH),MONTH) to its month-end; a named month (e.g. "March 2026") = that month's first/last day. Prefer CURRENT_DATE()/DATE_SUB/DATE_TRUNC.
 - {{where}} placement: the runtime substitutes either `AND field='value' AND ...` or empty string into the spot where you wrote {{where}}. Your query MUST already have its own WHERE — write the placeholder as ` {{where}}` right after your last WHERE condition (with a leading space). If no filters apply at runtime, the placeholder becomes ''.
 - LIMIT every chart query to 50 rows.
@@ -7103,6 +7105,11 @@ _FILTER_REGISTRY = {
     "position":               ("Employee_Data", "EmployeePosition", "EmployeePosition"),
     "employeeposition":       ("Employee_Data", "EmployeePosition", "EmployeePosition"),
     "gender":                 ("Employee_Data", "Gender", "Gender"),
+    # Growth Level / seniority band (GL-1 = most senior)
+    "growth_level":           ("Employee_Data", "Employee_GL", "Employee_GL"),
+    "gl":                     ("Employee_Data", "Employee_GL", "Employee_GL"),
+    "employee_gl":            ("Employee_Data", "Employee_GL", "Employee_GL"),
+    "seniority":              ("Employee_Data", "Employee_GL", "Employee_GL"),
     # employee identity — the dropdown lists names; WHERE matches the same col.
     "employee_name":          ("Attendance_Data", "employee_name", "employee_name"),
     "resource_name":          ("Employee_Data", "Resource_Name", "Resource_Name"),
@@ -8377,12 +8384,18 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
     # don't burn a failing BQ roundtrip (and a noisy log line) on every
     # modal open.
     profile = {}
-    variants = [
-        "CAST(Joining_Date AS STRING) AS joining_date, employee_type, employee_status, EmployeeEmail AS email",
-        "employee_type, employee_status, EmployeeEmail AS email",
-    ]
+    # Joining_Date and Employee_GL (Growth Level) are both OPTIONAL columns the
+    # live Drive feed may or may not carry — try the richest set first and
+    # degrade gracefully, remembering which are missing so we don't re-probe a
+    # failing column on every modal open.
+    _jd = "CAST(Joining_Date AS STRING) AS joining_date, "
+    _gl = "Employee_GL AS growth_level, "
+    _base = "employee_type, employee_status, EmployeeEmail AS email"
+    variants = [_jd + _gl + _base, _gl + _base, _jd + _base, _base]
     if _PROFILE_COLS_CACHE.get("has_joining_date") is False:
-        variants = variants[1:]
+        variants = [v for v in variants if "Joining_Date" not in v]
+    if _PROFILE_COLS_CACHE.get("has_employee_gl") is False:
+        variants = [v for v in variants if "Employee_GL" not in v]
     for cols in variants:
         p_sql = normalize_bq_project(f"""
             SELECT {cols}
@@ -8392,13 +8405,18 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
         """)
         rp = bq_run_query(p_sql, max_rows=1)
         if "error" in rp:
-            if "Joining_Date" in cols and "Joining_Date" in str(rp["error"]):
+            err = str(rp["error"])
+            if "Joining_Date" in cols and "Joining_Date" in err:
                 _PROFILE_COLS_CACHE["has_joining_date"] = False  # remember; stop re-probing
+            elif "Employee_GL" in cols and "Employee_GL" in err:
+                _PROFILE_COLS_CACHE["has_employee_gl"] = False  # remember; stop re-probing
             else:
                 print(f"[/api/availability/employees/detail] profile BQ error (cols='{cols[:30]}…'): {rp['error']}")
             continue
         if "Joining_Date" in cols:
             _PROFILE_COLS_CACHE["has_joining_date"] = True
+        if "Employee_GL" in cols:
+            _PROFILE_COLS_CACHE["has_employee_gl"] = True
         prows = rp.get("rows") or []
         if prows:
             pr = prows[0]
@@ -8406,6 +8424,7 @@ def availability_employee_detail(code: str, user: dict = Depends(get_current_use
                 "employee_type":   (pr.get("employee_type") or "").strip() or None,
                 "employee_status": (pr.get("employee_status") or "").strip() or None,
                 "email":           (pr.get("email") or "").strip() or None,
+                "growth_level":    (pr.get("growth_level") or "").strip() or None,
             }
             jd = _parse_joining_date(pr.get("joining_date"))
             if jd:
@@ -11156,7 +11175,7 @@ A report = ONE BigQuery SELECT that produces ONE clean table of rows. The fronte
 WORKFORCE TABLES:
 - `ai-vertex-mahad.Satori_Project.Employee_Data`
     Employee_Code, Resource_Name, EmployeePosition, EmployeeHierarchyNode (= department),
-    EmployeeLocation, Employee_Type, Joining_Date, Gender.
+    EmployeeLocation, Employee_Type, Employee_GL (Growth Level / seniority band — 'GL-1','GL-2',…; GL-1 = MOST senior, higher number = more junior; rank seniority via SAFE_CAST(REGEXP_EXTRACT(Employee_GL,r'([0-9]+)') AS INT64) ASC), Joining_Date, Gender.
     Active employees filter: LOWER(Employee_Type) IN ('mto','permanent','probation').
 
 - `ai-vertex-mahad.Satori_Project.Attendance_Data`
@@ -11810,6 +11829,7 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "Columns: Employee_Code (STRING, e.g. 'E-2141'), Resource_Name (STRING — full name), "
             "EmployeePosition (STRING), EmployeeEmail (STRING), EmployeeHierarchyNode (STRING = department), "
             "EmployeeLocation (STRING — city), Employee_Status (STRING), Employee_Type (STRING — Permanent / MTO / Probation / Contractual Fixed term / Contractor / Freelancer / Internship), "
+            "Employee_GL (STRING — Growth Level / seniority band: 'GL-1','GL-2',… where GL-1 = MOST senior and a HIGHER number = more junior; to rank/sort by seniority use the numeric part SAFE_CAST(REGEXP_EXTRACT(Employee_GL,r'([0-9]+)') AS INT64) ASC, NOT the raw string), "
             "Joining_Date, Gender. Active employees = LOWER(Employee_Type) IN ('mto','permanent','probation').\n"
             "JOINS — always digit-normalise the employee code on both sides; NEVER join on names "
             "(Resource_Name carries a code prefix like 'E-1571 Mahad Laeeque' so name joins match almost nothing). "
@@ -12031,6 +12051,7 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "CRM_Pipeline, Coverage_Ratio, Status, Action.",            # pre Coverage_Ratio-is-STRING note
     "this is the full TICKETING dataset too (~188k rows)",      # pre WP + SLA timesheet note
     "Weekly project allocation (~385k rows).",                  # pre per-week-bench / weeks-on-bench allocation note
+    "Internship), Joining_Date, Gender.",                       # pre Employee_GL (Growth Level / seniority) note
 )
 
 

@@ -43,6 +43,11 @@ _PROBES = {
         "FROM `capability-agent-prod.Satori_Project.Employee_Data` WHERE EmployeeLocation IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 30"
     ),
+    "growth_levels": (
+        "SELECT DISTINCT Employee_GL AS v, COUNT(*) AS n "
+        "FROM `capability-agent-prod.Satori_Project.Employee_Data` WHERE Employee_GL IS NOT NULL "
+        "GROUP BY v ORDER BY v LIMIT 30"
+    ),
     "attendance_statuses": (
         "SELECT DISTINCT attendance_status_text AS v, COUNT(*) AS n "
         "FROM `capability-agent-prod.Satori_Project.Attendance_Data` WHERE attendance_status_text IS NOT NULL "
@@ -218,7 +223,9 @@ def render_context_block() -> str:
         f"- Employee_Type values - {_format_distinct(get_rows('employee_types'))}\n"
         "  These are stored case-sensitive. ALWAYS wrap in LOWER() before comparing.\n"
         f"- Positions (EmployeePosition) - {_format_distinct(get_rows('positions'))}\n"
-        f"- Locations (EmployeeLocation) - {_format_distinct(get_rows('locations'))}\n\n"
+        f"- Locations (EmployeeLocation) - {_format_distinct(get_rows('locations'))}\n"
+        f"- Growth Levels (Employee_GL) - {_format_distinct(get_rows('growth_levels'))}\n"
+        "  Seniority band: GL-1 = MOST senior, higher number = more junior. Rank/sort by seniority via SAFE_CAST(REGEXP_EXTRACT(Employee_GL,r'([0-9]+)') AS INT64) ASC (NOT the raw string).\n\n"
         "ATTENDANCE DIMENSIONS (Attendance_Data):\n"
         f"- Status values (attendance_status_text) - {_format_distinct(get_rows('attendance_statuses'))}\n"
         "  Stored case-sensitive. ALWAYS wrap in LOWER() before comparing. There is NO 'Late' status VALUE - a late arrival = check-in after 09:30 on a worked day: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00'.\n"

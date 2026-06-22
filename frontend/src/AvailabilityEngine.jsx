@@ -1054,6 +1054,13 @@ const EmployeeDetailModal = ({ emp, onClose }) => {
                       background: `${C.accent}18`, color: C.accentDark, border: `1px solid ${C.accent}55`,
                     }}>WP Owner · {detail.work_packages.counts.owned_total}</span>
                 )}
+                {detail?.profile?.growth_level && (
+                  <span title="Growth Level — seniority band (GL-1 is the most senior)"
+                    style={{
+                      fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999,
+                      background: C.surfaceAlt, color: C.textSecondary, border: `1px solid ${C.border}`,
+                    }}>{detail.profile.growth_level}</span>
+                )}
               </div>
               <div style={{ fontSize: 13, color: C.textSecondary, marginTop: 4 }}>
                 {emp.position || "—"}{emp.department && ` · ${emp.department}`}{emp.location && ` · ${emp.location}`}
