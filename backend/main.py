@@ -5250,7 +5250,7 @@ WORKFORCE TABLES:
 - `Allocation_Data` — weekly project allocation. Cols: project_id (STRING), employee_id (STRING — "E-1234"), allocation_percent (INT64 — compare directly), emp_competency (STRING), Flag (STRING — 'Allocated'/'Bench'), Forecast_Flag (INT64 0/1), Date (DATE), Year (INT64), Month (INT64 1-12), Week (INT64). NO year_id/week_id. Filter Year/Month with integers, not strings. Real/billable allocation = MAX(allocation_percent) over Flag='Allocated' rows; Bench = no Flag='Allocated' row with pct>0.
 - `Timesheet_Data` — ticket/project hours. Cols: EMPLOYEE_CODE (STRING "E-1571" — THIS is the employee who logged the hours; JOIN/filter on this, digit-normalised), TICKET_USER_ID (an unrelated internal numeric id — NEVER join or filter on it; it matches no employee), TICKET_NUMBER, TICKET_PROJECT_CODE (JOIN to Project_Master.Project_Code for the project name), TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT. For DATE_KEY filters use the type-agnostic form: COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))).
 - `Project_Master` — project reference. Cols: Project_Code (STRING — the key allocation.project_id and timesheet.TICKET_PROJECT_CODE join to), Project_Name (STRING, e.g. '1245 - TMC Project Matrix'), Client_Name (STRING), Project_Type (STRING — AMC/SLA/Internal/Admin/…), Project_Status (STRING — 'Active'/…), Competency (STRING), PM_ID (STRING — project manager's employee code), Project_Start_Date / Project_EndDate (STRING dates — SAFE parse), Location (STRING — the PROJECT's delivery city: Karachi/Lahore/Islamabad/International; COALESCE(NULLIF(TRIM(Location),''),'Unspecified') when grouping). Join here for project names AND for "projects in <city>" questions — the project Location is DISTINCT from the employee's EmployeeLocation.
-- `WP_Report` — PF work-package master/detail (~490k deliverable-line rows, ~10,170 distinct WPs). WP_CODE (WP id; the project = its LEADING NUMBER: REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Code AS STRING) — PROJECT_ID is an internal id, never join on it), WP_DESCRIPTION, WP_OWNER_NAME, WP_RESOURCE_ASSIGNED, WP_*_DATE cols (DATE), PLAN (planned progress % 0-100), Progress_Status / WP_PORTAL_STATUS / Performance_Status. ACTUAL is '?' — unusable. Count WPs as COUNT(DISTINCT WP_CODE), never COUNT(*). Join Timesheet: UPPER(TRIM(WP_CODE)) = REGEXP_REPLACE(UPPER(TRIM(TICKET_WP_ID)), r'(-[0-9]{4,})+$', '') — never a direct equality (TICKET_WP_ID carries a numeric suffix).
+- `WP_Report` — PF work-package master/detail (~490k deliverable-line rows, ~10,170 distinct WPs). WP_CODE (WP id; the project = its LEADING NUMBER: REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Code AS STRING) — PROJECT_ID is an internal id, never join on it), WP_DESCRIPTION, WP_OWNER_NAME, WP_RESOURCE_ASSIGNED, WP_*_DATE cols (DATE), PLAN (planned progress % 0-100), Progress_Status / WP_PORTAL_STATUS / Performance_Status. ACTUAL is '?' — unusable. Count WPs as COUNT(DISTINCT WP_CODE), never COUNT(*). Join Timesheet: UPPER(TRIM(WP_CODE)) = REGEXP_REPLACE(UPPER(TRIM(TICKET_WP_ID)), r'(-[0-9]{{4,}})+$', '') — never a direct equality (TICKET_WP_ID carries a numeric suffix).
 
 SALES TABLES:
 - `Sales_Accounts` (~359 rows) — Customer accounts. Cols: VP, AM, Location, Account, Tier ('A'/'B'/'C'), Dormant ('Yes'/'No'), Jan_Visits/Feb_Visits/Mar_Visits/Q1_Visits (STRING — SAFE_CAST AS INT64), Zero_Visit.
@@ -5695,15 +5695,15 @@ def refine_dashboard(user_message: str, history: list, existing_config=None, sco
     tables = discover_tables()
     tables_str = "\n".join(f"- {t['table']} ({t['type']})" for t in tables[:20]) or "(no tables discovered yet)"
 
-    # NOTE: use .replace() (NOT .format()) — these prompts embed _DASHBOARD_SAP_SCHEMAS
-    # which contains regex literals like {4,} that str.format would mis-parse as
-    # fields (KeyError: '4,'). .replace only touches our explicit placeholders.
+    # NOTE: these prompts are str.format templates — EVERY literal brace in them
+    # (JSON examples {{...}}, the {{where}} placeholder shown to the model, regex
+    # like {{4,}}) MUST be DOUBLED; only {tables}/{current_config} are real
+    # fields. (Using .replace() here instead would leave the doubled braces in
+    # the model-facing examples, so it emits {{where}} → renders as {} → BQ error.)
     if existing_config:
-        system = (DASHBOARD_EDIT_PROMPT
-                  .replace("{current_config}", json.dumps(existing_config, indent=2))
-                  .replace("{tables}", tables_str))
+        system = DASHBOARD_EDIT_PROMPT.format(current_config=json.dumps(existing_config, indent=2), tables=tables_str)
     else:
-        system = DASHBOARD_REFINE_PROMPT.replace("{tables}", tables_str)
+        system = DASHBOARD_REFINE_PROMPT.format(tables=tables_str)
     # Inject analyst common-sense defaults + admin-curated schema notes + live
     # warehouse snapshot so the AI behaves like a senior analyst (active-only,
     # working days, distinct employees, sane numbers) by default.
