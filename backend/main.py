@@ -2723,6 +2723,7 @@ WORKFORCE TABLES
 4. `Timesheet_Data` — Logged ticket/project hours. Cols: EMPLOYEE_CODE (the 'E-1571' code — **JOIN to Employee_Data.employee_code, digit-normalised; this is the employee link, NOT TICKET_USER_ID** which is a different internal numeric id), TICKET_USER_ID (internal id — do NOT join on it), TICKET_PROJECT_CODE (**JOIN to Project_Master.Project_Code for the project name**), TICKET_PROJECT_LABEL, TICKET_HOURS (FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT.
 5. `Project_Master` — Project reference (everyone can see it). Cols: Project_Code (the key that allocation.project_id AND timesheet.TICKET_PROJECT_CODE join to), Project_Name (e.g. '1245 - TMC Project Matrix'), Client_Name, Project_Type, Project_Status, Competency, PM_ID (project manager's employee_code), Project_Start_Date, Project_EndDate, Location (STRING — the PROJECT's delivery location/city: Karachi, Lahore, Islamabad, International, …; COALESCE empties to 'Unspecified' when grouping). ALWAYS join here to report project NAMES rather than bare codes. "Projects in <city>" / "projects by location" = filter/group Project_Master.Location — do NOT confuse it with the EMPLOYEE's city (Employee_Data.EmployeeLocation) or the sales-account Location: a Lahore-based employee can be allocated to a Karachi project.
 6. `WP_Report` — the PF work-package master/detail report (~490k rows = DELIVERABLE LINES, ~10,170 distinct WPs). Key cols: WP_CODE (the WP id '1105-B1-1.3-PMO-001'; its LEADING NUMBER is the project: REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Master.Project_Code AS STRING) — PROJECT_ID is an INTERNAL id that joins NOTHING, never use it), WP_DESCRIPTION, WP_OWNER_NAME, WP_RESOURCE_ASSIGNED, BUILD, Deliverables, DELIVERABLE_TYPE, the WP_*_DATE columns (DATE; if STRING parse '%d-%b-%Y'), PLAN (planned progress % 0-100), WP_PORTAL_STATUS, Progress_Status (Completed/In-Progress/Future Task/Upcoming/Initiation Pending/Backlog), Performance_Status. ⚠️ ACTUAL is '?' in the feed — UNUSABLE, never report it; actual effort = Timesheet hours. ⚠️ 'How many WPs' = COUNT(DISTINCT WP_CODE), never COUNT(*). ⚠️ JOIN to Timesheet: TICKET_WP_ID = WP_CODE + a numeric task-id suffix — NEVER join them directly (0 matches); use UPPER(TRIM(w.WP_CODE)) = REGEXP_REPLACE(UPPER(TRIM(t.TICKET_WP_ID)), r'(-[0-9]{4,})+$', '') (verified 885/886).
+7. `Tasks_Subtasks_Report` — the per-TASK / per-SUB-TASK breakdown UNDER each work package (~10M EXPLODED rows, ~53.6k distinct tasks/sub-tasks across ~9,278 WPs). Key cols: T_ST_FLAG ('Task' / 'Sub Task'), WP_CODE (the parent WP — JOIN to WP_Report.WP_CODE; the project = its LEADING NUMBER: REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Master.Project_Code AS STRING)), TASK_SUBTASK_ID (UNIQUE per task/sub-task, format 'WP_CODE/<id>' — ⚠️ 'how many tasks/sub-tasks' = COUNT(DISTINCT TASK_SUBTASK_ID), NEVER COUNT(*)), PARENT_ID (a sub-task's parent task id), Task_Sub_Task_Code ('2.7.1'), TASK_LABEL / SUBTASK_LABEL, TASK_USER_ASSIGN ('Name-E-938' — the assignee's employee code is the suffix; norm the trailing digits → Employee_Code), PLAN (STRING progress % — SAFE_CAST AS INT64), Progress_Status (Completed/In-Progress/Future Task/Upcoming/Initiation Pending/Backlog/Others), Performance_Status (On-Time/Behind/…), TASK_PORTAL_STATUS, dates START_DATE/END_DATE/INITIATION_DATE/LAST_WORKDONE_DATE/TASK_LAST_STATUS_DATE (STRING — parse SAFE.PARSE_DATE('%d-%b-%Y', col)). ⚠️ ACTUAL is '?' — UNUSABLE. ⚠️ Always filter `TASK_SUBTASK_ID IS NOT NULL` to drop empty placeholder rows. Tasks roll up under WPs (WP_CODE), WPs roll up under projects (leading number).
 
 SALES TABLES
 5. `Sales_Accounts` (~359 rows) — Customer accounts. Cols: VP, AM, Location, Account, Tier ('A'/'B'/'C'), Dormant ('Yes'/'No'), Jan_Visits, Feb_Visits, Mar_Visits, Q1_Visits, Zero_Visit ('Yes'/'No').
@@ -5251,6 +5252,7 @@ WORKFORCE TABLES:
 - `Timesheet_Data` — ticket/project hours. Cols: EMPLOYEE_CODE (STRING "E-1571" — THIS is the employee who logged the hours; JOIN/filter on this, digit-normalised), TICKET_USER_ID (an unrelated internal numeric id — NEVER join or filter on it; it matches no employee), TICKET_NUMBER, TICKET_PROJECT_CODE (JOIN to Project_Master.Project_Code for the project name), TICKET_PROJECT_LABEL, TICKET_HOURS (STRING — SAFE_CAST AS FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT. For DATE_KEY filters use the type-agnostic form: COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))).
 - `Project_Master` — project reference. Cols: Project_Code (STRING — the key allocation.project_id and timesheet.TICKET_PROJECT_CODE join to), Project_Name (STRING, e.g. '1245 - TMC Project Matrix'), Client_Name (STRING), Project_Type (STRING — AMC/SLA/Internal/Admin/…), Project_Status (STRING — 'Active'/…), Competency (STRING), PM_ID (STRING — project manager's employee code), Project_Start_Date / Project_EndDate (STRING dates — SAFE parse), Location (STRING — the PROJECT's delivery city: Karachi/Lahore/Islamabad/International; COALESCE(NULLIF(TRIM(Location),''),'Unspecified') when grouping). Join here for project names AND for "projects in <city>" questions — the project Location is DISTINCT from the employee's EmployeeLocation.
 - `WP_Report` — PF work-package master/detail (~490k deliverable-line rows, ~10,170 distinct WPs). WP_CODE (WP id; the project = its LEADING NUMBER: REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Code AS STRING) — PROJECT_ID is an internal id, never join on it), WP_DESCRIPTION, WP_OWNER_NAME, WP_RESOURCE_ASSIGNED, WP_*_DATE cols (DATE), PLAN (planned progress % 0-100), Progress_Status / WP_PORTAL_STATUS / Performance_Status. ACTUAL is '?' — unusable. Count WPs as COUNT(DISTINCT WP_CODE), never COUNT(*). Join Timesheet: UPPER(TRIM(WP_CODE)) = REGEXP_REPLACE(UPPER(TRIM(TICKET_WP_ID)), r'(-[0-9]{{4,}})+$', '') — never a direct equality (TICKET_WP_ID carries a numeric suffix).
+- `Tasks_Subtasks_Report` — per-task / per-sub-task breakdown under each WP (~10M EXPLODED rows). T_ST_FLAG ('Task'/'Sub Task'), WP_CODE (parent WP → WP_Report.WP_CODE; project = leading number REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Code AS STRING)), TASK_SUBTASK_ID (UNIQUE per task — COUNT(DISTINCT TASK_SUBTASK_ID), NEVER COUNT(*)), PARENT_ID, Task_Sub_Task_Code, TASK_LABEL/SUBTASK_LABEL, TASK_USER_ASSIGN ('Name-E-938' — code in suffix), PLAN (STRING % → SAFE_CAST INT64), Progress_Status (Completed/In-Progress/…), Performance_Status (On-Time/Behind/…), TASK_PORTAL_STATUS, START_DATE/END_DATE/INITIATION_DATE/LAST_WORKDONE_DATE/TASK_LAST_STATUS_DATE (STRING — SAFE.PARSE_DATE('%d-%b-%Y', col)). ACTUAL is '?' — unusable. Always filter TASK_SUBTASK_ID IS NOT NULL.
 
 SALES TABLES:
 - `Sales_Accounts` (~359 rows) — Customer accounts. Cols: VP, AM, Location, Account, Tier ('A'/'B'/'C'), Dormant ('Yes'/'No'), Jan_Visits/Feb_Visits/Mar_Visits/Q1_Visits (STRING — SAFE_CAST AS INT64), Zero_Visit.
@@ -9292,6 +9294,18 @@ def project_detail(code: str, user: dict = Depends(get_current_user)):
         ORDER BY (COALESCE(progress, '') = 'Completed'), end_date IS NULL, end_date
         LIMIT 200
     """
+    # Task / sub-task rollup per WP for this project (Tasks_Subtasks_Report is
+    # ~10M exploded rows → count DISTINCT TASK_SUBTASK_ID, never COUNT(*); skip
+    # the empty placeholder rows where TASK_SUBTASK_ID IS NULL).
+    tasks_sql = f"""
+        SELECT WP_CODE,
+               COUNT(DISTINCT TASK_SUBTASK_ID) AS t_total,
+               COUNT(DISTINCT IF(Progress_Status = 'Completed', TASK_SUBTASK_ID, NULL)) AS t_done,
+               COUNT(DISTINCT IF(Performance_Status = 'Behind' AND COALESCE(Progress_Status,'') != 'Completed', TASK_SUBTASK_ID, NULL)) AS t_behind
+        FROM {_bq_avail('Tasks_Subtasks_Report')}
+        WHERE REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = '{pid}' AND TASK_SUBTASK_ID IS NOT NULL
+        GROUP BY WP_CODE
+    """
     mix_sql = f"""
         SELECT COALESCE(Progress_Status, 'Unknown') AS k, COUNT(DISTINCT WP_CODE) AS n
         FROM {_bq_avail('WP_Report')} WHERE REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = '{pid}' GROUP BY k
@@ -9365,7 +9379,29 @@ def project_detail(code: str, user: dict = Depends(get_current_user)):
                 "plan_pct": int(float(row.get("plan_pct") or 0)),
                 "end_date": str(row.get("end_date")) if row.get("end_date") else None,
                 "overdue": str(row.get("overdue")).strip().lower() == "true",
+                "tasks_total": 0, "tasks_done": 0, "tasks_behind": 0,
             })
+
+    # Merge per-WP task / sub-task counts onto the WP list and roll up project
+    # totals. TASK_SUBTASK_ID is unique per WP ("WP_CODE/taskid"), so summing
+    # per-WP distinct counts gives the correct project total.
+    task_totals = {"total": 0, "done": 0, "behind": 0}
+    rtk = bq_run_query(normalize_bq_project(_autofix_dashboard_sql(tasks_sql)), max_rows=2000)
+    if "error" in rtk:
+        print(f"[/api/projects/detail] tasks BQ error: {rtk['error']}")
+    else:
+        tmap = {}
+        for row in (rtk.get("rows") or []):
+            tt = int(float(row.get("t_total") or 0))
+            td = int(float(row.get("t_done") or 0))
+            tb = int(float(row.get("t_behind") or 0))
+            tmap[row.get("WP_CODE") or ""] = (tt, td, tb)
+            task_totals["total"] += tt
+            task_totals["done"] += td
+            task_totals["behind"] += tb
+        for wp in wps:
+            tt, td, tb = tmap.get(wp["code"], (0, 0, 0))
+            wp["tasks_total"], wp["tasks_done"], wp["tasks_behind"] = tt, td, tb
 
     rm = bq_run_query(normalize_bq_project(_autofix_dashboard_sql(mix_sql)), max_rows=60)
     status_mix, type_mix = {}, {}
@@ -9401,6 +9437,7 @@ def project_detail(code: str, user: dict = Depends(get_current_user)):
         "competency": head.get("competency") or "",
         "status_mix": status_mix,
         "type_mix": type_mix,
+        "task_totals": task_totals,
         "wps": wps,
         "team": team,
     }
@@ -11233,6 +11270,12 @@ WORK-PACKAGE / PROJECT TABLES:
     Progress_Status ('Completed' / 'In-Progress' / 'Future Task' / 'Upcoming' / 'Initiation Pending' / 'Backlog'), WP_PORTAL_STATUS, Performance_Status,
     PLAN (planned progress %, INT64 0-100), WP_BASELINE_START_DATE / WP_BASELINE_END_DATE / WP_LAST_STATUS_DATE (DATE).
     ⚠️ No usable ACTUAL column — actual effort = SUM of Timesheet hours (join below). Baseline duration in days = DATE_DIFF(WP_BASELINE_END_DATE, WP_BASELINE_START_DATE, DAY).
+- `ai-vertex-mahad.Satori_Project.Tasks_Subtasks_Report`  (per-task / per-sub-task breakdown UNDER each WP — ~10M EXPLODED rows, ~53.6k distinct tasks. Always COUNT(DISTINCT TASK_SUBTASK_ID), never COUNT(*); filter TASK_SUBTASK_ID IS NOT NULL.)
+    T_ST_FLAG ('Task' / 'Sub Task'), WP_CODE (parent WP → WP_Report.WP_CODE; project = leading number REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Master.Project_Code AS STRING)),
+    TASK_SUBTASK_ID (UNIQUE per task/sub-task = 'WP_CODE/<id>'), PARENT_ID (sub-task → parent task), Task_Sub_Task_Code ('2.7.1'), TASK_LABEL / SUBTASK_LABEL,
+    TASK_USER_ASSIGN ('Name-E-938' — assignee's employee code is the suffix; digit-norm the trailing number → Employee_Code), PLAN (STRING % → SAFE_CAST AS INT64),
+    Progress_Status (Completed/In-Progress/Future Task/Upcoming/Initiation Pending/Backlog/Others), Performance_Status (On-Time/Behind/…), TASK_PORTAL_STATUS,
+    START_DATE / END_DATE / INITIATION_DATE / LAST_WORKDONE_DATE / TASK_LAST_STATUS_DATE (STRING — SAFE.PARSE_DATE('%d-%b-%Y', col)). ACTUAL is '?' — unusable.
 - `ai-vertex-mahad.Satori_Project.Project_Master`
     Project_Code (INT64 — equals WP_CODE's leading number), Project_Name. Resolve a NAMED project here first: LOWER(Project_Name) LIKE '%x%' → Project_Code.
 

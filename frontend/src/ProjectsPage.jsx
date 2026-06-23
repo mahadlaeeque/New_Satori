@@ -16,7 +16,7 @@
 
 import { useState, useEffect, useMemo } from "react";
 import {
-  Search, X, Briefcase, Users, Clock, AlertCircle, Loader2, FileText, MapPin,
+  Search, X, Briefcase, Users, Clock, AlertCircle, Loader2, FileText, MapPin, ListChecks,
 } from "lucide-react";
 import { BenchRadarPanel, SuggestWorkModal } from "./components/BenchRadar.jsx";
 
@@ -151,6 +151,26 @@ const ProjectDetailModal = ({ proj, onClose }) => {
                 )}
               </div>
 
+              {/* Task / sub-task completion rollup (from PF_TASKS_SUBTASKS_REPORT) */}
+              {d.task_totals && d.task_totals.total > 0 && (() => {
+                const tt = d.task_totals;
+                const pct = Math.round(100 * tt.done / tt.total);
+                return (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center", marginBottom: 18, padding: "12px 14px", background: C.surfaceAlt, borderRadius: 10 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: C.textPrimary, display: "flex", alignItems: "center", gap: 6 }}>
+                      <ListChecks size={15} /> Tasks & sub-tasks
+                    </div>
+                    <div style={{ fontSize: 12.5, color: C.textSecondary }}>
+                      <b style={{ color: C.textPrimary }}>{tt.done.toLocaleString()}</b> / {tt.total.toLocaleString()} done · {pct}% complete
+                      {tt.behind > 0 && <span style={{ color: "var(--sem-danger-fg)", fontWeight: 700 }}> · {tt.behind.toLocaleString()} behind</span>}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 120, height: 6, background: C.border, borderRadius: 999, overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${pct}%`, background: "var(--sem-ok-fg)" }} />
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Active work packages */}
               <h3 style={{ margin: "0 0 10px", fontSize: 13, fontWeight: 700, color: C.textPrimary, textTransform: "uppercase", letterSpacing: "0.5px", display: "flex", alignItems: "center", gap: 6 }}>
                 <FileText size={14} /> Active work packages ({activeWps.length}{doneCount ? ` · ${doneCount} completed` : ""})
@@ -173,7 +193,7 @@ const ProjectDetailModal = ({ proj, onClose }) => {
                             {w.description || w.code}
                           </div>
                           <div style={{ fontSize: 10.5, color: C.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {[w.code, w.owner ? `owner ${w.owner}` : null, w.resource ? `assigned ${personName(w.resource)}` : null, w.end_date ? `due ${w.end_date}` : null].filter(Boolean).join(" · ")}
+                            {[w.code, w.owner ? `owner ${w.owner}` : null, w.resource ? `assigned ${personName(w.resource)}` : null, w.tasks_total ? `${w.tasks_done}/${w.tasks_total} tasks` : null, w.end_date ? `due ${w.end_date}` : null].filter(Boolean).join(" · ")}
                           </div>
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>

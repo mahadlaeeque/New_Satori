@@ -129,6 +129,12 @@ _PROBES = {
         "FROM `capability-agent-prod.Satori_Project.WP_Report` WHERE WP_PORTAL_STATUS IS NOT NULL "
         "GROUP BY v ORDER BY n DESC LIMIT 15"
     ),
+    "tasks_progress_statuses": (
+        "SELECT DISTINCT Progress_Status AS v, COUNT(DISTINCT TASK_SUBTASK_ID) AS n "
+        "FROM `capability-agent-prod.Satori_Project.Tasks_Subtasks_Report` "
+        "WHERE Progress_Status IS NOT NULL AND TASK_SUBTASK_ID IS NOT NULL "
+        "GROUP BY v ORDER BY n DESC LIMIT 12"
+    ),
     "join_compat_attendance_name": (
         "WITH e AS (SELECT DISTINCT UPPER(TRIM(Resource_Name)) AS k "
         "  FROM `capability-agent-prod.Satori_Project.Employee_Data` WHERE Resource_Name IS NOT NULL), "
@@ -248,6 +254,14 @@ def render_context_block() -> str:
             )
             if wp_cols else
             "WORK PACKAGES: the WP_Report table has not been loaded yet - if asked about work-package details beyond Timesheet_Data's TICKET_WP_ID, say the WP report isn't available rather than guessing.\n\n"
+        )
+        + (
+            (
+                "TASKS / SUB-TASKS (Tasks_Subtasks_Report — the per-task / per-sub-task breakdown UNDER each work package, ~10M EXPLODED rows):\n"
+                f"- Progress_Status (by DISTINCT task/sub-task) - {_format_distinct(get_rows('tasks_progress_statuses'))}\n"
+                "- 'How many tasks/sub-tasks' = COUNT(DISTINCT TASK_SUBTASK_ID), NEVER COUNT(*). Filter TASK_SUBTASK_ID IS NOT NULL (drops empty placeholder rows). T_ST_FLAG = 'Task'/'Sub Task'. WP_CODE → WP_Report.WP_CODE; the project = WP_CODE's leading number (REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Code AS STRING)). TASK_USER_ASSIGN = 'Name-E-938' (assignee code in the suffix). Dates are STRING '%d-%b-%Y' (SAFE.PARSE_DATE). ACTUAL is '?' - unusable.\n\n"
+            )
+            if get_rows('tasks_progress_statuses') else ""
         )
         + "ALLOCATION DIMENSIONS (Allocation_Data):\n"
         f"- Flag values - {_format_distinct(get_rows('allocation_flags'))}  (NOT 'Actual'/'Forecast' - use 'Allocated'/'Bench')\n"
