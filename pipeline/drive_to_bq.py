@@ -47,7 +47,19 @@ FILE_TARGETS = [
     # the CSV header like everything else and load as STRING (the app
     # SAFE_CASTs). Joins to Timesheet_Data.TICKET_WP_ID on its WP-id column.
     ("pfwpreport",       "WP_Report"),
+    # PF tasks/subtasks report (~3+ GB) — the per-task / per-subtask breakdown
+    # under each work package. Loaded as STRING (app SAFE_CASTs). Listed LAST so
+    # if this large file ever errors, the 6 critical tables above are already
+    # synced. Joins to WP_Report / Timesheet via its WP-code + task-id columns.
+    ("pftaskssubtasksreport", "Tasks_Subtasks_Report"),
 ]
+
+# Tables to SKIP re-loading when the Drive file's md5 is unchanged since the last
+# successful sync (md5 comes from Drive metadata — no download needed). Reserved
+# for LARGE files so the 30-min job doesn't re-download multi-GB CSVs that
+# haven't changed. The 6 small core tables always reload (cheap, proven).
+SKIP_IF_UNCHANGED = {"Tasks_Subtasks_Report"}
+_STATE_TABLE = "_pipeline_sync_state"
 
 # Per-table finalize: recast the columns the app reads as typed. Everything else
 # stays STRING (the app SAFE_CASTs the rest). {t} = fully-qualified table.
@@ -166,7 +178,7 @@ def list_folder(drive, folder_id):
     while True:
         resp = drive.files().list(
             q=f"'{folder_id}' in parents and trashed = false",
-            fields="nextPageToken, files(id, name, mimeType, size)",
+            fields="nextPageToken, files(id, name, mimeType, size, md5Checksum, modifiedTime)",
             pageToken=page, pageSize=200,
             supportsAllDrives=True, includeItemsFromAllDrives=True,
         ).execute()
@@ -188,14 +200,28 @@ def match_targets(files):
     return matched, missing
 
 
-def download_bytes(drive, file) -> bytes:
+def download_head(drive, file, n_bytes: int = 262144) -> bytes:
+    """Download just the first chunk — enough to read the CSV header. Used for
+    DRY_RUN so we never pull a multi-GB file just to inspect its columns."""
     buf = io.BytesIO()
     dl = MediaIoBaseDownload(buf, drive.files().get_media(fileId=file["id"], supportsAllDrives=True),
-                             chunksize=20 * 1024 * 1024)
+                             chunksize=n_bytes)
+    dl.next_chunk()  # one chunk is plenty for the header line
+    return buf.getvalue()[:n_bytes]
+
+
+def download_to_buffer(drive, file) -> io.BytesIO:
+    """Stream the whole file into ONE in-memory buffer and hand that buffer
+    straight to the BQ loader — avoids the extra full-size copies (bytes
+    getvalue() + a second BytesIO) that would blow memory on multi-GB files."""
+    buf = io.BytesIO()
+    dl = MediaIoBaseDownload(buf, drive.files().get_media(fileId=file["id"], supportsAllDrives=True),
+                             chunksize=64 * 1024 * 1024)
     done = False
     while not done:
         _, done = dl.next_chunk()
-    return buf.getvalue()
+    buf.seek(0)
+    return buf
 
 
 def header_columns(data: bytes):
@@ -203,7 +229,13 @@ def header_columns(data: bytes):
     return [_sanitize_col(c) for c in first.split(",")]
 
 
-def load_csv(bq, table, data, columns):
+def header_from_buffer(buf: io.BytesIO):
+    head = buf.read(262144)
+    buf.seek(0)
+    return header_columns(head)
+
+
+def load_csv(bq, table, buf: io.BytesIO, columns):
     table_id = f"{PROJECT}.{DATASET}.{table}"
     schema = [bigquery.SchemaField(c, "STRING") for c in columns]
     job_config = bigquery.LoadJobConfig(
@@ -216,8 +248,29 @@ def load_csv(bq, table, data, columns):
         max_bad_records=200,
         encoding="UTF-8",
     )
-    bq.load_table_from_file(io.BytesIO(data), table_id, job_config=job_config).result()
+    buf.seek(0)
+    bq.load_table_from_file(buf, table_id, job_config=job_config).result()
     return bq.get_table(table_id).num_rows
+
+
+def read_sync_state(bq):
+    """{table_name: md5} of the last successful sync. Creates the tiny state
+    table on first use. Best-effort — failure just means we don't skip."""
+    tid = f"{PROJECT}.{DATASET}.{_STATE_TABLE}"
+    bq.query(f"CREATE TABLE IF NOT EXISTS `{tid}` "
+             f"(table_name STRING, md5 STRING, synced_at TIMESTAMP)").result()
+    rows = bq.query(f"SELECT table_name, md5 FROM `{tid}`").result()
+    return {r["table_name"]: r["md5"] for r in rows}
+
+
+def write_sync_state(bq, table, md5):
+    tid = f"{PROJECT}.{DATASET}.{_STATE_TABLE}"
+    params = [bigquery.ScalarQueryParameter("t", "STRING", table),
+              bigquery.ScalarQueryParameter("m", "STRING", md5)]
+    cfg = bigquery.QueryJobConfig(query_parameters=params)
+    bq.query(f"DELETE FROM `{tid}` WHERE table_name=@t", job_config=cfg).result()
+    bq.query(f"INSERT INTO `{tid}` (table_name, md5, synced_at) "
+             f"VALUES (@t, @m, CURRENT_TIMESTAMP())", job_config=cfg).result()
 
 
 def main():
@@ -230,26 +283,41 @@ def main():
 
     if DRY_RUN:
         for f, table in matched:
-            data = download_bytes(drive, f)[:65536]
-            cols = header_columns(data)
-            _log(f"[{table}] <- '{f['name']}' ({len(cols)} cols): {cols}")
+            cols = header_columns(download_head(drive, f))
+            _log(f"[{table}] <- '{f['name']}' (size={f.get('size')} md5={f.get('md5Checksum')}; {len(cols)} cols): {cols}")
         _log("DRY_RUN done")
         return
+
+    try:
+        state = read_sync_state(bq)
+    except Exception as e:
+        _log(f"WARNING: could not read sync state (will not skip): {e}")
+        state = {}
 
     errors = []
     loaded_allocation = False
     for f, table in matched:
         try:
-            data = download_bytes(drive, f)
-            cols = header_columns(data)
-            rows = load_csv(bq, table, data, cols)
-            _log(f"loaded {table} <- '{f['name']}' ({len(data)} bytes, {rows} rows, {len(cols)} cols)")
+            md5 = f.get("md5Checksum")
+            if table in SKIP_IF_UNCHANGED and md5 and state.get(table) == md5:
+                _log(f"skipped {table} <- '{f['name']}' (unchanged since last sync, md5={md5[:10]})")
+                continue
+            buf = download_to_buffer(drive, f)
+            cols = header_from_buffer(buf)
+            rows = load_csv(bq, table, buf, cols)
+            buf.close()
+            _log(f"loaded {table} <- '{f['name']}' ({rows} rows, {len(cols)} cols)")
             if table in FINALIZE_SQL:
                 try:
                     bq.query(FINALIZE_SQL[table].format(t=f"{PROJECT}.{DATASET}.{table}")).result()
                     _log(f"finalized types for {table}")
                 except Exception as fe:
                     _log(f"WARNING: finalize failed for {table} (left as STRING): {fe}")
+            if table in SKIP_IF_UNCHANGED and md5:
+                try:
+                    write_sync_state(bq, table, md5)
+                except Exception as se:
+                    _log(f"WARNING: could not record sync state for {table}: {se}")
             if table == "Allocation_Data_Final":
                 loaded_allocation = True
         except Exception as e:
