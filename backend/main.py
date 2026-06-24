@@ -1879,7 +1879,7 @@ def _usage_payload(limit, offset, user_email):
             "       WHERE l.user_id = u.id AND l.success = 1) AS login_count,"
             "    (SELECT COUNT(*) FROM chat_conversations c "
             "       WHERE c.user_id = u.id) AS chat_count,"
-            "    (SELECT COUNT(DISTINCT DATE(a.created_at)) FROM data_access_log a "
+            "    (SELECT COUNT(*) FROM data_access_log a "
             "       WHERE a.user_id = u.id AND a.action = 'ai.voice') AS voice_count,"
             "    (SELECT COUNT(*) FROM saved_reports r "
             "       WHERE r.user_id = u.id) AS report_count,"
@@ -1892,7 +1892,15 @@ def _usage_payload(limit, offset, user_email):
             "    (SELECT MAX(a.created_at) FROM data_access_log a "
             "       WHERE a.user_id = u.id AND a.action = 'ai.voice') AS last_voice_at,"
             "    (SELECT MAX(a.created_at) FROM data_access_log a "
-            "       WHERE a.user_id = u.id) AS last_activity_at"
+            "       WHERE a.user_id = u.id) AS last_activity_at,"
+            "    (SELECT COUNT(*) FROM data_access_log a "
+            "       WHERE a.user_id = u.id AND a.action = 'view.delivery') AS delivery_count,"
+            "    (SELECT COUNT(*) FROM data_access_log a "
+            "       WHERE a.user_id = u.id AND a.action = 'view.availability') AS availability_count,"
+            "    (SELECT MAX(a.created_at) FROM data_access_log a "
+            "       WHERE a.user_id = u.id AND a.action = 'view.delivery') AS last_delivery_at,"
+            "    (SELECT MAX(a.created_at) FROM data_access_log a "
+            "       WHERE a.user_id = u.id AND a.action = 'view.availability') AS last_availability_at"
             "  FROM users u"
             "  WHERE " + where_sql +
             ") t "
@@ -1923,7 +1931,9 @@ def _usage_payload(limit, offset, user_email):
             last_chat  = _g(r, "last_chat_at",     13)
             last_voice = _g(r, "last_voice_at",    14)
             last_act   = _g(r, "last_activity_at", 15)
-            candidates = [t for t in (last_login, last_chat, last_voice, last_act) if t]
+            last_deliv = _g(r, "last_delivery_at", 18)
+            last_avail = _g(r, "last_availability_at", 19)
+            candidates = [t for t in (last_login, last_chat, last_voice, last_act, last_deliv, last_avail) if t]
             last_active = max(candidates) if candidates else None
             users.append({
                 "userId":                    int(_g(r, "id", 0) or 0),
@@ -1937,10 +1947,14 @@ def _usage_payload(limit, offset, user_email):
                 "voiceSessionCount":         int(_g(r, "voice_count",     9)  or 0),
                 "reportCount":               int(_g(r, "report_count",    10) or 0),
                 "dashboardCount":            int(_g(r, "dashboard_count", 11) or 0),
+                "deliveryViewCount":         int(_g(r, "delivery_count",     16) or 0),
+                "availabilityViewCount":     int(_g(r, "availability_count", 17) or 0),
                 "totalVoiceDurationSeconds": 0,  # v1: not yet tracked server-side
                 "lastLoginAt":               _iso(last_login),
                 "lastChatAt":                _iso(last_chat),
                 "lastVoiceAt":               _iso(last_voice),
+                "lastDeliveryAt":            _iso(last_deliv),
+                "lastAvailabilityAt":        _iso(last_avail),
                 "lastActiveAt":              _iso(last_active),
                 "createdAt":                 _iso(_g(r, "created_at", 5)),
             })
@@ -5779,7 +5793,7 @@ async def voice_websocket(websocket: WebSocket):
 
 
 @app.post("/api/voice/session")
-def voice_session(user: dict = Depends(get_current_user)):
+def voice_session(request: Request, user: dict = Depends(get_current_user)):
     """Return everything the browser needs to open the Gemini Live WebSocket."""
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
@@ -5891,6 +5905,14 @@ def voice_session(user: dict = Depends(get_current_user)):
         cache["model"] = model
         voice_session._model_cache = cache  # type: ignore[attr-defined]
         print(f"[voice/session] using model {model}")
+    # One audit row per voice session start → drives voiceSessionCount in the
+    # usage API. (The /ws/voice proxy is a stub; the live flow always begins by
+    # fetching this session config, so this is the canonical per-session signal.)
+    audit_log.record(
+        user=user, request=request,
+        action="ai.voice", resource_type="ai", resource_id=None,
+        detail={"model": model},
+    )
     return {
         "apiKey": api_key,
         "model": model,
@@ -7999,8 +8021,10 @@ def _avail_departments_sql(dept_scope: list | None = None) -> str:
 
 
 @app.get("/api/availability/kpis")
-def availability_kpis(user: dict = Depends(get_current_user)):
+def availability_kpis(request: Request, user: dict = Depends(get_current_user)):
     """Return the 6 KPI counts shown at the top of the engine."""
+    # Usage signal: the Availability Engine loads these KPIs once per visit.
+    audit_log.record(user=user, request=request, action="view.availability", resource_type="page")
     dept_scope = _get_user_dept_scope(int(user["sub"]))
     sql = normalize_bq_project(_autofix_dashboard_sql(_avail_kpis_sql(dept_scope=dept_scope)))
     r = bq_run_query(sql, max_rows=1)
@@ -9167,8 +9191,10 @@ def _scoped_projects_cte(dept_scope) -> tuple:
 
 
 @app.get("/api/projects")
-def projects_list(user: dict = Depends(get_current_user)):
+def projects_list(request: Request, user: dict = Depends(get_current_user)):
     """Projects (scope-filtered) with a WP-health + activity rollup."""
+    # Usage signal: opening the Delivery Engine loads this list once per visit.
+    audit_log.record(user=user, request=request, action="view.delivery", resource_type="page")
     dept_scope = _get_user_dept_scope(int(user["sub"]))
     scope_ctes, scope_where = _scoped_projects_cte(dept_scope)
     sql = f"""
