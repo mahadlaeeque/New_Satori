@@ -17,6 +17,7 @@
 import { useState, useEffect, useMemo } from "react";
 import {
   Search, X, Briefcase, Users, Clock, AlertCircle, Loader2, FileText, MapPin, ListChecks,
+  ChevronRight, ChevronDown,
 } from "lucide-react";
 import { BenchRadarPanel, SuggestWorkModal } from "./components/BenchRadar.jsx";
 
@@ -67,7 +68,24 @@ const ProjectDetailModal = ({ proj, onClose }) => {
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState(null);
   const [showCompleted, setShowCompleted] = useState(false);
-  useEffect(() => { setShowCompleted(false); }, [proj]);
+  const [expanded, setExpanded] = useState({});   // wpCode -> bool (drill-down open)
+  const [wpTasks, setWpTasks] = useState({});      // wpCode -> {loading, error, tasks}
+  useEffect(() => { setShowCompleted(false); setExpanded({}); setWpTasks({}); }, [proj]);
+
+  // Lazy-load a WP's tasks/sub-tasks the first time it's expanded.
+  const toggleWp = async (wpCode, hasTasks) => {
+    if (!hasTasks) return;
+    const isOpen = !!expanded[wpCode];
+    setExpanded(e => ({ ...e, [wpCode]: !isOpen }));
+    if (isOpen || wpTasks[wpCode]) return; // collapsing, or already fetched
+    setWpTasks(t => ({ ...t, [wpCode]: { loading: true } }));
+    try {
+      const r = await fetchJson(`/api/projects/${encodeURIComponent(proj.code)}/tasks?wp=${encodeURIComponent(wpCode)}`);
+      setWpTasks(t => ({ ...t, [wpCode]: { loading: false, tasks: r.tasks || [] } }));
+    } catch (e) {
+      setWpTasks(t => ({ ...t, [wpCode]: { loading: false, error: String(e.message || e) } }));
+    }
+  };
 
   useEffect(() => {
     if (!proj) { setDetail(null); setError(null); return; }
@@ -183,30 +201,81 @@ const ProjectDetailModal = ({ proj, onClose }) => {
                 <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", marginBottom: 18 }}>
                   {activeWps.slice(0, 60).map((w, i) => {
                     const pill = progressPill(w.progress);
+                    const hasTasks = (w.tasks_total || 0) > 0;
+                    const isOpen = !!expanded[w.code];
+                    const td = wpTasks[w.code];
                     return (
-                      <div key={w.code} style={{
-                        padding: "10px 14px", borderTop: i === 0 ? "none" : `1px solid ${C.border}`,
-                        display: "grid", gridTemplateColumns: "1fr auto", gap: 12, alignItems: "center",
-                      }}>
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontSize: 12.5, fontWeight: 600, color: C.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {w.description || w.code}
-                          </div>
-                          <div style={{ fontSize: 10.5, color: C.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {[w.code, w.owner ? `owner ${w.owner}` : null, w.resource ? `assigned ${personName(w.resource)}` : null, w.tasks_total ? `${w.tasks_done}/${w.tasks_total} tasks` : null, w.end_date ? `due ${w.end_date}` : null].filter(Boolean).join(" · ")}
-                          </div>
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                          {w.overdue && (
-                            <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: "var(--sem-orange-bg)", color: "var(--sem-orange-fg)" }}>Overdue</span>
-                          )}
-                          {(w.performance || "").toLowerCase() === "behind" && (
-                            <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)" }}>Behind</span>
-                          )}
-                          <span style={{ fontSize: 10.5, fontWeight: 700, padding: "2px 9px", borderRadius: 999, background: pill.bg, color: pill.fg }}>
-                            {w.progress || "—"}{w.plan_pct ? ` · ${w.plan_pct}%` : ""}
+                      <div key={w.code} style={{ borderTop: i === 0 ? "none" : `1px solid ${C.border}` }}>
+                        <div onClick={() => toggleWp(w.code, hasTasks)} style={{
+                          padding: "10px 14px",
+                          display: "grid", gridTemplateColumns: "16px 1fr auto", gap: 10, alignItems: "center",
+                          cursor: hasTasks ? "pointer" : "default",
+                          background: isOpen ? C.surfaceAlt : "transparent",
+                        }}
+                          onMouseEnter={e => { if (hasTasks && !isOpen) e.currentTarget.style.background = C.surfaceAlt; }}
+                          onMouseLeave={e => { if (!isOpen) e.currentTarget.style.background = "transparent"; }}>
+                          <span style={{ color: C.textMuted, display: "flex" }}>
+                            {hasTasks ? (isOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />) : null}
                           </span>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontSize: 12.5, fontWeight: 600, color: C.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {w.description || w.code}
+                            </div>
+                            <div style={{ fontSize: 10.5, color: C.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {[w.code, w.owner ? `owner ${w.owner}` : null, w.resource ? `assigned ${personName(w.resource)}` : null, w.tasks_total ? `${w.tasks_done}/${w.tasks_total} tasks` : null, w.end_date ? `due ${w.end_date}` : null].filter(Boolean).join(" · ")}
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                            {w.overdue && (
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: "var(--sem-orange-bg)", color: "var(--sem-orange-fg)" }}>Overdue</span>
+                            )}
+                            {(w.performance || "").toLowerCase() === "behind" && (
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)" }}>Behind</span>
+                            )}
+                            <span style={{ fontSize: 10.5, fontWeight: 700, padding: "2px 9px", borderRadius: 999, background: pill.bg, color: pill.fg }}>
+                              {w.progress || "—"}{w.plan_pct ? ` · ${w.plan_pct}%` : ""}
+                            </span>
+                          </div>
                         </div>
+                        {isOpen && (
+                          <div style={{ padding: "2px 14px 12px 40px", background: C.surfaceAlt }}>
+                            {td?.loading && <div style={{ fontSize: 12, color: C.textMuted, padding: "8px 0", display: "flex", alignItems: "center", gap: 6 }}><Loader2 size={14} className="spin" /> Loading tasks…</div>}
+                            {td?.error && <div style={{ fontSize: 12, color: "var(--sem-danger-fg)", padding: "8px 0" }}>{td.error}</div>}
+                            {td && !td.loading && !td.error && (td.tasks || []).length === 0 && (
+                              <div style={{ fontSize: 12, color: C.textMuted, padding: "8px 0" }}>No task detail recorded for this work package.</div>
+                            )}
+                            {td && !td.loading && (td.tasks || []).length > 0 && (
+                              <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden", background: C.surface }}>
+                                {td.tasks.map((t, ti) => {
+                                  const tp = progressPill(t.progress);
+                                  const isSub = (t.flag || "").toLowerCase() === "sub task";
+                                  return (
+                                    <div key={t.id || ti} style={{
+                                      padding: "7px 12px", borderTop: ti === 0 ? "none" : `1px solid ${C.border}`,
+                                      paddingLeft: isSub ? 30 : 12,
+                                      display: "grid", gridTemplateColumns: "1fr auto", gap: 10, alignItems: "center",
+                                    }}>
+                                      <div style={{ minWidth: 0 }}>
+                                        <div style={{ fontSize: 12, fontWeight: isSub ? 500 : 600, color: C.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                          {isSub ? "↳ " : ""}{t.label || t.code}
+                                        </div>
+                                        <div style={{ fontSize: 10, color: C.textMuted, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                          {[t.flag, t.assignee || null, t.end_date ? `due ${t.end_date}` : null].filter(Boolean).join(" · ")}
+                                        </div>
+                                      </div>
+                                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                                        {(t.performance || "").toLowerCase() === "behind" && (
+                                          <span style={{ fontSize: 9.5, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)" }}>Behind</span>
+                                        )}
+                                        <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: tp.bg, color: tp.fg }}>{t.progress || "—"}</span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
