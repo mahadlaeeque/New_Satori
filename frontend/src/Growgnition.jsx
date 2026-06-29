@@ -9706,6 +9706,24 @@ const AuditLogPage = () => {
     if (a.startsWith("user.")) return COLORS.danger;
     return COLORS.accentDark;
   };
+  // Surface the human-readable bit of the detail JSON — the actual chat prompt
+  // (ai.chat → "message", chat.error → "user_message") shown as plain text;
+  // anything else falls back to the raw JSON. `extras` carries small flags.
+  const parseDetail = (raw) => {
+    if (!raw) return { text: "—", full: "", extras: "" };
+    let obj = null;
+    try { obj = typeof raw === "string" ? JSON.parse(raw) : raw; } catch { return { text: raw, full: raw, extras: "" }; }
+    const msg = obj.message || obj.user_message;
+    if (msg) {
+      const extras = [];
+      if (obj.voice_mode) extras.push("voice");
+      if (obj.source) extras.push(obj.source);
+      if (obj.ctx_injected) extras.push("data-injected");
+      return { text: String(msg), full: String(msg), extras: extras.join(" · ") };
+    }
+    const s = typeof raw === "string" ? raw : JSON.stringify(obj);
+    return { text: s, full: s, extras: "" };
+  };
 
   return (
     <div style={{ height: "100%", overflowY: "auto", padding: 32, boxSizing: "border-box" }}>
@@ -9771,7 +9789,12 @@ const AuditLogPage = () => {
                   <td style={{ padding: "8px 14px", whiteSpace: "nowrap" }}>{e.user_email || "—"}</td>
                   <td style={{ padding: "8px 14px", whiteSpace: "nowrap", fontWeight: 600, color: actionColor(e.action) }}>{e.action}</td>
                   <td style={{ padding: "8px 14px", whiteSpace: "nowrap" }}>{e.resource_type ? `${e.resource_type}#${e.resource_id || ""}` : "—"}</td>
-                  <td style={{ padding: "8px 14px", color: COLORS.textSecondary, fontSize: 12, maxWidth: 360, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={e.detail || ""}>{e.detail || "—"}</td>
+                  <td style={{ padding: "8px 14px", color: COLORS.textSecondary, fontSize: 12, maxWidth: 460 }} title={parseDetail(e.detail).full || e.detail || ""}>
+                    {(() => { const d = parseDetail(e.detail); return (<>
+                      <div style={{ overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", whiteSpace: "normal", wordBreak: "break-word" }}>{d.text}</div>
+                      {d.extras ? <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 2 }}>{d.extras}</div> : null}
+                    </>); })()}
+                  </td>
                   <td style={{ padding: "8px 14px", whiteSpace: "nowrap", color: COLORS.textMuted, fontFamily: "ui-monospace, monospace" }}>{e.ip_address || "—"}</td>
                 </tr>
               ))}

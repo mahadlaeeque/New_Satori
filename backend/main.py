@@ -3816,7 +3816,8 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
     audit_log.record(
         user=user, request=request,
         action="ai.chat", resource_type="ai", resource_id=None,
-        detail={"voice_mode": body.voice_mode, "ai_opt_out": opted_out,
+        detail={"message": (body.message or "").strip()[:2000],
+                "voice_mode": body.voice_mode, "ai_opt_out": opted_out,
                 "history_len": len(body.history), "ctx_injected": bool(bq_context)},
     )
 
