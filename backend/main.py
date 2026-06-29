@@ -2793,12 +2793,14 @@ WRITING CUSTOM run_sql QUERIES:
 - Always fully qualify: `ai-vertex-mahad.Satori_Project.<table>`.
 - For percentages: ROUND(100.0 * SUM(...) / NULLIF(COUNT(*),0), 1).
 - For attendance windows: attendance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL N DAY).
-- For BENCH / allocation status, use the CANONICAL method in the ANALYST COMMON
-  SENSE block — NEVER classify bench on MAX(allocation_percent) alone. A person
-  is on bench ONLY if they have no Flag='Allocated' row with pct>0 in the recent
-  weeks AND no recent timesheet hours; anyone logging hours or with a real
-  assignment is NOT bench. "% allocated" is computed over Flag='Allocated' rows
-  only (the bench project reads 100%, so raw MAX misleads).
+- 🚨 BENCH / UNALLOCATED / "who is free" / "is X on bench" → ALWAYS call the
+  `bench_report` tool. NEVER answer bench from run_sql or your own SQL — the tool
+  is the company's official, consistent method (returns the SAME result every
+  time). Pass `department` for a team (or omit to use the user's own scope),
+  `month` ('2026-04' / 'April 2026') for a specific month, or `employee` for one
+  person. Present the tool's result as-is. (For other allocation/% questions,
+  compute "% allocated" over Flag='Allocated' rows only — the bench project reads
+  100%, so raw MAX misleads — but for BENCH itself, use the tool.)
 - Never sum allocation_percent across rows (double-counts forecast vs actual).
 - ZERO ALLOCATIONS ARE NOT ALLOCATIONS — by DEFAULT exclude them: every
   allocation query gets `AND SAFE_CAST(allocation_percent AS FLOAT64) > 0`
@@ -3188,6 +3190,152 @@ _CHAT_SQL_TOOL = genai.types.Tool(function_declarations=[
         ),
     )
 ])
+
+
+# Deterministic bench/unallocated computation — ONE canonical method so the
+# answer is identical on every call and can't be improvised or talked into
+# flip-flopping. The chat agent MUST call this for any bench / unallocated /
+# "who's free" question instead of writing its own SQL.
+_BENCH_TOOL = genai.types.Tool(function_declarations=[
+    genai.types.FunctionDeclaration(
+        name="bench_report",
+        description=(
+            "Return who is ON BENCH (unallocated) using the company's official method: an active "
+            "employee is on bench ONLY if they have NO active project assignment AND logged NO hours "
+            "in the window. ALWAYS use this for any bench / unallocated / 'who is free' / 'is X on bench' "
+            "question — never compute bench yourself. Pass 'department' for a team report (omit to let the "
+            "user's own scope apply), 'month' like '2026-04' or 'April 2026' for a specific month (omit for "
+            "current status), or 'employee' (a name) to check ONE person. Re-call with the SAME args to "
+            "re-verify — it returns the SAME result every time."
+        ),
+        parameters=genai.types.Schema(
+            type="OBJECT",
+            properties={
+                "department": genai.types.Schema(type="STRING", description="Department/team name, e.g. 'SAP SF & Workday'. Omit to use the user's own department scope."),
+                "month": genai.types.Schema(type="STRING", description="A specific month: '2026-04' or 'April 2026'. Omit for current bench status."),
+                "employee": genai.types.Schema(type="STRING", description="A person's name to check just their bench status, e.g. 'Maisa Eraj'."),
+            },
+        ),
+    )
+])
+
+
+def _clean_emp_name(s: str) -> str:
+    """Strip the 'E-477 - ' / 'I-2067 ' code prefix Resource_Name carries."""
+    import re as _r
+    return _r.sub(r"^[A-Za-z]{1,4}-?\d+\s*-?\s*", "", (s or "").strip()).strip() or (s or "").strip()
+
+
+def _parse_bench_month(s: str):
+    """Parse 'April 2026' / '2026-04' / 'april' / '4' → (year, month) or None."""
+    import re as _r, calendar as _cal
+    s = (s or "").strip().lower()
+    if not s:
+        return None
+    m = _r.match(r"(20\d{2})[-/](\d{1,2})", s)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    yr = _r.search(r"(20\d{2})", s)
+    year = int(yr.group(1)) if yr else datetime.now().year
+    names = {nm.lower(): i for i, nm in enumerate(_cal.month_name) if nm}
+    names.update({nm.lower(): i for i, nm in enumerate(_cal.month_abbr) if nm})
+    for nm, idx in names.items():
+        if _r.search(r"\b" + nm + r"\b", s):
+            return (year, idx)
+    mm = _r.match(r"^(\d{1,2})$", s)
+    if mm and 1 <= int(mm.group(1)) <= 12:
+        return (datetime.now().year, int(mm.group(1)))
+    return None
+
+
+def _bench_report_tool(args: dict, dept_scope: list[str] | None) -> str:
+    """Canonical bench computation shared by all chat bench questions.
+    Bench = active employee with NO Flag='Allocated' (pct>0) row AND zero logged
+    hours in the window. Window = a named month, else the latest ~90 days.
+    Matches the Availability Engine; deterministic across re-runs."""
+    import re as _r, calendar as _cal
+    employee = (args.get("employee") or "").strip()
+    department = (args.get("department") or "").strip()
+    month_in = (args.get("month") or "").strip()
+    A, T, E = _bq_avail("Allocation_Data"), _bq_avail("Timesheet_Data"), _bq_avail("Employee_Data")
+    nz = lambda c: f"LTRIM(REGEXP_REPLACE(CAST({c} AS STRING),r'[^0-9]',''),'0')"
+    tsd = ("COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),"
+           "SAFE.PARSE_DATE('%Y%m%d',CAST(DATE_KEY AS STRING)))")
+
+    month_label, per_a, per_t = "currently", "", ""
+    ym = _parse_bench_month(month_in)
+    if ym:
+        y, m = ym
+        d0 = f"{y:04d}-{m:02d}-01"
+        d1 = f"{y:04d}-{m:02d}-{_cal.monthrange(y, m)[1]:02d}"
+        per_a = f"AND Date BETWEEN '{d0}' AND '{d1}'"
+        per_t = f"AND {tsd} BETWEEN '{d0}' AND '{d1}'"
+        month_label = f"in {_cal.month_name[m]} {y}"
+    else:
+        per_a = (f"AND Date<=CURRENT_DATE() AND Date>=DATE_SUB("
+                 f"(SELECT MAX(Date) FROM {A} WHERE Date<=CURRENT_DATE()),INTERVAL 90 DAY)")
+        per_t = f"AND {tsd}>=DATE_SUB((SELECT MAX({tsd}) FROM {T}),INTERVAL 90 DAY)"
+
+    al = (f"SELECT {nz('employee_id')} emp, "
+          f"COUNTIF(Flag='Allocated' AND SAFE_CAST(allocation_percent AS FLOAT64)>0) ra, "
+          f"MAX(IF(Flag='Allocated',SAFE_CAST(allocation_percent AS FLOAT64),0)) mp "
+          f"FROM {A} WHERE TRUE {per_a} GROUP BY emp")
+    ts = (f"SELECT {nz('EMPLOYEE_CODE')} emp, SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) hrs "
+          f"FROM {T} WHERE TRUE {per_t} GROUP BY emp")
+
+    if employee:
+        toks = [t for t in _r.split(r"\s+", employee.lower()) if t and not _r.fullmatch(r"[a-z]-?\d+", t)]
+        like = " AND ".join(f"LOWER(e.Resource_Name) LIKE '%{t.replace(chr(39), chr(39)*2)}%'" for t in toks) or "TRUE"
+        sql = (f"WITH al AS ({al}), ts AS ({ts}) "
+               f"SELECT CAST(e.Employee_Code AS STRING) code, e.Resource_Name nm, COALESCE(a.ra,0) ra, "
+               f"COALESCE(a.mp,0) mp, COALESCE(t.hrs,0) hrs, "
+               f"CASE WHEN COALESCE(t.hrs,0)>0 OR COALESCE(a.mp,0)>=100 THEN 'allocated' "
+               f"WHEN COALESCE(a.ra,0)=0 THEN 'bench' ELSE 'partial' END status "
+               f"FROM {E} e LEFT JOIN al a ON a.emp={nz('e.Employee_Code')} "
+               f"LEFT JOIN ts t ON t.emp={nz('e.Employee_Code')} "
+               f"WHERE LOWER(e.employee_status)='active' AND {like}")
+        if dept_scope:
+            sql += " AND e.EmployeeHierarchyNode IN (" + ",".join("'" + d.replace("'", "''") + "'" for d in dept_scope) + ")"
+        sql += " LIMIT 25"
+        r = bq_run_query(normalize_bq_project(sql), max_rows=25)
+        if "error" in r:
+            return f"Couldn't compute bench status: {r['error']}"
+        rows = r.get("rows") or []
+        if not rows:
+            return f"No active employee found matching '{employee}'."
+        if len(rows) > 1:
+            cand = "; ".join(f"{_clean_emp_name(x.get('nm'))} ({x.get('code')})" for x in rows[:8])
+            return f"Multiple active people match '{employee}': {cand}. Ask the user which one before answering."
+        x = rows[0]
+        st = (x.get("status") or "").strip()
+        verdict = "ON the bench" if st == "bench" else ("partially allocated (not fully benched)" if st == "partial" else "allocated — NOT on the bench")
+        return (f"{_clean_emp_name(x.get('nm'))} ({x.get('code')}) is {verdict} {month_label}. "
+                f"(active assignments: {x.get('ra')}; peak allocation: {x.get('mp')}%; logged hours: {x.get('hrs')})")
+
+    sql = (f"WITH al AS ({al}), ts AS ({ts}) "
+           f"SELECT CAST(e.Employee_Code AS STRING) code, e.Resource_Name nm "
+           f"FROM {E} e LEFT JOIN al a ON a.emp={nz('e.Employee_Code')} "
+           f"LEFT JOIN ts t ON t.emp={nz('e.Employee_Code')} "
+           f"WHERE LOWER(e.employee_status)='active' "
+           f"AND COALESCE(a.ra,0)=0 AND COALESCE(a.mp,0)<100 AND COALESCE(t.hrs,0)=0")
+    if dept_scope:
+        sql += " AND e.EmployeeHierarchyNode IN (" + ",".join("'" + d.replace("'", "''") + "'" for d in dept_scope) + ")"
+        scope_label = "/".join(dept_scope)
+    elif department:
+        sql += f" AND LOWER(e.EmployeeHierarchyNode)='{department.lower().replace(chr(39), chr(39)*2)}'"
+        scope_label = department
+    else:
+        scope_label = "the company"
+    sql += " ORDER BY e.Employee_Code LIMIT 500"
+    r = bq_run_query(normalize_bq_project(sql), max_rows=500)
+    if "error" in r:
+        return f"Couldn't compute the bench report: {r['error']}"
+    rows = r.get("rows") or []
+    if not rows:
+        return f"No one in {scope_label} is on the bench {month_label} — everyone has an active assignment or logged hours."
+    listing = "\n".join(f"- {_clean_emp_name(x.get('nm'))} ({x.get('code')})" for x in rows)
+    return (f"BENCH — {scope_label}, {month_label}: {len(rows)} on bench "
+            f"(no active assignment AND no logged hours):\n{listing}")
 
 
 # Calendar tools — let the chat/voice agent MANAGE the signed-in user's own
@@ -3999,7 +4147,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                     system_instruction=system_prompt_final,
                     temperature=0.7,
                     max_output_tokens=8192,
-                    tools=[_CHAT_SQL_TOOL, _CALENDAR_TOOL, _GMAIL_TOOL],
+                    tools=[_CHAT_SQL_TOOL, _BENCH_TOOL, _CALENDAR_TOOL, _GMAIL_TOOL],
                     # Cap thinking budget so internal reasoning can't eat
                     # the whole output allocation. 4096 output is enough
                     # for a 25-employee paginated bullet list + summary.
@@ -4242,6 +4390,8 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                     else:
                         print(f"[CHAT] round {round_num+1} — run_sql ({len(sql)} chars)")
                     result_text = _execute_chat_sql(sql, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope, sales_allowed=chat_sales_allowed)
+                elif fc.name == "bench_report":
+                    result_text = _bench_report_tool(args, chat_dept_scope)
                 elif fc.name in _GCAL_AGENT_FNS:
                     result_text = _gcal_agent_action(int(user.get("sub") or 0), fc.name, args)
                 elif fc.name in _GMAIL_AGENT_FNS:
@@ -4511,7 +4661,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                         system_instruction=system_prompt_final,
                         temperature=0.7,
                         max_output_tokens=1024,
-                        tools=[_CHAT_SQL_TOOL, _CALENDAR_TOOL, _GMAIL_TOOL],
+                        tools=[_CHAT_SQL_TOOL, _BENCH_TOOL, _CALENDAR_TOOL, _GMAIL_TOOL],
                     ),
                 )
                 fcs = []
@@ -4590,6 +4740,8 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                         else:
                             print(f"[CHAT-STREAM] round {round_num+1} — run_sql ({len(sql_arg)} chars)")
                         result_text = _execute_chat_sql(sql_arg, plant_scope=chat_plant_scope, dept_scope=chat_dept_scope, sales_allowed=chat_sales_allowed)
+                    elif fc.name == "bench_report":
+                        result_text = _bench_report_tool(args, chat_dept_scope)
                     elif fc.name in _GCAL_AGENT_FNS:
                         result_text = _gcal_agent_action(int(user.get("sub") or 0), fc.name, args)
                     elif fc.name in _GMAIL_AGENT_FNS:
