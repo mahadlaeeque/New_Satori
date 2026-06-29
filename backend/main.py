@@ -2639,6 +2639,15 @@ Every numeric figure (counts, dates, percentages, hours, names of employees, dep
 ### END RULE #0 ###
 ### END RULE #0 ###
 
+### ABSOLUTE RULE #0b - NEVER REVEAL HOW THE DATA IS STORED ###
+NEVER expose ANY internal data-plumbing to the user. This means you must NOT mention, name, hint at, or quote ANY of:
+  • table names (Allocation_Data, Timesheet_Data, Employee_Data, WP_Report, Tasks_Subtasks_Report, Attendance_Data, Project_Master, any Sales_* table, etc.)
+  • column / field names (Flag, allocation_percent, EmployeeHierarchyNode, TICKET_HOURS, Progress_Status, personal_no, etc.)
+  • the dataset, project, or warehouse (e.g. "capability-agent-prod", "Satori_Project", "BigQuery", "data warehouse", "the … table")
+  • SQL of any kind, query text, joins, filter expressions, or phrases like "I ran the query / re-executed the query against …".
+Speak ONLY in plain business language. Say "our allocation and timesheet records" — never "the Allocation_Data table". Say "people with no active project assignment and no recent logged hours" — never "Flag = 'Allocated' and allocation_percent > 0". When you explain your method, describe the BUSINESS logic ("I looked at who had no active assignment and wasn't logging hours"), never the technical implementation. This rule holds EVEN when apologizing, correcting a previous answer, or explaining why a number changed — describe what you checked in business terms, not which table or query. If asked directly "what table / where does this come from", answer "it comes from TMC's workforce data" and nothing more.
+### END RULE #0b ###
+
 ### CONVERSATION CONTEXT — CARRY THE FILTER FORWARD ###
 This is a multi-turn conversation. Whenever the user has established a SUBJECT or FILTER — a specific employee (e.g. "E-210"), a department (e.g. "Qlik"), a project, or a time period — that filter STAYS IN EFFECT for every follow-up turn until the user clearly changes it. Short follow-ups like "make it month-on-month", "now show timesheet", "what about May", "and their attendance" inherit the SAME employee/department/period as the previous turn. NEVER silently widen the scope to all employees or all departments on a follow-up. Concretely: if the prior turns were about employee E-210 and the user then asks "share timesheet for May 2026", you MUST return E-210's timesheet for May 2026 (WHERE the employee = E-210), NOT a company-wide total. If you are ever unsure whether the filter still applies, keep it and say which subject you're answering for. Re-apply the same WHERE clause in your run_sql every turn.
 ### END CONVERSATION CONTEXT ###
@@ -2978,6 +2987,9 @@ Detect the language of the user's MOST RECENT turn and reply ENTIRELY in that sa
   • User speaks English → reply 100% in English.
   • User speaks Urdu or Roman Urdu → reply 100% in Urdu (Roman Urdu pronunciation is fine, e.g. "Mahad ka attendance is mahine 87 percent raha").
 This is dynamic and per-turn: if the user switches language partway through the conversation, you switch WITH them on the very next reply — do not keep speaking the previous language. Never mix two languages in one reply (numbers and proper names aside).
+
+═══ NEVER REVEAL HOW THE DATA IS STORED (NON-NEGOTIABLE) ═══
+NEVER say out loud any table name, column name, dataset/project name, the word "BigQuery"/"data warehouse"/"table"/"query"/"SQL", or any filter expression. Speak only in business terms — "our allocation and timesheet records", not "the Allocation_Data table"; "people with no active assignment who aren't logging hours", not "Flag equals Allocated". This holds even when correcting yourself. If asked where a number comes from, just say "it's from TMC's workforce data".
 
 ═══ TOOLS YOU HAVE ═══
 
@@ -5413,12 +5425,39 @@ DASHBOARD-LEVEL COMMON SENSE:
 - A "sales dashboard" without further input should include: total pipeline,
   coverage ratio, win rate %, top AMs by Q1 achievement, pipeline by city or
   tier — using AMs from Sales_AM_Scorecard.
-- A "bench / utilization dashboard" should join Allocation_Data → Employee_Data
-  and classify each employee by their REAL billable allocation = MAX over
-  Flag='Allocated' rows: Allocated >= 100, Partial 1-99, Bench when they have no
-  Flag='Allocated' row with pct > 0. Do NOT classify on MAX(allocation_percent)
-  across ALL rows — the Bench project '00Q - Qlik Bench' (Flag='Bench') is 100%,
-  so that wrongly marks bench people as fully allocated.
+- 🚨 BENCH / UNALLOCATED — use this EXACT definition every time (it matches the
+  Availability Engine; do NOT improvise, or you'll get a different answer each run).
+  An ACTIVE employee is ON BENCH only when BOTH hold over the recent window:
+    (a) NO real allocation — no Flag='Allocated' row with allocation_percent > 0, AND
+    (b) NO recent logged hours — SUM(TICKET_HOURS) = 0.
+  Status bands: 'allocated' = recent hours > 0 OR real allocation max_pct >= 100;
+  'bench' = real_alloc_rows = 0 AND hours = 0; 'partial' = otherwise.
+  ⚠️ NEVER classify bench from allocation ALONE — a person can sit on the bench
+  project yet be actively logging hours; listing them as benched is the #1 wrong
+  answer here. Timesheet wins for "is X on bench". The Bench project (Flag='Bench')
+  shows 100% but means UNALLOCATED, so never use raw MAX(allocation_percent).
+  Canonical SQL (let norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0')):
+    WITH al AS (SELECT norm(employee_id) emp,
+                       MAX(IF(Flag='Allocated',SAFE_CAST(allocation_percent AS FLOAT64),0)) max_pct,
+                       COUNTIF(Flag='Allocated' AND SAFE_CAST(allocation_percent AS FLOAT64)>0) real_rows
+                FROM Allocation_Data
+                WHERE Date<=CURRENT_DATE() AND Date>=DATE_SUB((SELECT MAX(Date) FROM Allocation_Data WHERE Date<=CURRENT_DATE()),INTERVAL 90 DAY)
+                GROUP BY emp),
+         ts AS (SELECT norm(EMPLOYEE_CODE) emp, SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) hrs
+                FROM Timesheet_Data
+                WHERE COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),SAFE.PARSE_DATE('%Y%m%d',CAST(DATE_KEY AS STRING)))
+                      >= DATE_SUB((SELECT MAX(COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),SAFE.PARSE_DATE('%Y%m%d',CAST(DATE_KEY AS STRING)))) FROM Timesheet_Data),INTERVAL 90 DAY)
+                GROUP BY emp)
+    SELECT e.Employee_Code, e.Resource_Name
+    FROM Employee_Data e
+    LEFT JOIN al a ON a.emp=norm(e.Employee_Code)
+    LEFT JOIN ts t ON t.emp=norm(e.Employee_Code)
+    WHERE LOWER(e.employee_status)='active' AND <dept filter>
+      AND COALESCE(t.hrs,0)=0 AND COALESCE(a.max_pct,0)<100 AND COALESCE(a.real_rows,0)=0
+  For a SPECIFIC PAST MONTH ("bench in April 2026"): bench = NO Flag='Allocated'
+  pct>0 row in THAT month's allocation weeks AND NO timesheet hours logged in THAT
+  month — same two-condition test, windowed to the month. Always apply the
+  IDENTICAL method so re-runs give the SAME list.
 
 ALLOCATION DATA — read before writing any allocation query:
 - Allocation_Data is WEEKLY snapshots (many rows per employee/project; Year/Month/
@@ -5528,12 +5567,12 @@ ANALYST_COMMON_SENSE_COMPACT = """ANALYST COMMON SENSE (apply silently):
 - Attendance metrics → working days only: AND is_weekend=0 AND is_holiday=0. Never count weekends/holidays as absent.
 - Working-day COUNT for a period = company calendar from Attendance_Data (majority vote per date: a date is a working day when most rows have is_weekend=0 AND is_holiday=0) — same number for every employee; NEVER count weekdays arithmetically or from one employee's own rows.
 - Headcount → COUNT(DISTINCT Employee_Code) on Employee_Data (never COUNT(*) on Attendance_Data).
-- Today is May 2026. "this month"=May 2026; "last month"=April 2026; "Q1"=Jan-Mar 2026.
+- Resolve "today"/"this month"/"last month"/"Q1" against the CURRENT DATE provided in the prompt context — NEVER assume a fixed month. In SQL use CURRENT_DATE()/DATE_TRUNC/DATE_SUB, never a hardcoded month.
 - Name searches → fuzzy: LOWER(employee_name) LIKE '%mahad%'. If MULTIPLE employees match a name (namesakes), do NOT guess — list them (name + department) and ask which one before answering; remember the choice for follow-ups.
 - STRING numerics (need SAFE_CAST AS FLOAT64 before AVG/SUM/`* 100`): allocation_percent, TICKET_HOURS, Open_Pipeline, Q1_ACH, col_2026_Target, Q1_Visits, Coverage_Ratio, Hist_Win_Rate, Win_Rate_by.
 - Genuinely numeric (NEVER cast/REPLACE): Open_Deals (INT64), is_* (INT64 0/1).
 - Timesheet_Data.DATE_KEY: type varies — DATE on capability-agent-prod, INT64 YYYYMMDD elsewhere. ALWAYS filter with `COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE), SAFE.PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))) >= <cutoff>`. Plain `PARSE_DATE('%Y%m%d', CAST(DATE_KEY AS STRING))` errors when DATE_KEY is DATE (CAST gives ISO "2025-07-01" which `%Y%m%d` rejects).
-- Allocation_Data.Date: type unreliable across environments — DON'T filter on it. Aggregate MAX(allocation_percent) per employee across all rows; the latest peak still wins for Bench / Partial / Allocated classification.
+- BENCH: an active employee is ON BENCH only if they have NO Flag='Allocated' row with allocation_percent>0 in the recent weeks AND logged NO recent Timesheet hours. Someone logging hours recently is NOT bench even if the allocation shows the bench project. Classify allocation over Flag='Allocated' only (never raw MAX across all rows — the Bench project reads 100%), windowed Date<=CURRENT_DATE() back ~90 days. Timesheet wins for "is X on bench".
 - "Utilization" / "hours worked" → Timesheet_Data, not Allocation_Data. SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) grouped by EMPLOYEE_CODE, joined to Employee_Data on norm(EMPLOYEE_CODE)=norm(employee_code) (NOT TICKET_USER_ID). Optional 90-day window via the COALESCE pattern above.
 - TMC has roughly 1,190 active employees. If your headcount is in the tens of thousands you counted attendance rows, not people.
 - Apply defaults silently; only ask when the answer materially depends on a choice you can't infer."""
@@ -5852,6 +5891,7 @@ def voice_session(request: Request, user: dict = Depends(get_current_user)):
     # compact common-sense block (active-only, working days, distinct
     # employees, etc.) — it's small enough to fit alongside the tool defs.
     system_instruction = (
+        _build_date_context() + "\n\n" +
         ANALYST_COMMON_SENSE_COMPACT + "\n\n" + VOICE_SYSTEM_PROMPT_EN +
         _user_context_addon(user)
     )
