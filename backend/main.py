@@ -2748,7 +2748,7 @@ WORKFORCE TABLES
 2. `Attendance_Data` — Daily attendance per employee. Cols: attendance_date (DATE), personal_no (STRING, 'E-902' format — JOIN to Employee_Data on this), employee_id (INT64 sequence, NOT a JOIN key), employee_name, employee_email, checkin_time (STRING — FULL datetime '2026-05-25 09:49:26.772000', NOT 'HH:MM:SS'; clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time))), checkout_time (STRING — same format), attendance_status_text ('Present'/'Absent'/'On Leave'/'Holiday'/'Weekend'/'Missing Punch'/'Remote Work' + 'Submitted …' variants; no 'Late' value — a late arrival = check-in after 09:30: TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)) > TIME '09:30:00'), is_present (0/1), is_absent (0/1), is_on_leave (0/1), is_remote (0/1), is_holiday (0/1), is_weekend (0/1), leave_type_name, checkin_is_permitted_location / checkout_is_permitted_location (STRING '1'/'0' — was the punch from an approved location: IF(SAFE_CAST(checkin_is_permitted_location AS INT64)=1,'Permitted','Not Permitted') AS PunchInLocationStatus; same for checkout).
 3. `Allocation_Data` — Weekly project allocation (one row per employee × project × week). Cols: project_id (**JOIN to Project_Master.Project_Code for the project NAME**), employee_id (STRING "E-1234" — JOIN to Employee_Data.employee_code, digit-normalised), allocation_percent (0-100 — SAFE_CAST AS FLOAT64), emp_competency, Flag ('Allocated' = real billable project / 'Bench' = bench project), Forecast_Flag (0 = ACTUAL, 1 = forecast — for CURRENT state ALWAYS filter Forecast_Flag=0), Date (DATE), Week/Year/Month. **Bench logic:** an employee is ON BENCH when they have NO Flag='Allocated' row with allocation_percent>0 in the recent actual weeks — a bench-project row can show allocation_percent=100 yet means they're benched, so NEVER classify on raw allocation_percent alone. Allocated = has a Flag='Allocated' row ≥100%; Partial = 1-99%.
 4. `Timesheet_Data` — Logged ticket/project hours. Cols: EMPLOYEE_CODE (the 'E-1571' code — **JOIN to Employee_Data.employee_code, digit-normalised; this is the employee link, NOT TICKET_USER_ID** which is a different internal numeric id), TICKET_USER_ID (internal id — do NOT join on it), TICKET_PROJECT_CODE (**JOIN to Project_Master.Project_Code for the project name**), TICKET_PROJECT_LABEL, TICKET_HOURS (FLOAT64), TICKET_STATUS, DATE_KEY (DATE), TICKET_DESCRIPTION, TICKET_SUBJECT.
-5. `Project_Master` — Project reference (everyone can see it). Cols: Project_Code (the key that allocation.project_id AND timesheet.TICKET_PROJECT_CODE join to), Project_Name (e.g. '1245 - TMC Project Matrix'), Client_Name, Project_Type, Project_Status, Competency, PM_ID (project manager's employee_code), Project_Start_Date, Project_EndDate, Location (STRING — the PROJECT's delivery location/city: Karachi, Lahore, Islamabad, International, …; COALESCE empties to 'Unspecified' when grouping). ALWAYS join here to report project NAMES rather than bare codes. "Projects in <city>" / "projects by location" = filter/group Project_Master.Location — do NOT confuse it with the EMPLOYEE's city (Employee_Data.EmployeeLocation) or the sales-account Location: a Lahore-based employee can be allocated to a Karachi project.
+5. `Project_Master` — Project reference (everyone can see it). Cols: Project_Code (the key that allocation.project_id AND timesheet.TICKET_PROJECT_CODE join to), Project_Name (e.g. '1245 - TMC Project Matrix'), Client_Name, Project_Type, Project_Status, Competency, PM_ID (project manager's employee_code), Project_Start_Date, Project_EndDate, Location (STRING — the PROJECT's delivery location/city: Karachi, Lahore, Islamabad, International, …; COALESCE empties to 'Unspecified' when grouping). ALWAYS join here to report project NAMES rather than bare codes. "Projects in <city>" / "projects by location" = filter/group Project_Master.Location — do NOT confuse it with the EMPLOYEE's city (Employee_Data.EmployeeLocation) or the sales-account Location: a Lahore-based employee can be allocated to a Karachi project. ⚠️ A project belongs to a PRACTICE / COMPETENCY via `Project_Master.Competency` (real values: 'SAP SF', 'Qlik', 'PMO', 'SAP AMS', 'SAP HANA', 'SAP BI', 'Digital Transformation', 'Finance', 'Sales', etc.). "How many projects are active in <practice>" / "projects in the X practice" = COUNT(*) FROM Project_Master WHERE Competency = '<practice>' AND Project_Status='Active' (e.g. 'SAP SF' → 10 active). The practice/competency name is OFTEN DIFFERENT from the employee DEPARTMENT name (EmployeeHierarchyNode) — e.g. projects use Competency='SAP SF' while employees sit in department 'SAP SF & Workday'. For "projects in a practice", filter Project_Master.Competency; do NOT use EmployeeHierarchyNode or allocation unless the user explicitly asks what a department's PEOPLE are staffed on.
 6. `WP_Report` — the PF work-package master/detail report (~490k rows = DELIVERABLE LINES, ~10,170 distinct WPs). Key cols: WP_CODE (the WP id '1105-B1-1.3-PMO-001'; its LEADING NUMBER is the project: REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Master.Project_Code AS STRING) — PROJECT_ID is an INTERNAL id that joins NOTHING, never use it), WP_DESCRIPTION, WP_OWNER_NAME, WP_RESOURCE_ASSIGNED, BUILD, Deliverables, DELIVERABLE_TYPE, the WP_*_DATE columns (DATE; if STRING parse '%d-%b-%Y'), PLAN (planned progress % 0-100), WP_PORTAL_STATUS, Progress_Status (Completed/In-Progress/Future Task/Upcoming/Initiation Pending/Backlog), Performance_Status. ⚠️ ACTUAL is '?' in the feed — UNUSABLE, never report it; actual effort = Timesheet hours. ⚠️ 'How many WPs' = COUNT(DISTINCT WP_CODE), never COUNT(*). ⚠️ JOIN to Timesheet: TICKET_WP_ID = WP_CODE + a numeric task-id suffix — NEVER join them directly (0 matches); use UPPER(TRIM(w.WP_CODE)) = REGEXP_REPLACE(UPPER(TRIM(t.TICKET_WP_ID)), r'(-[0-9]{4,})+$', '') (verified 885/886).
 7. `Tasks_Subtasks_Report` — the per-TASK / per-SUB-TASK breakdown UNDER each work package (~10M EXPLODED rows, ~53.6k distinct tasks/sub-tasks across ~9,278 WPs). Key cols: T_ST_FLAG ('Task' / 'Sub Task'), WP_CODE (the parent WP — JOIN to WP_Report.WP_CODE; the project = its LEADING NUMBER: REGEXP_EXTRACT(WP_CODE, r'^([0-9]+)') = CAST(Project_Master.Project_Code AS STRING)), TASK_SUBTASK_ID (UNIQUE per task/sub-task, format 'WP_CODE/<id>' — ⚠️ 'how many tasks/sub-tasks' = COUNT(DISTINCT TASK_SUBTASK_ID), NEVER COUNT(*)), PARENT_ID (a sub-task's parent task id), Task_Sub_Task_Code ('2.7.1'), TASK_LABEL / SUBTASK_LABEL, TASK_USER_ASSIGN ('Name-E-938' — the assignee's employee code is the suffix; norm the trailing digits → Employee_Code), PLAN (STRING progress % — SAFE_CAST AS INT64), Progress_Status (Completed/In-Progress/Future Task/Upcoming/Initiation Pending/Backlog/Others), Performance_Status (On-Time/Behind/…), TASK_PORTAL_STATUS, dates START_DATE/END_DATE/INITIATION_DATE/LAST_WORKDONE_DATE/TASK_LAST_STATUS_DATE (STRING — parse SAFE.PARSE_DATE('%d-%b-%Y', col)). ⚠️ ACTUAL is '?' — UNUSABLE. ⚠️ Always filter `TASK_SUBTASK_ID IS NOT NULL` to drop empty placeholder rows. Tasks roll up under WPs (WP_CODE), WPs roll up under projects (leading number).
 
@@ -3282,6 +3282,8 @@ def _bench_report_tool(args: dict, dept_scope: list[str] | None) -> str:
           f"FROM {A} WHERE TRUE {per_a} GROUP BY emp")
     ts = (f"SELECT {nz('EMPLOYEE_CODE')} emp, SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) hrs "
           f"FROM {T} WHERE TRUE {per_t} GROUP BY emp")
+    cmp = (f"SELECT {nz('employee_id')} emp, ANY_VALUE(emp_competency) comp "
+           f"FROM {A} WHERE emp_competency IS NOT NULL AND TRIM(emp_competency)!='' GROUP BY emp")
 
     if employee:
         toks = [t for t in _r.split(r"\s+", employee.lower()) if t and not _r.fullmatch(r"[a-z]-?\d+", t)]
@@ -3312,10 +3314,12 @@ def _bench_report_tool(args: dict, dept_scope: list[str] | None) -> str:
         return (f"{_clean_emp_name(x.get('nm'))} ({x.get('code')}) is {verdict} {month_label}. "
                 f"(active assignments: {x.get('ra')}; peak allocation: {x.get('mp')}%; logged hours: {x.get('hrs')})")
 
-    sql = (f"WITH al AS ({al}), ts AS ({ts}) "
-           f"SELECT CAST(e.Employee_Code AS STRING) code, e.Resource_Name nm "
+    sql = (f"WITH al AS ({al}), ts AS ({ts}), cmp AS ({cmp}) "
+           f"SELECT CAST(e.Employee_Code AS STRING) code, e.Resource_Name nm, "
+           f"COALESCE(NULLIF(TRIM(e.EmployeePosition),''),'') pos, COALESCE(c.comp,'') comp "
            f"FROM {E} e LEFT JOIN al a ON a.emp={nz('e.Employee_Code')} "
            f"LEFT JOIN ts t ON t.emp={nz('e.Employee_Code')} "
+           f"LEFT JOIN cmp c ON c.emp={nz('e.Employee_Code')} "
            f"WHERE LOWER(e.employee_status)='active' "
            f"AND COALESCE(a.ra,0)=0 AND COALESCE(a.mp,0)<100 AND COALESCE(t.hrs,0)=0")
     if dept_scope:
@@ -3333,7 +3337,11 @@ def _bench_report_tool(args: dict, dept_scope: list[str] | None) -> str:
     rows = r.get("rows") or []
     if not rows:
         return f"No one in {scope_label} is on the bench {month_label} — everyone has an active assignment or logged hours."
-    listing = "\n".join(f"- {_clean_emp_name(x.get('nm'))} ({x.get('code')})" for x in rows)
+    def _bench_line(x):
+        nm = _clean_emp_name(x.get("nm"))
+        extra = [p for p in [(x.get("pos") or "").strip(), (x.get("comp") or "").strip()] if p]
+        return f"- {nm} ({x.get('code')})" + (f" — {' · '.join(extra)}" if extra else "")
+    listing = "\n".join(_bench_line(x) for x in rows)
     return (f"BENCH — {scope_label}, {month_label}: {len(rows)} on bench "
             f"(no active assignment AND no logged hours):\n{listing}")
 
@@ -3982,13 +3990,8 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
     elif chat_dept_scope is not None:
         print(f"[BQ] Skipping pre-injected context for dept-scoped user (scope={chat_dept_scope}); run_sql is enforced.")
 
-    audit_log.record(
-        user=user, request=request,
-        action="ai.chat", resource_type="ai", resource_id=None,
-        detail={"message": (body.message or "").strip()[:2000],
-                "voice_mode": body.voice_mode, "ai_opt_out": opted_out,
-                "history_len": len(body.history), "ctx_injected": bool(bq_context)},
-    )
+    # (The ai.chat audit row is written in _finalize_chat — once per turn, with
+    # both the user's message AND Satori's reply.)
 
     # Build conversation history for Gemini — using the PII-redacted history
     # so prior turns don't leak personal data backward through the same chat.
@@ -4157,7 +4160,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                              "Try rephrasing the question.")
                 else:
                     reply = "I wasn't able to generate a response. Please try again."
-            return {"reply": reply}
+            return _finalize_chat(body, reply, user)
 
         # Text chat: allow up to 5 rounds of run_sql tool calls before finalizing
         # (extra rounds let the model retry with relaxed filters when first SQL returns 0 rows)
@@ -4483,7 +4486,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                 _em_text = (emergency_resp.text or "").strip()
                 if _em_text:
                     print(f"[CHAT] post-MAX_ROUNDS emergency succeeded ({len(_em_text)} chars)")
-                    return {"reply": _em_text}
+                    return _finalize_chat(body, _em_text, user)
             except Exception as _eme2:
                 print(f"[CHAT] post-MAX_ROUNDS emergency raised: {_eme2}")
             # Post-MAX_ROUNDS empty - surface the last successful tool result
@@ -5090,6 +5093,20 @@ def _finalize_chat(body, reply, user):
     except Exception as _e:
         import traceback as _tb
         print(f"[chat] _finalize_chat save failed (continuing): {_e}\n{_tb.format_exc()}")
+    # Audit the turn with BOTH the user's prompt AND Satori's reply so the audit
+    # log shows the full exchange (one row per turn) — makes it easy to see where
+    # an answer went wrong. Logged here (the single terminal save point) instead
+    # of pre-generation, so the reply is available.
+    try:
+        audit_log.record(
+            user=user, action="ai.chat", resource_type="conversation", resource_id=new_conv_id,
+            detail={"message": (getattr(body, "message", "") or "").strip()[:2000],
+                    "reply": (reply or "").strip()[:6000],
+                    "voice_mode": getattr(body, "voice_mode", False),
+                    "history_len": len(getattr(body, "history", []) or [])},
+        )
+    except Exception:
+        pass
     return {"reply": reply, "conversation_id": new_conv_id, "response_id": response_id}
 
 

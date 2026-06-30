@@ -9706,23 +9706,24 @@ const AuditLogPage = () => {
     if (a.startsWith("user.")) return COLORS.danger;
     return COLORS.accentDark;
   };
-  // Surface the human-readable bit of the detail JSON — the actual chat prompt
-  // (ai.chat → "message", chat.error → "user_message") shown as plain text;
-  // anything else falls back to the raw JSON. `extras` carries small flags.
+  // Surface the human-readable bits of the detail JSON — the user's prompt
+  // (ai.chat → "message", chat.error → "user_message") AND Satori's reply
+  // (ai.chat → "reply"); anything else falls back to the raw JSON.
   const parseDetail = (raw) => {
-    if (!raw) return { text: "—", full: "", extras: "" };
+    if (!raw) return { msg: "", reply: "", fallback: "—", extras: "", full: "" };
     let obj = null;
-    try { obj = typeof raw === "string" ? JSON.parse(raw) : raw; } catch { return { text: raw, full: raw, extras: "" }; }
-    const msg = obj.message || obj.user_message;
-    if (msg) {
+    try { obj = typeof raw === "string" ? JSON.parse(raw) : raw; } catch { return { msg: "", reply: "", fallback: raw, extras: "", full: raw }; }
+    const msg = String(obj.message || obj.user_message || "");
+    const reply = String(obj.reply || "");
+    if (msg || reply) {
       const extras = [];
       if (obj.voice_mode) extras.push("voice");
       if (obj.source) extras.push(obj.source);
-      if (obj.ctx_injected) extras.push("data-injected");
-      return { text: String(msg), full: String(msg), extras: extras.join(" · ") };
+      return { msg, reply, fallback: "", extras: extras.join(" · "),
+               full: (msg ? "User: " + msg : "") + (reply ? "\n\nSatori: " + reply : "") };
     }
     const s = typeof raw === "string" ? raw : JSON.stringify(obj);
-    return { text: s, full: s, extras: "" };
+    return { msg: "", reply: "", fallback: s, extras: "", full: s };
   };
 
   return (
@@ -9789,11 +9790,17 @@ const AuditLogPage = () => {
                   <td style={{ padding: "8px 14px", whiteSpace: "nowrap" }}>{e.user_email || "—"}</td>
                   <td style={{ padding: "8px 14px", whiteSpace: "nowrap", fontWeight: 600, color: actionColor(e.action) }}>{e.action}</td>
                   <td style={{ padding: "8px 14px", whiteSpace: "nowrap" }}>{e.resource_type ? `${e.resource_type}#${e.resource_id || ""}` : "—"}</td>
-                  <td style={{ padding: "8px 14px", color: COLORS.textSecondary, fontSize: 12, maxWidth: 460 }} title={parseDetail(e.detail).full || e.detail || ""}>
-                    {(() => { const d = parseDetail(e.detail); return (<>
-                      <div style={{ overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", whiteSpace: "normal", wordBreak: "break-word" }}>{d.text}</div>
-                      {d.extras ? <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 2 }}>{d.extras}</div> : null}
-                    </>); })()}
+                  <td style={{ padding: "8px 14px", color: COLORS.textSecondary, fontSize: 12, maxWidth: 520, minWidth: 320 }} title={parseDetail(e.detail).full || e.detail || ""}>
+                    {(() => {
+                      const d = parseDetail(e.detail);
+                      const clamp = { overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 4, WebkitBoxOrient: "vertical", whiteSpace: "normal", wordBreak: "break-word" };
+                      if (!d.msg && !d.reply) return (<div style={clamp}>{d.fallback}</div>);
+                      return (<div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        {d.msg ? <div style={clamp}><span style={{ fontWeight: 700, color: COLORS.textMuted }}>User: </span>{d.msg}</div> : null}
+                        {d.reply ? <div style={{ ...clamp, paddingTop: 4, borderTop: d.msg ? `1px solid ${COLORS.border}` : "none" }}><span style={{ fontWeight: 700, color: COLORS.accent }}>Satori: </span>{d.reply}</div> : null}
+                        {d.extras ? <div style={{ fontSize: 10, color: COLORS.textMuted }}>{d.extras}</div> : null}
+                      </div>);
+                    })()}
                   </td>
                   <td style={{ padding: "8px 14px", whiteSpace: "nowrap", color: COLORS.textMuted, fontFamily: "ui-monospace, monospace" }}>{e.ip_address || "—"}</td>
                 </tr>
