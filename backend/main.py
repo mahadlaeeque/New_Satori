@@ -2794,13 +2794,20 @@ WRITING CUSTOM run_sql QUERIES:
 - For percentages: ROUND(100.0 * SUM(...) / NULLIF(COUNT(*),0), 1).
 - For attendance windows: attendance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL N DAY).
 - 🚨 BENCH / UNALLOCATED / "who is free" / "is X on bench" → ALWAYS call the
-  `bench_report` tool. NEVER answer bench from run_sql or your own SQL — the tool
-  is the company's official, consistent method (returns the SAME result every
-  time). Pass `department` for a team (or omit to use the user's own scope),
-  `month` ('2026-04' / 'April 2026') for a specific month, or `employee` for one
-  person. Present the tool's result as-is. (For other allocation/% questions,
-  compute "% allocated" over Flag='Allocated' rows only — the bench project reads
-  100%, so raw MAX misleads — but for BENCH itself, use the tool.)
+  `bench_report` tool. NEVER answer bench from run_sql or your own SQL.
+  ⚠️ FIRST: if the user did NOT specify a month or time period, ASK them which
+  month/period they mean (e.g. "Which month — this month, a past month, or an
+  upcoming one?") and WAIT for their answer before calling the tool. Do not
+  assume "currently".
+  The tool is time-aware: for a PAST/CURRENT month, someone who logged hours OR
+  had an assignment is NOT on bench (logging hours = working, even on a project
+  not formally assigned to them); for a FUTURE month it's allocation-only (not
+  allocated ⇒ on bench). Pass `department` (or omit to use the user's own scope),
+  `month`, and/or `employee` (one person). Present the tool's result as-is,
+  INCLUDING any data-quality note it returns about people logging hours on
+  unassigned projects (advise formally assigning those projects). (For other
+  allocation/% questions, compute "% allocated" over Flag='Allocated' rows only —
+  the bench project reads 100%, so raw MAX misleads — but for BENCH itself, use the tool.)
 - Never sum allocation_percent across rows (double-counts forecast vs actual).
 - ZERO ALLOCATIONS ARE NOT ALLOCATIONS — by DEFAULT exclude them: every
   allocation query gets `AND SAFE_CAST(allocation_percent AS FLOAT64) > 0`
@@ -3200,13 +3207,16 @@ _BENCH_TOOL = genai.types.Tool(function_declarations=[
     genai.types.FunctionDeclaration(
         name="bench_report",
         description=(
-            "Return who is ON BENCH (unallocated) using the company's official method: an active "
-            "employee is on bench ONLY if they have NO active project assignment AND logged NO hours "
-            "in the window. ALWAYS use this for any bench / unallocated / 'who is free' / 'is X on bench' "
-            "question — never compute bench yourself. Pass 'department' for a team report (omit to let the "
-            "user's own scope apply), 'month' like '2026-04' or 'April 2026' for a specific month (omit for "
-            "current status), or 'employee' (a name) to check ONE person. Re-call with the SAME args to "
-            "re-verify — it returns the SAME result every time."
+            "Return who is ON BENCH using the company's official, time-aware method. ALWAYS use this for any "
+            "bench / unallocated / 'who is free' / 'is X on bench' question — never compute bench yourself. "
+            "⚠️ A 'month' is REQUIRED: if the user did NOT give a month or time period, ASK them which "
+            "month/period they mean BEFORE calling this — do not call it without a month. "
+            "PAST/CURRENT month: a person who logged ANY hours OR had a real assignment is NOT on bench "
+            "(logging hours = working, even on an unassigned project). FUTURE month: judged by allocation only "
+            "(not allocated ⇒ on bench). The result may include a data-quality note about people working on "
+            "projects not formally assigned to them — relay it. Pass 'department' for a team (omit to use the "
+            "user's own scope), 'month' ('2026-04' / 'April 2026'), and/or 'employee' (a name) for one person. "
+            "Re-call with the SAME args to re-verify — it returns the SAME result every time."
         ),
         parameters=genai.types.Schema(
             type="OBJECT",
@@ -3249,11 +3259,18 @@ def _parse_bench_month(s: str):
 
 
 def _bench_report_tool(args: dict, dept_scope: list[str] | None) -> str:
-    """Canonical bench computation shared by all chat bench questions.
-    Bench = active employee with NO Flag='Allocated' (pct>0) row AND zero logged
-    hours in the window. Window = a named month, else the latest ~90 days.
-    Matches the Availability Engine; deterministic across re-runs."""
+    """TIME-AWARE bench computation. A period is required (the agent asks first
+    if the user didn't give one).
+      • PAST / CURRENT period — actuals rule: an employee is ACTIVE (not bench)
+        if they logged ANY timesheet hours OR had a real Flag='Allocated' (pct>0)
+        row in the period. Logging hours = working, even if that project was
+        never formally allocated to them. Only "no hours AND no assignment" =
+        bench. People active ONLY via logged hours on an UNassigned project are
+        flagged so the agent can advise formally assigning the project.
+      • FUTURE period — plan rule: no timesheet exists yet, so judge purely by
+        allocation; not allocated in those weeks ⇒ will be on bench."""
     import re as _r, calendar as _cal
+    from datetime import date as _date
     employee = (args.get("employee") or "").strip()
     department = (args.get("department") or "").strip()
     month_in = (args.get("month") or "").strip()
@@ -3262,37 +3279,42 @@ def _bench_report_tool(args: dict, dept_scope: list[str] | None) -> str:
     tsd = ("COALESCE(SAFE_CAST(CAST(DATE_KEY AS STRING) AS DATE),"
            "SAFE.PARSE_DATE('%Y%m%d',CAST(DATE_KEY AS STRING)))")
 
-    month_label, per_a, per_t = "currently", "", ""
     ym = _parse_bench_month(month_in)
     if ym:
         y, m = ym
-        d0 = f"{y:04d}-{m:02d}-01"
-        d1 = f"{y:04d}-{m:02d}-{_cal.monthrange(y, m)[1]:02d}"
-        per_a = f"AND Date BETWEEN '{d0}' AND '{d1}'"
-        per_t = f"AND {tsd} BETWEEN '{d0}' AND '{d1}'"
-        month_label = f"in {_cal.month_name[m]} {y}"
     else:
-        per_a = (f"AND Date<=CURRENT_DATE() AND Date>=DATE_SUB("
-                 f"(SELECT MAX(Date) FROM {A} WHERE Date<=CURRENT_DATE()),INTERVAL 90 DAY)")
-        per_t = f"AND {tsd}>=DATE_SUB((SELECT MAX({tsd}) FROM {T}),INTERVAL 90 DAY)"
+        # Fallback (the agent is instructed to ASK for a period first): current month.
+        _t = _date.today(); y, m = _t.year, _t.month
+    d0 = f"{y:04d}-{m:02d}-01"
+    d1 = f"{y:04d}-{m:02d}-{_cal.monthrange(y, m)[1]:02d}"
+    month_label = f"in {_cal.month_name[m]} {y}"
+    is_future = _date(y, m, 1) > _date.today()
+    per_a = f"AND Date BETWEEN '{d0}' AND '{d1}'"
+    per_t = f"AND {tsd} BETWEEN '{d0}' AND '{d1}'"
 
     al = (f"SELECT {nz('employee_id')} emp, "
-          f"COUNTIF(Flag='Allocated' AND SAFE_CAST(allocation_percent AS FLOAT64)>0) ra, "
-          f"MAX(IF(Flag='Allocated',SAFE_CAST(allocation_percent AS FLOAT64),0)) mp "
+          f"COUNTIF(Flag='Allocated' AND SAFE_CAST(allocation_percent AS FLOAT64)>0) ra "
           f"FROM {A} WHERE TRUE {per_a} GROUP BY emp")
     ts = (f"SELECT {nz('EMPLOYEE_CODE')} emp, SUM(SAFE_CAST(TICKET_HOURS AS FLOAT64)) hrs "
           f"FROM {T} WHERE TRUE {per_t} GROUP BY emp")
     cmp = (f"SELECT {nz('employee_id')} emp, ANY_VALUE(emp_competency) comp "
            f"FROM {A} WHERE emp_competency IS NOT NULL AND TRIM(emp_competency)!='' GROUP BY emp")
 
+    # status: future = allocation only; past/current = hours OR allocation,
+    # with 'active_unassigned' = working via logged hours but no real assignment.
+    if is_future:
+        status_expr = "CASE WHEN COALESCE(a.ra,0)>0 THEN 'allocated' ELSE 'bench' END"
+    else:
+        status_expr = ("CASE WHEN COALESCE(t.hrs,0)>0 AND COALESCE(a.ra,0)=0 THEN 'active_unassigned' "
+                       "WHEN COALESCE(t.hrs,0)>0 OR COALESCE(a.ra,0)>0 THEN 'allocated' "
+                       "ELSE 'bench' END")
+
     if employee:
         toks = [t for t in _r.split(r"\s+", employee.lower()) if t and not _r.fullmatch(r"[a-z]-?\d+", t)]
         like = " AND ".join(f"LOWER(e.Resource_Name) LIKE '%{t.replace(chr(39), chr(39)*2)}%'" for t in toks) or "TRUE"
         sql = (f"WITH al AS ({al}), ts AS ({ts}) "
                f"SELECT CAST(e.Employee_Code AS STRING) code, e.Resource_Name nm, COALESCE(a.ra,0) ra, "
-               f"COALESCE(a.mp,0) mp, COALESCE(t.hrs,0) hrs, "
-               f"CASE WHEN COALESCE(t.hrs,0)>0 OR COALESCE(a.mp,0)>=100 THEN 'allocated' "
-               f"WHEN COALESCE(a.ra,0)=0 THEN 'bench' ELSE 'partial' END status "
+               f"COALESCE(t.hrs,0) hrs, {status_expr} status "
                f"FROM {E} e LEFT JOIN al a ON a.emp={nz('e.Employee_Code')} "
                f"LEFT JOIN ts t ON t.emp={nz('e.Employee_Code')} "
                f"WHERE LOWER(e.employee_status)='active' AND {like}")
@@ -3308,20 +3330,28 @@ def _bench_report_tool(args: dict, dept_scope: list[str] | None) -> str:
         if len(rows) > 1:
             cand = "; ".join(f"{_clean_emp_name(x.get('nm'))} ({x.get('code')})" for x in rows[:8])
             return f"Multiple active people match '{employee}': {cand}. Ask the user which one before answering."
-        x = rows[0]
-        st = (x.get("status") or "").strip()
-        verdict = "ON the bench" if st == "bench" else ("partially allocated (not fully benched)" if st == "partial" else "allocated — NOT on the bench")
-        return (f"{_clean_emp_name(x.get('nm'))} ({x.get('code')}) is {verdict} {month_label}. "
-                f"(active assignments: {x.get('ra')}; peak allocation: {x.get('mp')}%; logged hours: {x.get('hrs')})")
+        x = rows[0]; st = (x.get("status") or "").strip(); nm = _clean_emp_name(x.get("nm"))
+        hrs = x.get("hrs"); code = x.get("code")
+        if st == "bench":
+            tail = " (no assignment for those weeks)" if is_future else " (no logged hours and no assignment)"
+            return f"{nm} ({code}) {'is forecast to be' if is_future else 'was'} ON the bench {month_label}{tail}."
+        if st == "active_unassigned":
+            return (f"{nm} ({code}) was NOT on the bench {month_label} — they logged {hrs} hours, so they were "
+                    f"actively working, even though their allocation shows the bench project. ⚠️ The project they "
+                    f"logged against is NOT formally assigned to them — recommend assigning it so the allocation/bench "
+                    f"data tracks correctly; otherwise they'll show as on-bench for upcoming (future) weeks.")
+        return (f"{nm} ({code}) {'is' if is_future else 'was'} NOT on the bench {month_label} — "
+                + ("they have an active assignment." if (x.get('ra') and float(x.get('ra')) > 0) else f"they logged {hrs} hours."))
 
+    # ── department / team report ──
     sql = (f"WITH al AS ({al}), ts AS ({ts}), cmp AS ({cmp}) "
            f"SELECT CAST(e.Employee_Code AS STRING) code, e.Resource_Name nm, "
-           f"COALESCE(NULLIF(TRIM(e.EmployeePosition),''),'') pos, COALESCE(c.comp,'') comp "
+           f"COALESCE(NULLIF(TRIM(e.EmployeePosition),''),'') pos, COALESCE(c.comp,'') comp, "
+           f"COALESCE(a.ra,0) ra, COALESCE(t.hrs,0) hrs, {status_expr} status "
            f"FROM {E} e LEFT JOIN al a ON a.emp={nz('e.Employee_Code')} "
            f"LEFT JOIN ts t ON t.emp={nz('e.Employee_Code')} "
            f"LEFT JOIN cmp c ON c.emp={nz('e.Employee_Code')} "
-           f"WHERE LOWER(e.employee_status)='active' "
-           f"AND COALESCE(a.ra,0)=0 AND COALESCE(a.mp,0)<100 AND COALESCE(t.hrs,0)=0")
+           f"WHERE LOWER(e.employee_status)='active'")
     if dept_scope:
         sql += " AND e.EmployeeHierarchyNode IN (" + ",".join("'" + d.replace("'", "''") + "'" for d in dept_scope) + ")"
         scope_label = "/".join(dept_scope)
@@ -3330,20 +3360,34 @@ def _bench_report_tool(args: dict, dept_scope: list[str] | None) -> str:
         scope_label = department
     else:
         scope_label = "the company"
-    sql += " ORDER BY e.Employee_Code LIMIT 500"
-    r = bq_run_query(normalize_bq_project(sql), max_rows=500)
+    sql += " ORDER BY e.Employee_Code LIMIT 1000"
+    r = bq_run_query(normalize_bq_project(sql), max_rows=1000)
     if "error" in r:
         return f"Couldn't compute the bench report: {r['error']}"
     rows = r.get("rows") or []
-    if not rows:
-        return f"No one in {scope_label} is on the bench {month_label} — everyone has an active assignment or logged hours."
-    def _bench_line(x):
+    bench = [x for x in rows if (x.get("status") or "") == "bench"]
+    unassigned = [x for x in rows if (x.get("status") or "") == "active_unassigned"]
+
+    def _line(x):
         nm = _clean_emp_name(x.get("nm"))
         extra = [p for p in [(x.get("pos") or "").strip(), (x.get("comp") or "").strip()] if p]
         return f"- {nm} ({x.get('code')})" + (f" — {' · '.join(extra)}" if extra else "")
-    listing = "\n".join(_bench_line(x) for x in rows)
-    return (f"BENCH — {scope_label}, {month_label}: {len(rows)} on bench "
-            f"(no active assignment AND no logged hours):\n{listing}")
+
+    if not bench:
+        head = f"No one in {scope_label} is {'forecast to be ' if is_future else ''}on the bench {month_label}."
+    else:
+        what = ("forecast on the bench (no assignment in those weeks)" if is_future
+                else "on the bench (no logged hours and no assignment)")
+        head = f"BENCH — {scope_label}, {month_label}: {len(bench)} {what}:\n" + "\n".join(_line(x) for x in bench)
+    note = ""
+    if unassigned and not is_future:
+        note = ("\n\n⚠️ NOTE — these people are NOT on the bench (they logged hours), but they're working on projects "
+                "that aren't formally ASSIGNED to them, so allocation alone would wrongly show them benched:\n"
+                + "\n".join(_line(x) for x in unassigned)
+                + "\nRecommend formally ASSIGNING those projects to them (rather than letting them log hours against "
+                "unassigned projects) so the allocation/bench data stays accurate — otherwise they'll appear on the "
+                "bench in upcoming weeks.")
+    return head + note
 
 
 # Calendar tools — let the chat/voice agent MANAGE the signed-in user's own
