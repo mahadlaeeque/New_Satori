@@ -3992,8 +3992,12 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
 
     # Build conversation history for Gemini — using the PII-redacted history
     # so prior turns don't leak personal data backward through the same chat.
+    # Keep the most recent ~5 exchanges (10 messages). The client sends the full
+    # history; we cap here so the live conversation stays in focus and within
+    # the token budget. These ride along as proper user/model turns.
+    recent_history = safe_history[-10:]
     contents = []
-    for msg in safe_history:
+    for msg in recent_history:
         contents.append(genai.types.Content(
             role="user" if msg["role"] == "user" else "model",
             parts=[genai.types.Part(text=msg["text"])],
@@ -4014,6 +4018,25 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
             f"4. NEVER respond with text like 'let me query', 'here is the SQL', 'I need to query'. JUST INVOKE THE TOOL.\n"
             f"5. Only after tool returns results, respond with the actual numbers.\n"
             f"6. If your first tool call returns 0 rows, RETRY immediately with relaxed filters. The MOST common cause of 0 rows is a wrong user-supplied secondary filter (material_type, order_type, valuation_class, sloc, etc.) — DROP that secondary filter and re-run with only the essential identifiers (material_id zero-padded + plant + date). Users frequently paste approximate or stale type codes (e.g. '2607' when the real material_type is 'Z607'). NEVER conclude 'no data' / 'I couldn't find' after a single 0-row attempt. After dropping a filter, if the row exists you MUST present the numbers and explicitly note in plain language WHICH filter you ignored and what the actual stored value was, so the user can confirm. Only say 'no data' after you've tried at least: (a) the full filter set, (b) without material_type/secondary type filter, (c) without the date range (any-date)."
+        )
+    # Surface a compact recap of the recent turns + an explicit follow-up cue
+    # RIGHT next to the new message. The system prompt is large, so even though
+    # the turns above are present, short/relative follow-ups ("what about May",
+    # "recheck", "their timesheet") can get treated as fresh questions — this
+    # adjacency makes the model carry the subject/filter forward reliably.
+    if recent_history:
+        recap = "\n".join(
+            f"{'User' if m['role'] == 'user' else 'You'}: {(m['text'] or '').strip()[:300]}"
+            for m in recent_history
+        )
+        user_message = (
+            "CONVERSATION SO FAR (oldest → newest):\n" + recap +
+            "\n\nThe line below is the user's NEW message. If it is short or relative "
+            "(e.g. 'what about May', 'now show their timesheet', 'recheck', 'and attendance?', "
+            "'the second one'), it is a FOLLOW-UP that continues the SAME subject / employee / "
+            "department / period / report as above — carry that filter forward and resolve any "
+            "pronouns ('they', 'it', 'that one') from the recap; do NOT restart or widen to everyone.\n\n"
+            "NEW MESSAGE: " + user_message
         )
     contents.append(genai.types.Content(
         role="user",
