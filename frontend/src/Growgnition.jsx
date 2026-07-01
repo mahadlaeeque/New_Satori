@@ -3334,8 +3334,8 @@ const AgentPage = () => {
         {/* Today's meetings (only shows once Google Calendar is connected) */}
         <TodayMeetingsCard />
 
-        {/* Sample Prompts */}
-        <div data-tour="sample-prompts" style={{ padding: "14px 18px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
+        {/* Sample Prompts (kept BELOW Chat History via flex order — per feedback) */}
+        <div data-tour="sample-prompts" style={{ order: 3, padding: "14px 18px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 }}>
             <Sparkles size={14} color={COLORS.accent} /> Sample Prompts
           </div>
@@ -3368,8 +3368,8 @@ const AgentPage = () => {
           </div>
         </div>
 
-        {/* Chat History */}
-        <div style={{ padding: "16px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
+        {/* Chat History (placed ABOVE Sample Prompts via flex order — per feedback) */}
+        <div style={{ order: 2, padding: "16px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.textPrimary, display: "flex", alignItems: "center", gap: 6 }}>
               <Clock size={14} color={COLORS.accent} /> Chat History
