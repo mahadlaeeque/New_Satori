@@ -326,6 +326,7 @@ _SEED_NAMED_USERS = [
     ("salik.hussain@tmcltd.com",  "Syed Salik Hussain",     "SLA"),
     ("salik.qureshi@tmcltd.com",  "Muhammad Salik Qureshi", "SAP Basis"),
     ("zeeshan.asani@tmcltd.com",  "Zeeshan Asani",          "Custom Dev"),
+    ("komal.masood@tmcltd.com",   "Komal Masood",           "L & OD"),
 ]
 
 
