@@ -3619,9 +3619,24 @@ const ReportChatPanel = ({
           newConfig.numeric_columns = newConfig.numeric_columns || existingConfig.numeric_columns;
           newConfig.total_columns = newConfig.total_columns || existingConfig.total_columns;
         }
-        pendingHistory = [...pendingHistory, { role: "assistant", text: savedIdLocal ? "Updating your report..." : "Building your report..." }];
+        pendingHistory = [...pendingHistory, { role: "assistant", text: savedIdLocal ? "Updating your report…" : "Building your report…" }];
         setMessages(pendingHistory);
-        await persistConfig(newConfig, pendingHistory);
+        try {
+          await persistConfig(newConfig, pendingHistory);
+          // Resolve the progress line into a clear confirmation so it never
+          // looks stuck. (persistConfig already refreshed the table on the left.)
+          pendingHistory = pendingHistory.slice(0, -1).concat({
+            role: "assistant",
+            text: "✓ Done — the report on the left has been updated. If it looks empty, the filters may be too narrow; tell me what to adjust.",
+          });
+          setMessages(pendingHistory);
+        } catch (perr) {
+          pendingHistory = pendingHistory.slice(0, -1).concat({
+            role: "assistant",
+            text: `I couldn't save the updated report: ${perr?.message || perr}. Please try again.`,
+          });
+          setMessages(pendingHistory);
+        }
       } else if (truncatedJson) {
         pendingHistory = [...pendingHistory, {
           role: "assistant",

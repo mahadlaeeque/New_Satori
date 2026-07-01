@@ -11970,6 +11970,28 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
         return {"reply": "What kind of report would you like to build? (e.g. 'monthly attendance summary by department', 'Q1 AM scorecard ranking')"}
     history = body.get("history") or []
 
+    # EDIT MODE — the frontend sends the current working config. Feed it to the
+    # model as the source of truth so an edit changes only what's asked and keeps
+    # the existing SQL's joins/filters/scoping (rebuilding from scratch was
+    # dropping them and returning 0 rows).
+    existing = body.get("existing_config") or {}
+    edit_addon = ""
+    if existing and (existing.get("sql") or existing.get("columns")):
+        try:
+            _cfg_json = json.dumps(existing, indent=2)
+        except Exception:
+            _cfg_json = str(existing)
+        edit_addon = (
+            "\n\n═══ CURRENT REPORT — EDIT MODE (source of truth) ═══\n"
+            "The user is EDITING this existing, WORKING report; its `sql` already returns the correct rows. "
+            "Make ONLY the change they ask for and PRESERVE everything else — keep the existing table joins, "
+            "WHERE filters, person/department/period scoping, and column set intact. Change the SMALLEST part "
+            "needed (e.g. to show a month NAME instead of its number, wrap the existing month expression in "
+            "FORMAT_DATE('%B', <the date column>) — do NOT rewrite the whole query, re-derive joins, or drop "
+            "filters, or the report will come back with 0 rows). Then return the FULL updated config.\n"
+            + _cfg_json[:8000]
+        )
+
     client = get_genai_client()
     contents = []
     for m in history[-12:]:
@@ -11988,7 +12010,8 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
                     _REPORT_SYSTEM_PROMPT + "\n\n" +
                     _load_schema_settings_block() + "\n\n" +
                     live_schema.render_context_block() +
-                    _user_context_addon(user)
+                    _user_context_addon(user) +
+                    edit_addon
                 ),
                 temperature=0.4,
                 # Reports often span 3-6 sections each with a SQL block;
