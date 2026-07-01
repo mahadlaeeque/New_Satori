@@ -12160,6 +12160,12 @@ def report_generate(body: dict, user: dict = Depends(get_current_user)):
     all_cols    = rendered.get("all_columns") or []
     columns     = [c for c in columns if c in all_cols] or all_cols
     rows        = rendered.get("rows") or []
+    # Respect the user's dynamic filters: if the frontend sent the currently
+    # filtered/visible rows, export exactly those (WYSIWYG) rather than the full
+    # unfiltered result. Falls back to the full result when none are provided.
+    _filtered = body.get("rows")
+    if isinstance(_filtered, list) and _filtered and all(isinstance(x, dict) for x in _filtered):
+        rows = _filtered
     numeric_cols = set(rendered.get("numeric_columns") or [])
     total_cols   = set(rendered.get("total_columns") or [])
 

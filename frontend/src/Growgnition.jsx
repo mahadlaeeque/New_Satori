@@ -3863,6 +3863,9 @@ const ReportPreview = ({ config, configRev, onConfigChange, onSaveMeta, isReadOn
   const [error, setError] = useState("");
   const [data, setData] = useState({ columns: [], all_columns: [], rows: [], total_rows: 0, numeric_columns: [], total_columns: [], sql: "" });
   const [downloading, setDownloading] = useState(null);
+  // Dynamic, user-created filters over the report's columns (any column, any
+  // operator). Applied client-side to the fetched rows; also respected on export.
+  const [filters, setFilters] = useState([]);   // [{ id, col, op, val, val2 }]
 
   const fmtCell = (v, col) => {
     if (v == null || v === "" || v === "None" || v === "null") return "";
@@ -3875,18 +3878,81 @@ const ReportPreview = ({ config, configRev, onConfigChange, onSaveMeta, isReadOn
     return String(v);
   };
 
+  const isNumericCol = useCallback((col) => (data.numeric_columns || []).includes(col), [data]);
+  const opsFor = (col) => isNumericCol(col)
+    ? ["=", "≠", ">", "<", "≥", "≤", "between", "is empty", "not empty"]
+    : ["contains", "not contains", "equals", "not equals", "starts with", "ends with", "is empty", "not empty"];
+
+  const matchFilter = useCallback((row, f) => {
+    if (!f.col) return true;
+    const raw = row?.[f.col];
+    const empty = raw == null || String(raw).trim() === "" || raw === "None";
+    if (f.op === "is empty") return empty;
+    if (f.op === "not empty") return !empty;
+    if (isNumericCol(f.col)) {
+      const n = Number(raw), v = Number(f.val), v2 = Number(f.val2);
+      if (Number.isNaN(n)) return false;
+      if (Number.isNaN(v) && f.op !== "between") return true; // no value yet
+      switch (f.op) {
+        case "=": return n === v; case "≠": return n !== v;
+        case ">": return n > v; case "<": return n < v;
+        case "≥": return n >= v; case "≤": return n <= v;
+        case "between": return (Number.isNaN(v) || n >= Math.min(v, v2)) && (Number.isNaN(v2) || n <= Math.max(v, v2));
+        default: return true;
+      }
+    }
+    const s = String(raw ?? "").toLowerCase(), q = String(f.val ?? "").toLowerCase();
+    if (q === "") return true; // no value yet → don't filter
+    switch (f.op) {
+      case "contains": return s.includes(q); case "not contains": return !s.includes(q);
+      case "equals": return s === q; case "not equals": return s !== q;
+      case "starts with": return s.startsWith(q); case "ends with": return s.endsWith(q);
+      default: return true;
+    }
+  }, [isNumericCol]);
+
+  const filteredRows = useMemo(() => {
+    const rows = data.rows || [];
+    const active = (filters || []).filter((f) => f.col && (data.all_columns || []).includes(f.col));
+    if (!active.length) return rows;
+    return rows.filter((r) => active.every((f) => matchFilter(r, f)));
+  }, [data, filters, matchFilter]);
+
+  const distinctValues = useCallback((col) => {
+    if (!col) return [];
+    const seen = new Set();
+    for (const r of (data.rows || [])) {
+      const v = r?.[col];
+      if (v != null && String(v).trim() !== "") seen.add(String(v));
+      if (seen.size > 200) break;
+    }
+    return [...seen].sort().slice(0, 200);
+  }, [data]);
+
+  const addFilter = () => {
+    const col = (data.all_columns || [])[0] || "";
+    setFilters((prev) => [...prev, { id: Date.now() + Math.random(), col, op: opsFor(col)[0], val: "", val2: "" }]);
+  };
+  const updateFilter = (id, patch) => setFilters((prev) => prev.map((f) => {
+    if (f.id !== id) return f;
+    const next = { ...f, ...patch };
+    if (patch.col && !opsFor(patch.col).includes(next.op)) next.op = opsFor(patch.col)[0]; // reset op on column-type change
+    return next;
+  }));
+  const removeFilter = (id) => setFilters((prev) => prev.filter((f) => f.id !== id));
+
   const totalsRow = useMemo(() => {
-    if (!data.total_columns?.length || !data.rows?.length) return null;
+    if (!data.total_columns?.length || !filteredRows.length) return null;
     const totals = {};
     for (const c of data.total_columns) {
       totals[c] = 0;
-      for (const row of data.rows) {
+      for (const row of filteredRows) {
         const n = Number(row?.[c]);
         if (!Number.isNaN(n)) totals[c] += n;
       }
     }
     return totals;
-  }, [data]);
+  }, [data, filteredRows]);
 
   const fetchPreview = useCallback(async () => {
     if (!config) return;
@@ -3964,6 +4030,8 @@ const ReportPreview = ({ config, configRev, onConfigChange, onSaveMeta, isReadOn
           prompt: config.title || "Report",
           format,
           config: { ...config, columns: data.columns },
+          // Export exactly what the user is viewing (respects dynamic filters).
+          rows: filteredRows,
         }),
       });
       if (!res.ok) {
@@ -4005,7 +4073,10 @@ const ReportPreview = ({ config, configRev, onConfigChange, onSaveMeta, isReadOn
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <div style={{ fontSize: 12.5, color: COLORS.textSecondary }}>
-            {loading ? "Loading preview…" : `${data.rows?.length || 0} of ${data.total_rows || 0} rows · ${data.columns?.length || 0} columns`}
+            {loading ? "Loading preview…"
+              : (filteredRows.length !== (data.rows?.length || 0)
+                  ? `${filteredRows.length} of ${data.rows?.length || 0} rows (filtered) · ${data.columns?.length || 0} columns`
+                  : `${data.rows?.length || 0} of ${data.total_rows || 0} rows · ${data.columns?.length || 0} columns`)}
           </div>
           <DataAsOf />
         </div>
@@ -4029,6 +4100,57 @@ const ReportPreview = ({ config, configRev, onConfigChange, onSaveMeta, isReadOn
           </button>
         </div>
       </div>
+
+      {/* Dynamic filters — add any number over any column, any operator */}
+      {!loading && !error && (data.all_columns?.length > 0) && (data.rows?.length > 0) && (() => {
+        const selStyle = { padding: "5px 8px", borderRadius: 7, border: `1px solid ${COLORS.border}`, background: COLORS.surface, color: COLORS.textPrimary, fontSize: 12, maxWidth: 220 };
+        const inpStyle = { padding: "5px 8px", borderRadius: 7, border: `1px solid ${COLORS.border}`, background: COLORS.surface, color: COLORS.textPrimary, fontSize: 12, width: 130 };
+        return (
+          <div style={{ padding: "10px 16px", borderBottom: `1px solid ${COLORS.border}`, background: COLORS.surfaceAlt, flexShrink: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.textSecondary, textTransform: "uppercase", letterSpacing: 0.4, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <Filter size={13} /> Filters{filters.length ? ` · ${filters.length}` : ""}
+              </span>
+              <button onClick={addFilter} style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid ${COLORS.border}`, background: COLORS.surface, color: COLORS.textPrimary, fontSize: 12, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5 }}>
+                <Plus size={12} /> Add filter
+              </button>
+              {filters.length > 0 && (
+                <button onClick={() => setFilters([])} style={{ padding: "5px 10px", borderRadius: 7, border: "none", background: "transparent", color: COLORS.textMuted, fontSize: 12, cursor: "pointer" }}>Clear all</button>
+              )}
+            </div>
+            {filters.map((f) => {
+              const ops = opsFor(f.col);
+              const noVal = f.op === "is empty" || f.op === "not empty";
+              const between = f.op === "between";
+              return (
+                <div key={f.id} style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <select value={f.col} onChange={(e) => updateFilter(f.id, { col: e.target.value })} style={selStyle}>
+                    {(data.all_columns || []).map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <select value={f.op} onChange={(e) => updateFilter(f.id, { op: e.target.value })} style={selStyle}>
+                    {ops.map((o) => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                  {!noVal && (
+                    <>
+                      <input list={`vals-${f.id}`} value={f.val} onChange={(e) => updateFilter(f.id, { val: e.target.value })}
+                        placeholder={between ? "min" : "value"} type={isNumericCol(f.col) ? "number" : "text"} style={inpStyle} />
+                      {!isNumericCol(f.col) && (
+                        <datalist id={`vals-${f.id}`}>{distinctValues(f.col).map((v) => <option key={v} value={v} />)}</datalist>
+                      )}
+                      {between && (
+                        <input value={f.val2} onChange={(e) => updateFilter(f.id, { val2: e.target.value })} placeholder="max" type="number" style={inpStyle} />
+                      )}
+                    </>
+                  )}
+                  <button onClick={() => removeFilter(f.id)} title="Remove filter" style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.textMuted, display: "inline-flex", padding: 2 }}>
+                    <X size={14} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
         {error && (
@@ -4080,7 +4202,7 @@ const ReportPreview = ({ config, configRev, onConfigChange, onSaveMeta, isReadOn
               </tr>
             </thead>
             <tbody>
-              {data.rows.map((row, ri) => (
+              {filteredRows.map((row, ri) => (
                 <tr key={ri} style={{ background: ri % 2 ? COLORS.surfaceAlt : "#fff" }}>
                   {data.columns.map((col) => {
                     const isNumeric = data.numeric_columns?.includes(col);
