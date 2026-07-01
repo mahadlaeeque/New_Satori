@@ -2588,22 +2588,25 @@ def get_genai_client():
 
 
 def _build_date_context():
-    """Build dynamic date context for AI prompts."""
-    now = datetime.now()
-    today = now.strftime("%B %d, %Y")
+    """Dynamic current-date context, regenerated on EVERY request from the system
+    clock (Pakistan time) — so the agent always knows today's real date without
+    anyone telling it. Injected into every agent prompt (chat, report, dashboard,
+    voice)."""
+    now = datetime.now(_PKT)
+    today = now.strftime("%A, %B %d, %Y")
     cq = (now.month - 1) // 3 + 1
     current_year = now.year
-    
     last_quarter_num = cq - 1 if cq > 1 else 4
     last_quarter_year = current_year if cq > 1 else current_year - 1
-    
     last_month = (now.replace(day=1) - timedelta(days=1)).strftime("%B %Y")
-    
-    return (f"\n\n--- CURRENT DATE CONTEXT ---\n"
-            f"Today's Date: {today}. Current Year: {current_year}. Current Quarter: Q{cq}.\n"
-            f"Last Quarter: Q{last_quarter_num} {last_quarter_year}. Last Month: {last_month}. Last Year: {current_year - 1}.\n"
-            f"For SAP date columns (posting_date in material_documents/accounting_doc_segment/universal_journal, purchase_order_date, creation_date, change_date, entry_date, document_date, last_change_date — STRING YYYYMMDD), filter with SAFE.PARSE_DATE('%Y%m%d', col) compared against DATE literals. The DW fact tables `fact_material_stock_daily.posting_date` and `fact_material_movements_daily.posting_date` are already DATE.\n"
-            f"For fiscal-period filtering on universal_journal / material_valuation, use fiscal_year (STRING) + fiscal_period (STRING, '001'..'012').\n"
+    this_month = now.strftime("%B %Y")
+    return (f"\n\n--- CURRENT DATE CONTEXT (authoritative — this IS today) ---\n"
+            f"TODAY is {today} (Pakistan time). This is the REAL current date and updates automatically every day.\n"
+            f"Current month = {this_month}. Current year = {current_year}. Current quarter = Q{cq} {current_year}.\n"
+            f"Last month = {last_month}. Last quarter = Q{last_quarter_num} {last_quarter_year}. Last year = {current_year - 1}.\n"
+            f"ALWAYS resolve 'today' / 'this month' / 'last month' / 'this quarter' / 'YTD' / 'recent' against THIS date. "
+            f"NEVER assume or state any other month or year (do NOT say it is an earlier month). In SQL use "
+            f"CURRENT_DATE() / DATE_TRUNC / DATE_SUB (or the exact dates above) — never a hardcoded past month.\n"
             f"--- END DATE CONTEXT ---")
 
 
@@ -5631,10 +5634,15 @@ DEFAULT FILTERS — apply automatically without asking:
 3. Headcount / "total employees" → COUNT(DISTINCT Employee_Code) on Employee_Data
    filtered to active employees. NEVER COUNT(*) on Attendance_Data — that counts
    ~30 attendance rows per employee per month, ~30× too high.
-4. Date defaults — today is May 2026:
-   - "this month" = May 2026; "last month" = April 2026; "Q1" = Jan–Mar 2026;
-     "YTD" = Jan 1, 2026 to CURRENT_DATE(); "recent" / "lately" = last 30 days.
-   - When the user names a month with no year, assume current year (2026).
+4. Date defaults — ALWAYS use the ACTUAL current date from the "CURRENT DATE
+   CONTEXT" block injected into this prompt (it is regenerated from the system
+   clock on every request, so it is always today's real date). NEVER assume a
+   fixed month/year (e.g. do NOT say "today is May 2026" — read the real date).
+   - "this month" / "last month" / "Q1" / "YTD" (Jan 1 of the current year →
+     today) / "recent"·"lately" (last 30 days) are ALL relative to that current
+     date. In SQL always express them with CURRENT_DATE()/DATE_TRUNC/DATE_SUB —
+     never a hardcoded month or year.
+   - A month named with no year → the current year (from the date context).
 5. Person searches — fuzzy match AND resolve identity first; NEVER guess
    between namesakes:
    - Match each name word as its OWN LOWER(Resource_Name) LIKE (token-AND,
@@ -6014,6 +6022,7 @@ def refine_dashboard(user_message: str, history: list, existing_config=None, sco
     # warehouse snapshot so the AI behaves like a senior analyst (active-only,
     # working days, distinct employees, sane numbers) by default.
     system = (
+        _build_date_context() + "\n\n" +
         ANALYST_COMMON_SENSE + "\n\n" +
         system + "\n\n" +
         _load_schema_settings_block() + "\n\n" +
@@ -11974,6 +11983,7 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
             contents=contents,
             config=genai.types.GenerateContentConfig(
                 system_instruction=(
+                    _build_date_context() + "\n\n" +
                     ANALYST_COMMON_SENSE + "\n\n" +
                     _REPORT_SYSTEM_PROMPT + "\n\n" +
                     _load_schema_settings_block() + "\n\n" +
