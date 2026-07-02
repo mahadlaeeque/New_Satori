@@ -5536,6 +5536,11 @@ SALES TABLES:
 - `Sales_Pipeline_Health` — all salespeople. Cols: Salesperson, Open_Pipeline, Open_Deals, Win_Rate_by.
 - `Sales_Hunting_Gap`, `Sales_KPI_Scorecard` (reference), `Sales_Dormant_Accounts`, `Sales_Workload_Feasibility`.
 
+FILTERING SPECIFIC NAMED PEOPLE (this mistake silently EMPTIES whole dashboards):
+- NEVER use equality or IN on a name column: Resource_Name carries a code prefix ("E-1571 Mahad Laeeque"), stored names often include middle names, and Muhammad/Mohammad spelling varies — `Resource_Name IN ('Junaid Akram','Farzeen Abbas')` matches ZERO rows.
+- Per person use a token-AND group: (LOWER(col) LIKE '%junaid%' AND LOWER(col) LIKE '%akram%'). Skip Muhammad/Mohammad-type tokens. For SEVERAL people, OR the per-person groups together — never AND different people's tokens (one row can't be two people).
+- Best practice: resolve each person to Employee_Code on Employee_Data first and filter the fact table on the digit-normalised code.
+
 JOINS — always digit-normalise both sides: norm(x) = LTRIM(REGEXP_REPLACE(CAST(x AS STRING), r'[^0-9]', ''), '0'). NEVER join on names (Resource_Name carries a code prefix so name joins match almost nothing).
 - Employee → Attendance: ON norm(Employee_Code) = norm(personal_no)  (Attendance's personal_no 'E-902', NOT employee_id — employee_id is an unrelated sequence that matches ~0 rows).
 - Employee → Allocation: ON norm(Employee_Code) = norm(employee_id)  (Allocation's employee_id holds the 'E-2141' code).
@@ -6021,13 +6026,17 @@ def refine_dashboard(user_message: str, history: list, existing_config=None, sco
     # Inject analyst common-sense defaults + admin-curated schema notes + live
     # warehouse snapshot so the AI behaves like a senior analyst (active-only,
     # working days, distinct employees, sane numbers) by default.
+    # Lessons the self-healing loop has learned from past failed dashboards —
+    # appended AFTER .format() ran, so any braces in lesson text are safe.
+    _lessons = _sql_lessons_block()
     system = (
         _build_date_context() + "\n\n" +
         ANALYST_COMMON_SENSE + "\n\n" +
         system + "\n\n" +
         _load_schema_settings_block() + "\n\n" +
         live_schema.render_context_block() +
-        (scope_addon or "")
+        (scope_addon or "") +
+        (("\n\n" + _lessons) if _lessons else "")
     )
 
     contents = []
@@ -7132,6 +7141,68 @@ def _autofix_dashboard_sql(sql: str) -> str:
             r"\1 \2 \3", sql, flags=_re.IGNORECASE,
         )
 
+    # Fix 21 — person-NAME literal filters. Employee_Data.Resource_Name carries
+    # a code prefix ("E-1571 Mahad Laeeque"), stored names may include middle
+    # names, and Muhammad/Mohammad spellings vary — so an exact `= 'Junaid
+    # Akram'` or `IN ('Junaid Akram','Farzeen Abbas',…)` silently matches ZERO
+    # rows (the exact failure that emptied a practice head's check-in/out
+    # dashboard). Rewrite literal comparisons on name columns into per-person
+    # token-AND LIKE groups (OR'd across an IN list). Only comparisons against
+    # STRING LITERALS are touched — join conditions (col = col) are untouched.
+    _NAME_COLS_PAT = r"(?:Resource_Name|employee_name|emp_name|WP_OWNER_NAME|WP_RESOURCE_ASSIGNED)"
+    _MUHAMMAD_VARIANTS = {"muhammad", "mohammad", "muhammed", "mohammed", "mohd", "md", "syed", "mian"}
+
+    def _name_like_group(col_expr: str, raw: str) -> str:
+        toks = [t for t in _re.split(r"[^a-z0-9]+", (raw or "").lower()) if t]
+        core = [t for t in toks if t not in _MUHAMMAD_VARIANTS] or toks
+        if not core:
+            return ""
+        return "(" + " AND ".join(f"LOWER({col_expr}) LIKE '%{t}%'" for t in core) + ")"
+
+    def _fix_name_eq(m):
+        col = (m.group("pfx") or "") + m.group("col")
+        val = m.group("val")
+        if not _re.search(r"[A-Za-z]", val):
+            return m.group(0)  # not a name (a code/date) — leave it
+        return _name_like_group(col, val) or m.group(0)
+
+    def _fix_name_in(m):
+        col = (m.group("pfx") or "") + m.group("col")
+        vals = _re.findall(r"'([^']*)'", m.group("vals"))
+        vals = [v for v in vals if _re.search(r"[A-Za-z]", v)]
+        if not vals:
+            return m.group(0)  # subquery or non-name literals — leave it
+        groups = [g for g in (_name_like_group(col, v) for v in vals) if g]
+        return "(" + " OR ".join(groups) + ")" if groups else m.group(0)
+
+    def _fix_name_like(m):
+        col = (m.group("pfx") or "") + m.group("col")
+        val = m.group("val").strip().strip("%").strip()
+        if " " not in val:
+            return m.group(0)  # single-token LIKE is already correct
+        return _name_like_group(col, val) or m.group(0)
+
+    # LOWER(col) = '...' / col = '...'   (two patterns so we never eat a paren
+    # belonging to another function like TRIM()).
+    sql = _re.sub(
+        r"LOWER\(\s*(?P<pfx>[A-Za-z_][A-Za-z0-9_]*\.)?(?P<col>" + _NAME_COLS_PAT + r")\s*\)\s*=\s*'(?P<val>[^']+)'",
+        _fix_name_eq, sql, flags=_re.IGNORECASE)
+    sql = _re.sub(
+        r"(?<![\w.(])(?P<pfx>[A-Za-z_][A-Za-z0-9_]*\.)?(?P<col>" + _NAME_COLS_PAT + r")\s*=\s*'(?P<val>[^']+)'",
+        _fix_name_eq, sql, flags=_re.IGNORECASE)
+    # LOWER(col) IN ('A','B',…) / col IN ('A','B',…)
+    sql = _re.sub(
+        r"LOWER\(\s*(?P<pfx>[A-Za-z_][A-Za-z0-9_]*\.)?(?P<col>" + _NAME_COLS_PAT + r")\s*\)\s+IN\s*\((?P<vals>[^()]*)\)",
+        _fix_name_in, sql, flags=_re.IGNORECASE)
+    sql = _re.sub(
+        r"(?<![\w.(])(?P<pfx>[A-Za-z_][A-Za-z0-9_]*\.)?(?P<col>" + _NAME_COLS_PAT + r")\s+IN\s*\((?P<vals>[^()]*)\)",
+        _fix_name_in, sql, flags=_re.IGNORECASE)
+    # Contiguous multi-word LIKE ('%junaid akram%' fails on middle names) →
+    # token-AND. Single-word LIKEs pass through unchanged.
+    sql = _re.sub(
+        r"LOWER\(\s*(?P<pfx>[A-Za-z_][A-Za-z0-9_]*\.)?(?P<col>" + _NAME_COLS_PAT + r")\s*\)\s+LIKE\s+'(?P<val>[^']+)'",
+        _fix_name_like, sql, flags=_re.IGNORECASE)
+
     # Fixes 13–15 are pure COLUMN-FORMAT corrections (no join/scope semantics),
     # so they are factored into _autofix_column_formats and shared with the chat
     # path (_execute_chat_sql) — that way the agent self-heals the same column
@@ -7393,12 +7464,14 @@ def _repair_widget_sql(failed_sql: str, error_msg: str, widget_meta: dict) -> st
         client = get_genai_client()
         intent = (widget_meta.get("title") or "").strip()
         kind = widget_meta.get("kind") or "widget"  # 'kpi' or 'chart'
+        lessons = _sql_lessons_block()
         user_msg = (
             f"Widget kind: {kind}\n"
             f"Widget title: {intent}\n\n"
             f"BigQuery error:\n{error_msg}\n\n"
             f"Failed SQL:\n{failed_sql}\n\n"
-            f"Return ONLY the fixed SQL."
+            + (lessons + "\n\n" if lessons else "")
+            + "Return ONLY the fixed SQL."
         )
         resp = client.models.generate_content(
             model="gemini-2.5-flash",
@@ -7424,6 +7497,270 @@ def _repair_widget_sql(failed_sql: str, error_msg: str, widget_meta: dict) -> st
     except Exception as e:
         print(f"[dashboard] repair attempt failed: {e}")
         return ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SELF-HEALING LESSON STORE + ZERO-ROWS REPAIR LOOP
+#  The dashboard/report builders can hit thousands of distinct query shapes;
+#  no fixed rule list covers them all. So the runtime (1) tries to FIX a
+#  failing panel itself — deterministic rewrites first, then a bounded LLM
+#  diagnose→repair→re-run loop, (2) LEARNS from every successful fix by
+#  distilling a one-line lesson into the ai_sql_lessons table (injected back
+#  into future generation + repair prompts, so the same mistake isn't made
+#  twice), and (3) ALWAYS delivers something — recovered data, a broadened
+#  view with an honest note, or a concrete diagnosis of why nothing matched.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _sql_lessons_block(limit: int = 14) -> str:
+    """Render persisted lessons from past query failures as a prompt block.
+    Ranked by how often each lesson re-proved itself (hits), then recency.
+    Returns "" when the table is empty/unavailable — safe on every path."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute(
+            "SELECT lesson FROM ai_sql_lessons ORDER BY hits DESC, id DESC LIMIT ?",
+            (int(limit),),
+        )
+        rows = [(r["lesson"] if isinstance(r, dict) else r[0]) for r in cur.fetchall()]
+        db.close()
+        rows = [str(x).strip() for x in rows if x and str(x).strip()]
+        if not rows:
+            return ""
+        return ("═══ LESSONS LEARNED from past query failures on THIS warehouse (apply every one) ═══\n"
+                + "\n".join(f"- {x}" for x in rows))
+    except Exception as e:
+        print(f"[lessons] read failed: {e}")
+        return ""
+
+
+def _record_sql_lesson(surface: str, failure_kind: str, bad_sql: str, fixed_sql: str,
+                       failure_text: str = "", lesson_hint: str = "") -> None:
+    """Distill a one-line transferable lesson from a successful self-heal and
+    persist it (deduped by signature, hit-counted). Best-effort — never raises.
+    This is the 'learn from the mistake then and there' half of the loop: the
+    lesson text is injected into every future dashboard/report generation and
+    repair prompt via _sql_lessons_block()."""
+    try:
+        lesson, signature = "", ""
+        try:
+            client = get_genai_client()
+            user_msg = (
+                "A generated BigQuery query failed and was then fixed. Distill the GENERAL, "
+                "reusable lesson so future query generation avoids the same mistake.\n\n"
+                f"Failure kind: {failure_kind}\n"
+                f"Failure detail: {(failure_text or '')[:500]}\n"
+                + (f"Fixer's own explanation: {lesson_hint[:300]}\n" if lesson_hint else "")
+                + f"\nFAILED SQL:\n{bad_sql[:1800]}\n\nWORKING SQL:\n{fixed_sql[:1800]}\n\n"
+                "Return STRICT JSON only: {\"signature\": \"<short-kebab-case-key-for-dedup>\", "
+                "\"lesson\": \"<ONE sentence, imperative, about the QUERY PATTERN (columns/joins/filters/"
+                "functions) — never about this specific person/date/project>\"}"
+            )
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
+                config=genai.types.GenerateContentConfig(temperature=0.1, max_output_tokens=300),
+            )
+            parsed = _try_repair_json(resp.text or "") or {}
+            lesson = (parsed.get("lesson") or "").strip()
+            signature = (parsed.get("signature") or "").strip().lower()[:120]
+        except Exception as e:
+            print(f"[lessons] distill failed: {e}")
+        if not lesson:
+            return
+        if not signature:
+            signature = "".join(c for c in lesson.lower() if c.isalnum() or c == " ")[:120]
+        db = get_db(); cur = db.cursor()
+        from database import USE_POSTGRES
+        now_expr = "NOW()" if USE_POSTGRES else "datetime('now')"
+        cur.execute(f"UPDATE ai_sql_lessons SET hits = hits + 1, updated_at = {now_expr}, "
+                    f"fixed_sql = ?, lesson = ? WHERE signature = ?",
+                    (fixed_sql[:4000], lesson, signature))
+        if cur.rowcount == 0:
+            cur.execute(
+                "INSERT INTO ai_sql_lessons (surface, failure_kind, signature, lesson, bad_sql, fixed_sql) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (surface, failure_kind, signature, lesson, bad_sql[:4000], fixed_sql[:4000]),
+            )
+        db.commit(); db.close()
+        print(f"[lessons] recorded ({failure_kind}/{surface}): {lesson}")
+    except Exception as e:
+        print(f"[lessons] record failed: {e}")
+
+
+# Plain-text version of the dashboard schema block (it is authored for
+# str.format templates, so literal braces are doubled — undouble them here).
+def _schemas_plain() -> str:
+    return _DASHBOARD_SAP_SCHEMAS.replace("{{", "{").replace("}}", "}")
+
+
+_ZERO_ROWS_SYSTEM = """You are Satori's SQL self-healing agent for the TMC BigQuery warehouse. A dashboard/report widget's query RAN WITHOUT ERROR but matched ZERO rows (or returned only NULLs for a KPI). Your job: work out WHY and return a corrected query that surfaces the data the user intended. The user must always end up seeing something real.
+
+KNOWN ZERO-ROW CAUSES on this warehouse — check them in this order:
+1. NAME filters. Employee_Data.Resource_Name carries a code prefix ("E-1571 Mahad Laeeque"); stored names often include middle names; Muhammad/Mohammad spelling varies. Any `= 'Full Name'` or `IN ('Name A','Name B')` matches nothing. Correct per person: (LOWER(col) LIKE '%tok1%' AND LOWER(col) LIKE '%tok2%'), skip Muhammad/Mohammad-type tokens, OR the groups together for multiple people.
+2. Multiple people AND-ed instead of OR-ed — one row can never be two different people.
+3. Wrong join/key: employee joins are DIGIT-NORMALISED codes, never names. norm(x)=LTRIM(REGEXP_REPLACE(CAST(x AS STRING),r'[^0-9]',''),'0'). Attendance→norm(personal_no)=norm(Employee_Code); Allocation→norm(employee_id)=norm(Employee_Code); Timesheet→norm(EMPLOYEE_CODE)=norm(Employee_Code) (NEVER TICKET_USER_ID).
+4. Case-sensitive string equality on statuses/departments — LOWER() both sides.
+5. Date range with no data — the diagnostic results show the table's real MIN/MAX dates; adjust only if the user's range is genuinely outside the data.
+6. Wrong parse format → NULL for every row: checkin_time/checkout_time are FULL datetime strings ('2026-05-25 09:49:26.772000') — clock time = TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)); DATE_KEY is a real DATE.
+7. Non-existent status values (there is NO 'Late' attendance status — late = parsed check-in > TIME '09:30:00').
+8. Employee_Type whitelist excluding contractors — for specific named people filter LOWER(employee_status)='active' instead.
+
+RULES:
+- If the query contains the literal token {where} it is a runtime placeholder for user filters — KEEP IT exactly where it is; never remove, move, or fill it.
+- Preserve the widget's intent (same metric, same grouping, same aliasing — KPI queries must return one row with the metric aliased AS value).
+- Never invent tables/columns not in the schema below. Output ONE complete statement, every parenthesis balanced.
+- Charts: keep/end with a sensible LIMIT (<= 200).
+
+OUTPUT STRICT JSON ONLY (no markdown fence):
+{"sql": "<corrected full SQL>", "what_was_wrong": "<one short sentence>", "note": "<one short user-facing sentence, or empty string>"}
+"""
+
+_ZERO_ROWS_BROADEN_ADDON = """
+ALL REPAIR ATTEMPTS FAILED — the filters appear genuinely empty. Now return the CLOSEST BROADER on-topic query that WILL return rows so the user still sees something useful, e.g.: widen the date range to the table's real data range, relax a person filter to their department/team, drop the single narrowest filter, or show the available date range / matching people instead. Stay on the widget's topic. Set "note" to one honest user-facing sentence describing EXACTLY what you relaxed and why (e.g. "No June 2026 rows for these employees — showing May 2026 instead."). Keep the {where} placeholder if present.
+"""
+
+
+def _llm_heal_json(system: str, user_msg: str, tag: str, max_tokens: int = 4096) -> dict:
+    """One Gemini call → parsed JSON dict ({} on any failure). Never raises."""
+    try:
+        client = get_genai_client()
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
+            config=genai.types.GenerateContentConfig(
+                system_instruction=system, temperature=0.15, max_output_tokens=max_tokens,
+            ),
+        )
+        return _try_repair_json(resp.text or "") or {}
+    except Exception as e:
+        print(f"[heal] {tag} LLM call failed: {e}")
+        return {}
+
+
+def _is_empty_result(r: dict, kind: str) -> bool:
+    """A 'successful' result that gives the user nothing: no rows at all, or a
+    single all-NULL row (the classic AVG-over-zero-matches KPI)."""
+    if "error" in r:
+        return False
+    rows = r.get("rows") or []
+    if not rows:
+        return True
+    if kind == "kpi":
+        row0 = rows[0] or {}
+        return all(v is None or v == "" for v in row0.values())
+    return False
+
+
+def _heal_empty_widget(template_sql: str, run_template, widget_meta: dict,
+                       run_lessons: list, surface: str = "dashboard",
+                       sql_allowed=None, max_fix_attempts: int = 2):
+    """Diagnose-and-repair loop for a query that ran but matched nothing.
+
+    template_sql — the widget's SQL template (may contain {where}).
+    run_template(tpl) -> result dict (with result['sql'] = executed SQL).
+    run_lessons     — mutable list shared across one dashboard run: lessons
+                      from panels healed earlier in THIS run are injected into
+                      later panels' prompts so they heal on the first attempt.
+    sql_allowed(s)  — optional guard (e.g. no new Sales_* tables for non-admins).
+
+    Returns {template, result, note, downgraded} on success, else None.
+    Never raises."""
+    import json as _json
+    meta_desc = (f"Widget kind: {widget_meta.get('kind') or 'widget'}\n"
+                 f"Widget title: {widget_meta.get('title') or ''}\n"
+                 f"Dashboard context: {widget_meta.get('context') or ''}")
+    lessons_txt = _sql_lessons_block()
+    run_lessons_txt = ("\nLESSONS FROM PANELS FIXED EARLIER IN THIS SAME RUN (almost certainly the same root cause — apply first):\n"
+                       + "\n".join(f"- {x}" for x in run_lessons)) if run_lessons else ""
+
+    # ── Phase 1: one cheap diagnostic probe ─────────────────────────────────
+    diag_summary = ""
+    if not run_lessons:  # once the run has a proven fix, skip the probe — go straight to it
+        diag = _llm_heal_json(
+            "You are a BigQuery diagnostician. A query ran fine but matched ZERO rows. Write ONE cheap "
+            "diagnostic SELECT that decomposes WHY: return a single row of COUNT(*)-style measures — the row "
+            "count matching each individual filter alone, MIN/MAX of the filtered date column over the whole "
+            "table, and (for name filters) COUNTIF token-LIKE probes per name token. Use ONLY tables/columns "
+            "from the schema. No {where} placeholder. Return STRICT JSON: {\"sql\": \"...\"}\n\n" + _schemas_plain(),
+            f"{meta_desc}\n\nZERO-ROW SQL:\n{template_sql}",
+            "diagnose", max_tokens=2048,
+        )
+        dsql = (diag.get("sql") or "").strip()
+        if dsql and dsql.upper().lstrip().startswith(("SELECT", "WITH")):
+            try:
+                dr = run_template(dsql)
+                if "error" in dr:
+                    diag_summary = f"(diagnostic query itself errored: {dr['error'][:300]})"
+                else:
+                    drows = dr.get("rows") or []
+                    diag_summary = _json.dumps(drows[:3], default=str)[:1500]
+                print(f"[heal] diagnostic: {diag_summary[:300]}")
+            except Exception as e:
+                diag_summary = f"(diagnostic failed: {e})"
+
+    # ── Phase 2: bounded repair attempts, then one broaden attempt ──────────
+    attempts_log = []
+    for attempt in range(max_fix_attempts + 1):
+        broaden = attempt == max_fix_attempts
+        system = _ZERO_ROWS_SYSTEM + (_ZERO_ROWS_BROADEN_ADDON if broaden else "") + "\n\n" + _schemas_plain() \
+                 + (("\n\n" + lessons_txt) if lessons_txt else "")
+        user_msg = (
+            f"{meta_desc}\n{run_lessons_txt}\n\n"
+            f"SQL THAT RETURNS ZERO ROWS:\n{template_sql}\n\n"
+            + (f"DIAGNOSTIC PROBE RESULT (per-filter row counts / data ranges):\n{diag_summary}\n\n" if diag_summary else "")
+            + (("PREVIOUS FAILED REPAIR ATTEMPTS (do something DIFFERENT):\n"
+                + "\n".join(attempts_log) + "\n\n") if attempts_log else "")
+            + "Return the corrected JSON now."
+        )
+        fix = _llm_heal_json(system, user_msg, "fix", max_tokens=4096)
+        cand = (fix.get("sql") or "").strip()
+        what = (fix.get("what_was_wrong") or "").strip()
+        note = (fix.get("note") or "").strip()
+        if not cand or not cand.upper().lstrip().startswith(("SELECT", "WITH")) or not _sql_looks_complete(cand):
+            attempts_log.append(f"- attempt {attempt+1}: model returned unusable SQL")
+            continue
+        if cand.strip() == template_sql.strip():
+            attempts_log.append(f"- attempt {attempt+1}: model returned the SQL unchanged")
+            continue
+        if sql_allowed and not sql_allowed(cand):
+            attempts_log.append(f"- attempt {attempt+1}: rejected (touched data outside this user's access)")
+            continue
+        try:
+            rr = run_template(cand)
+        except Exception as e:
+            attempts_log.append(f"- attempt {attempt+1}: execution raised {e}")
+            continue
+        if "error" in rr:
+            attempts_log.append(f"- attempt {attempt+1}: SQL errored: {str(rr['error'])[:220]} | SQL: {cand[:220]}")
+            continue
+        if _is_empty_result(rr, widget_meta.get("kind") or ""):
+            attempts_log.append(f"- attempt {attempt+1}: still zero rows | SQL: {cand[:220]}")
+            continue
+        # Success — deliver, remember the lesson (both run-local and persisted).
+        tag = widget_meta.get("title") or widget_meta.get("kind") or "widget"
+        print(f"[heal] '{tag}' recovered on attempt {attempt+1}{' (broadened)' if broaden else ''} — "
+              f"{len(rr.get('rows') or [])} rows")
+        if what:
+            run_lessons.append(what if not broaden else f"(broadened) {what}")
+        if not broaden:
+            _record_sql_lesson(surface, "zero_rows", template_sql, cand,
+                               failure_text=diag_summary[:500], lesson_hint=what)
+        return {
+            "template": cand,
+            "result": rr,
+            "note": note or (what and f"Auto-repaired: {what}") or "This panel was automatically repaired.",
+            "downgraded": broaden,
+        }
+    print(f"[heal] '{widget_meta.get('title')}' could not be healed after {max_fix_attempts + 1} attempts")
+    # Guaranteed delivery floor: hand back a concrete diagnosis so the user
+    # sees WHY there is no data instead of a bare empty panel.
+    reason = ""
+    if diag_summary and not diag_summary.startswith("("):
+        reason = f" Diagnostic probe: {diag_summary[:400]}"
+    return {"template": None, "result": None,
+            "note": ("No matching data even after automatic repair — the filters appear genuinely empty "
+                     "(person not in this scope/period, or no activity in the range)." + reason),
+            "downgraded": False}
 
 
 # Unified dashboard-filter registry. Each entry (keyed by the lowercased filter
@@ -7569,6 +7906,13 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
     if not _user_can_see_sales(user) and _sql_touches_sales(json.dumps(config)):
         raise HTTPException(status_code=403, detail="Sales data is only available to admins.")
 
+    # Lessons discovered while healing panels in THIS run — panel N's fix is
+    # fed into panel N+1's heal prompt, so one root cause (e.g. a bad name
+    # filter copied across all 6 panels) is diagnosed once and fixed cheaply
+    # everywhere else.
+    run_lessons: list = []
+    dash_context = f"{(config.get('title') or '').strip()} — {(config.get('description') or '').strip()}".strip(" —")
+
     def _exec(sql_template, tag, widget_meta=None):
         if not sql_template or not sql_template.strip():
             print(f"[dashboard] {tag}: no sql in config")
@@ -7579,12 +7923,28 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
             sql_template = sql_template.strip("`").lstrip("sql").strip()
             if sql_template.endswith("```"):
                 sql_template = sql_template[:-3].strip()
-        sql = _substitute_where(sql_template, user_filters)
-        sql = normalize_bq_project(sql)
-        sql = _autofix_dashboard_sql(sql)
+
+        widget_meta = dict(widget_meta or {})
+        widget_meta.setdefault("context", dash_context)
+        kind = widget_meta.get("kind") or ""
+
+        def _run_template(tpl):
+            s = _substitute_where(tpl, user_filters)
+            s = normalize_bq_project(s)
+            s = _autofix_dashboard_sql(s)
+            rr = bq_run_query(s, max_rows=200)
+            rr["sql"] = s  # substituted SQL so the frontend can show it on error
+            return rr
+
+        # A healed query may only touch Sales_* data if the original did (the
+        # non-admin sales gate already ran on the whole config).
+        original_touches_sales = _sql_touches_sales(sql_template)
+        def _sql_allowed(s):
+            return original_touches_sales or not _sql_touches_sales(s)
+
+        r = _run_template(sql_template)
+        sql = r["sql"]
         print(f"[dashboard] {tag}: {sql[:300]}{'...' if len(sql) > 300 else ''}")
-        r = bq_run_query(sql, max_rows=200)
-        r["sql"] = sql  # always include the substituted SQL so the frontend can show it on error
         if "error" in r:
             err = r["error"]
             print(f"[dashboard]   {tag} ERROR: {err}")
@@ -7600,28 +7960,56 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
                     print(f"[dashboard]   {tag} ok after self-heal — {len(rd.get('rows') or [])} rows")
                     rd["sql"] = det
                     rd["recovered"] = True
-                    return rd
-                # deterministic fix didn't fully work — hand the coerced SQL to
-                # the LLM repair so it builds on the partial fix.
-                sql, err = det, rd.get("error", err)
-            # Self-heal step 2 — ask Gemini to rewrite the failing SQL given the
-            # BQ error message. Cheap, scoped to one widget. Returns nothing
-            # if repair fails, in which case the original error is surfaced.
-            repaired = _repair_widget_sql(sql, err, widget_meta or {})
-            if repaired and repaired.strip() and repaired.strip() != sql.strip():
-                repaired = normalize_bq_project(repaired)
-                repaired = _autofix_dashboard_sql(repaired)
-                print(f"[dashboard]   {tag} retry with repaired SQL: {repaired[:200]}…")
-                r2 = bq_run_query(repaired, max_rows=200)
-                if "error" not in r2:
-                    print(f"[dashboard]   {tag} ok on retry — {len(r2.get('rows') or [])} rows")
-                    r2["sql"] = repaired
-                    r2["recovered"] = True
-                    return r2
+                    r = rd
                 else:
-                    print(f"[dashboard]   {tag} retry also failed: {r2.get('error')}")
+                    # deterministic fix didn't fully work — hand the coerced SQL
+                    # to the LLM repair so it builds on the partial fix.
+                    sql, err = det, rd.get("error", err)
+            if "error" in r:
+                # Self-heal step 2 — ask Gemini to rewrite the failing SQL given
+                # the BQ error message. Cheap, scoped to one widget.
+                repaired = _repair_widget_sql(sql, err, widget_meta)
+                if repaired and repaired.strip() and repaired.strip() != sql.strip():
+                    repaired = normalize_bq_project(repaired)
+                    repaired = _autofix_dashboard_sql(repaired)
+                    print(f"[dashboard]   {tag} retry with repaired SQL: {repaired[:200]}…")
+                    r2 = bq_run_query(repaired, max_rows=200)
+                    if "error" not in r2:
+                        print(f"[dashboard]   {tag} ok on retry — {len(r2.get('rows') or [])} rows")
+                        r2["sql"] = repaired
+                        r2["recovered"] = True
+                        # Learn from the mistake so generation stops making it.
+                        _record_sql_lesson("dashboard", "error", sql, repaired, failure_text=err)
+                        r = r2
+                    else:
+                        print(f"[dashboard]   {tag} retry also failed: {r2.get('error')}")
         else:
             print(f"[dashboard]   {tag} ok — {len(r.get('rows') or [])} rows, cols={r.get('columns')}")
+
+        # Self-heal step 3 — the query "succeeded" but the user would see an
+        # empty panel (zero rows / all-NULL KPI). That is a failure too: run the
+        # diagnose→repair→re-run loop, learn the lesson, and as a last resort
+        # deliver a broadened on-topic view or a concrete diagnosis. The user
+        # must always get SOMETHING.
+        if "error" not in r and _is_empty_result(r, kind):
+            print(f"[dashboard]   {tag} EMPTY — starting zero-rows self-heal")
+            healed = _heal_empty_widget(sql_template, _run_template, widget_meta,
+                                        run_lessons, surface="dashboard",
+                                        sql_allowed=_sql_allowed)
+            if healed and healed.get("result") is not None:
+                r = healed["result"]
+                r["recovered"] = True
+                r["note"] = healed.get("note") or ""
+                tpl = healed.get("template") or ""
+                # Persist the fix into the saved dashboard ONLY when it is a
+                # true repair (not a broadened fallback view) and it preserves
+                # the {where} placeholder contract.
+                if (not healed.get("downgraded")
+                        and (("{where}" in sql_template) == ("{where}" in tpl))):
+                    r["healed_template"] = tpl
+                    r["original_template"] = sql_template
+            elif healed:
+                r["note"] = healed.get("note") or ""
         return r
 
     def _pick_kpi_value(rows: list, cols: list):
@@ -7641,6 +8029,8 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         # 3) fall back to the literal first cell (might be null — still better than crash)
         return row0.get(cols[0])
 
+    healed_templates = {}  # (section, index) -> repaired SQL template to persist
+
     kpis_out = []
     for i, k in enumerate((config.get("kpis") or [])[:6]):
         kid = k.get("id") or f"kpi{i}"
@@ -7659,6 +8049,12 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
             card["error"] = r["error"]
         else:
             card["value"] = _pick_kpi_value(r.get("rows") or [], r.get("columns") or [])
+        if r.get("recovered"):
+            card["recovered"] = True
+        if r.get("note"):
+            card["note"] = r["note"]
+        if r.get("healed_template"):
+            healed_templates[("kpis", i)] = (r.get("original_template") or "", r["healed_template"])
         kpis_out.append(card)
 
     charts_out = []
@@ -7681,7 +8077,53 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         }
         if "error" in r:
             card["error"] = r["error"]
+        if r.get("recovered"):
+            card["recovered"] = True
+        if r.get("note"):
+            card["note"] = r["note"]
+        if r.get("healed_template"):
+            healed_templates[("charts", i)] = (r.get("original_template") or "", r["healed_template"])
         charts_out.append(card)
+
+    # ── Persist true repairs back into the saved dashboard ──────────────────
+    # A healed panel would otherwise re-pay the whole diagnose→repair loop on
+    # every load. Writing the fixed SQL back makes the fix permanent — the
+    # dashboard has "learned". Broadened fallback views are never persisted
+    # (they are a one-off display adjustment, not a fix), and viewers without
+    # edit rights don't mutate someone else's dashboard.
+    dash_id = body.get("dashboard_id")
+    if dash_id and healed_templates:
+        try:
+            db = get_db(); cur = db.cursor()
+            role, owner = _share_role(cur, _SHARE_CFG["dashboard"], int(dash_id), int(user["sub"]))
+            if role in ("owner", "editor"):
+                cur.execute("SELECT config FROM saved_dashboards WHERE id = ?", (int(dash_id),))
+                row = cur.fetchone()
+                raw = (row["config"] if isinstance(row, dict) else row[0]) if row else None
+                saved_cfg = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                def _sqlkey(s):
+                    # loose identity: ignore whitespace runs + code fences
+                    return " ".join(str(s or "").replace("`", "").split())
+                changed = 0
+                for (section, idx), (orig_tpl, tpl) in healed_templates.items():
+                    panels = saved_cfg.get(section) or []
+                    # Only overwrite when the saved panel still holds the SQL we
+                    # actually healed (the run config comes from the client and
+                    # could have drifted from the DB copy).
+                    if (idx < len(panels) and isinstance(panels[idx], dict)
+                            and _sqlkey(panels[idx].get("sql")) == _sqlkey(orig_tpl)):
+                        panels[idx]["sql"] = tpl
+                        changed += 1
+                if changed:
+                    from database import USE_POSTGRES
+                    now_expr = "NOW()" if USE_POSTGRES else "datetime('now')"
+                    cur.execute(f"UPDATE saved_dashboards SET config = ?, updated_at = {now_expr} WHERE id = ?",
+                                (json.dumps(saved_cfg), int(dash_id)))
+                    db.commit()
+                    print(f"[dashboard] persisted {changed} self-healed panel(s) into dashboard {dash_id}")
+            db.close()
+        except Exception as e:
+            print(f"[dashboard] persisting healed SQL failed (non-fatal): {e}")
 
     # ── Populate filter dropdown options ──
     # The frontend reads data.filterOptions[field] to render dropdown choices.
@@ -11999,6 +12441,7 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
         contents.append(genai.types.Content(role=role, parts=[genai.types.Part(text=m.get("text", ""))]))
     contents.append(genai.types.Content(role="user", parts=[genai.types.Part(text=msg)]))
 
+    _lessons = _sql_lessons_block()
     try:
         resp = client.models.generate_content(
             model="gemini-2.5-flash",
@@ -12011,7 +12454,8 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
                     _load_schema_settings_block() + "\n\n" +
                     live_schema.render_context_block() +
                     _user_context_addon(user) +
-                    edit_addon
+                    edit_addon +
+                    (("\n\n" + _lessons) if _lessons else "")
                 ),
                 temperature=0.4,
                 # Reports often span 3-6 sections each with a SQL block;
@@ -12097,22 +12541,68 @@ def _run_report_config(config: dict) -> dict:
     sql = normalize_bq_project(sql)
     sql = _autofix_dashboard_sql(sql)
 
+    def _run_report_sql(tpl):
+        s = _autofix_dashboard_sql(normalize_bq_project(tpl))
+        rr = bq_run_query(s, max_rows=200)
+        rr["sql"] = s
+        return rr
+
+    original_touches_sales = _sql_touches_sales(sql)
+    def _sql_allowed(s):
+        return original_touches_sales or not _sql_touches_sales(s)
+
+    heal_note = None
     print(f"[report] running SQL: {sql[:220]}{'...' if len(sql) > 220 else ''}")
     r = bq_run_query(sql, max_rows=200)
     if "error" in r:
-        print(f"[report]   ERROR: {r['error']}")
-        return {
-            "title": title,
-            "description": description,
-            "sql": sql,
-            "columns": [],
-            "all_columns": [],
-            "rows": [],
-            "total_rows": 0,
-            "numeric_columns": [],
-            "total_columns": [],
-            "error": r["error"],
-        }
+        err = r["error"]
+        print(f"[report]   ERROR: {err}")
+        # Same self-heal ladder as dashboard panels: deterministic repair, then
+        # one LLM repair — the report must not die on a fixable SQL error.
+        det = _deterministic_sql_repair(sql, err)
+        if det:
+            rd = _run_report_sql(det)
+            if "error" not in rd:
+                print(f"[report]   ok after deterministic self-heal — {len(rd.get('rows') or [])} rows")
+                sql, r = rd["sql"], rd
+            else:
+                sql, err = rd["sql"], rd.get("error", err)
+        if "error" in r:
+            repaired = _repair_widget_sql(sql, err, {"kind": "report", "title": title})
+            if repaired and repaired.strip() and repaired.strip() != sql.strip() and _sql_allowed(repaired):
+                r2 = _run_report_sql(repaired)
+                if "error" not in r2:
+                    print(f"[report]   ok after LLM repair — {len(r2.get('rows') or [])} rows")
+                    _record_sql_lesson("report", "error", sql, r2["sql"], failure_text=err)
+                    sql, r = r2["sql"], r2
+                    heal_note = "This report's query was automatically repaired."
+        if "error" in r:
+            return {
+                "title": title,
+                "description": description,
+                "sql": sql,
+                "columns": [],
+                "all_columns": [],
+                "rows": [],
+                "total_rows": 0,
+                "numeric_columns": [],
+                "total_columns": [],
+                "error": r["error"],
+            }
+
+    # Zero rows is a failure too — run the diagnose→repair→broaden loop so the
+    # user always gets data or a concrete diagnosis, never a silent empty table.
+    if _is_empty_result(r, "report"):
+        print("[report]   EMPTY — starting zero-rows self-heal")
+        healed = _heal_empty_widget(sql, _run_report_sql,
+                                    {"kind": "report", "title": title, "context": description},
+                                    run_lessons=[], surface="report", sql_allowed=_sql_allowed)
+        if healed and healed.get("result") is not None:
+            r = healed["result"]
+            sql = r.get("sql", sql)
+            heal_note = healed.get("note") or "This report's query was automatically repaired."
+        elif healed:
+            heal_note = healed.get("note")
 
     all_columns = r.get("columns") or []
     rows        = r.get("rows") or []
@@ -12137,7 +12627,11 @@ def _run_report_config(config: dict) -> dict:
         "numeric_columns": numeric_columns,
         "total_columns": total_columns,
     }
-    if not rows:
+    if heal_note:
+        out["note"] = heal_note
+        if rows:
+            out["recovered"] = True
+    if not rows and not heal_note:
         # The query ran fine but matched nothing — almost always over-narrow
         # filters (a person who isn't on that project, a status with no items,
         # or a date range with no activity). Tell the user how to widen it.

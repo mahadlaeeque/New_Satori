@@ -101,6 +101,7 @@ def init_db():
     _migrate_finalize_tmc_superadmin()
     _migrate_add_api_keys()
     _migrate_add_google_calendar()
+    _migrate_add_ai_sql_lessons()
     _migrate_add_satori_feedback()
     _migrate_seed_named_users()
     _migrate_seed_admin_users()
@@ -482,6 +483,43 @@ def _migrate_add_google_calendar():
         print("[DB] Migration: user_google_tokens table present")
     except Exception as e:
         print(f"[DB] Google Calendar migration error (safe to ignore on fresh DB): {e}")
+
+
+def _migrate_add_ai_sql_lessons():
+    """Idempotent migration: the AI self-healing lesson store. Every time a
+    dashboard/report query fails (BQ error OR zero rows) and the runtime
+    repair loop finds a fix, we distill a one-line transferable lesson and
+    persist it here. Lessons are injected back into the generation + repair
+    prompts, so the AI stops repeating mistakes it has already fixed once —
+    it learns from its errors then and there, across all users and sessions.
+    Deduped by `signature`; `hits` counts how often a lesson re-proved itself
+    (used for prompt-injection ranking)."""
+    ddl = """
+        CREATE TABLE IF NOT EXISTS ai_sql_lessons (
+            id          {pk},
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            surface     TEXT,
+            failure_kind TEXT,
+            signature   TEXT UNIQUE,
+            lesson      TEXT NOT NULL,
+            bad_sql     TEXT,
+            fixed_sql   TEXT,
+            hits        INTEGER NOT NULL DEFAULT 1
+        )
+    """
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        if USE_POSTGRES:
+            cur.execute(ddl.format(pk="SERIAL PRIMARY KEY"))
+        else:
+            cur.execute(ddl.format(pk="INTEGER PRIMARY KEY AUTOINCREMENT"))
+        conn.commit()
+        conn.close()
+        print("[DB] Migration: ai_sql_lessons table present")
+    except Exception as e:
+        print(f"[DB] ai_sql_lessons migration error (safe to ignore on fresh DB): {e}")
 
 
 def _migrate_add_data_scope_tables():

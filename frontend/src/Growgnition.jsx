@@ -6310,7 +6310,7 @@ const SalesInvoiceDashboard = () => {
 };
 
 // ─── Dashboard Renderer (generic spec-driven dashboard) ───
-const DashboardRenderer = ({ spec, onBack }) => {
+const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState({ kpis: [], charts: [], filterOptions: {} });
   const [filterValues, setFilterValues] = useState({});
@@ -6402,7 +6402,7 @@ const DashboardRenderer = ({ spec, onBack }) => {
       const res = await fetch(`${base}/api/dashboard/run`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ config: spec, filters: filterValues }),
+        body: JSON.stringify({ config: spec, filters: filterValues, dashboard_id: dashboardId || null }),
       });
       if (!res.ok) throw new Error("Failed to load dashboard");
       const result = await res.json();
@@ -6483,7 +6483,9 @@ const DashboardRenderer = ({ spec, onBack }) => {
             ) : (
               <>
                 <div style={{ marginBottom: 4 }}>No data for the chosen scope.</div>
-                <div style={{ fontSize: 11.5, color: COLORS.textMuted }}>Try clearing filters or editing the dashboard.</div>
+                <div style={{ fontSize: 11.5, color: COLORS.textMuted, maxWidth: 380, lineHeight: 1.45 }}>
+                  {chart.note || "Try clearing filters or editing the dashboard."}
+                </div>
               </>
             )}
           </div>
@@ -6897,26 +6899,52 @@ const DashboardRenderer = ({ spec, onBack }) => {
               ...((data.kpis || []).map((k) => {
                 const hasError = !!k.error;
                 const empty = !hasError && (k.value === null || k.value === undefined || k.value === "");
-                return { kind: "KPI", title: k.title, error: k.error, sql: k.sql,
+                return { kind: "KPI", title: k.title, error: k.error, sql: k.sql, note: k.note,
                          status: hasError ? "error" : (empty ? "empty" : "ok"),
                          rows: empty ? 0 : (hasError ? 0 : 1) };
               })),
               ...((data.charts || []).map((c) => {
                 const hasError = !!c.error;
                 const rowCount = (c.data || []).length;
-                return { kind: "Chart", title: c.title, error: c.error, sql: c.sql,
+                return { kind: "Chart", title: c.title, error: c.error, sql: c.sql, note: c.note,
                          status: hasError ? "error" : (rowCount === 0 ? "empty" : "ok"),
                          rows: rowCount };
               })),
             ];
             const problems = widgets.filter((w) => w.status !== "ok");
-            if (problems.length === 0) return null;
+            // Panels the self-healing loop repaired at run time — data is live,
+            // just let the user know the AI fixed the query for them.
+            const repaired = [
+              ...((data.kpis || []).filter((k) => k.recovered).map((k) => ({ kind: "KPI", title: k.title, note: k.note }))),
+              ...((data.charts || []).filter((c) => c.recovered).map((c) => ({ kind: "Chart", title: c.title, note: c.note }))),
+            ];
+            const repairedBanner = repaired.length > 0 && (
+              <details style={{
+                marginBottom: 16, padding: "10px 14px", borderRadius: 10,
+                background: "var(--sem-ok-bg, #ECFDF5)", border: "1px solid #6EE7B7",
+                fontSize: 12.5, color: "var(--sem-ok-fg, #065F46)"
+              }}>
+                <summary style={{ cursor: "pointer", fontWeight: 600 }}>
+                  <Sparkles size={13} style={{ verticalAlign: "middle", marginRight: 6 }} />
+                  {repaired.length} {repaired.length === 1 ? "query was" : "queries were"} automatically repaired — showing live data
+                </summary>
+                <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+                  {repaired.map((w, ix) => (
+                    <div key={ix}>
+                      <strong>{w.kind}: {w.title}</strong>{w.note ? ` — ${w.note}` : ""}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            );
+            if (problems.length === 0) return repairedBanner || null;
             const errCount = problems.filter((w) => w.status === "error").length;
             const emptyCount = problems.filter((w) => w.status === "empty").length;
             const headline = errCount > 0
               ? `${errCount} ${errCount === 1 ? "query" : "queries"} errored${emptyCount ? ` and ${emptyCount} returned no rows` : ""} — click for SQL`
               : `${emptyCount} ${emptyCount === 1 ? "query" : "queries"} returned no rows — click to see the SQL`;
-            return (
+            return (<>
+              {repairedBanner}
               <details style={{
                 marginBottom: 16, padding: "10px 14px", borderRadius: 10,
                 background: "var(--sem-warn-bg)", border: "1px solid #FCD34D", fontSize: 12.5, color: "var(--sem-amber2-fg)"
@@ -6938,6 +6966,9 @@ const DashboardRenderer = ({ spec, onBack }) => {
                       {w.error && (
                         <div style={{ fontFamily: "monospace", fontSize: 11.5, color: "#7C2D12", marginBottom: 4 }}>{w.error}</div>
                       )}
+                      {w.note && (
+                        <div style={{ fontSize: 12, marginBottom: 4 }}>{w.note}</div>
+                      )}
                       {w.sql && (
                         <pre style={{
                           marginTop: 6, padding: 8, background: COLORS.surfaceAlt, borderRadius: 6,
@@ -6948,7 +6979,7 @@ const DashboardRenderer = ({ spec, onBack }) => {
                   ))}
                 </div>
               </details>
-            );
+            </>);
           })()}
 
           {/* KPI grid */}
@@ -6966,7 +6997,7 @@ const DashboardRenderer = ({ spec, onBack }) => {
                     color={COLORS.chartColors[i % COLORS.chartColors.length]}
                     change={kpi.change}
                     changeType={kpi.changeType}
-                    subtitle={kpi.error ? `Error — see banner above` : (kpi.subtitle || (hasValue ? null : "No matching data"))}
+                    subtitle={kpi.error ? `Error — see banner above` : (kpi.note || kpi.subtitle || (hasValue ? null : "No matching data"))}
                   />
                 );
               })}
@@ -8419,7 +8450,7 @@ const DashboardsPage = () => {
             background: COLORS.surface, borderRadius: 16, border: `1px solid ${COLORS.border}`,
             padding: 20, overflowY: "auto", minWidth: 0, transition: "flex 0.2s ease"
           }}>
-            <DashboardRenderer key={renderKey} spec={activeConfig} />
+            <DashboardRenderer key={renderKey} spec={activeConfig} dashboardId={activeId} />
           </div>
           {chatOpen && (!activeIsShared || activeCanEdit) && (
             <div style={{
