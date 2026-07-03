@@ -22,6 +22,7 @@ import {
 // splitting it keeps login/first-paint lean. Projects gets the same treatment.
 const AvailabilityEnginePage = lazy(() => import("./AvailabilityEngine.jsx"));
 const ProjectsPage = lazy(() => import("./ProjectsPage.jsx"));
+const AttendancePage = lazy(() => import("./Attendance.jsx"));
 import SatoriAvatar from "./components/SatoriAvatar.jsx";
 
 // ─── TMC Brand Color Palette ───
@@ -259,8 +260,8 @@ const ONBOARDING_STEPS = [
     body: "Your AI partner for workforce and sales intelligence. This two-minute tour walks through every part of the platform — skip anytime, or replay it from Help.",
     narration: "Hi, I'm Satori — your AI partner for workforce and sales intelligence. Let me walk you through everything I can do. It only takes two minutes, and you can skip or replay this tour anytime from the Help menu." },
   { selector: '[data-tour="nav"]', placement: "right", page: "agent", title: "Find your way around",
-    body: "Everything lives in this sidebar: Ask Me Anything, the Report Builder, the Dashboard Builder, and the Availability Engine. We'll visit each one.",
-    narration: "This sidebar is home base. From here you can reach Ask Me Anything, the Report Builder, the Dashboard Builder, and the Availability Engine. Let's visit each one." },
+    body: "Everything lives in this sidebar: Ask Me Anything, Reports, Dashboards, Attendance, and the Availability Engine. We'll visit each one.",
+    narration: "This sidebar is home base. From here you can reach Ask Me Anything, Reports, Dashboards, Attendance, and the Availability Engine. Let's visit each one." },
   { selector: '[data-tour="agent-input"]', placement: "top", page: "agent", title: "Ask Me Anything — in plain English",
     body: "Ask about attendance, timesheets, allocation, or sales — Satori writes the SQL against live warehouse data and answers in business language. There's a voice mode too, in English or Urdu.",
     narration: "This is Ask Me Anything. Type any question about attendance, timesheets, allocation, or sales — in plain English — and I'll query the live data warehouse and answer in business language. You can also talk to me by voice, in English or Urdu." },
@@ -270,12 +271,12 @@ const ONBOARDING_STEPS = [
   { selector: '[data-tour="briefing"]', placement: "left", page: "agent", title: "Your daily briefing",
     body: "Press Daily Briefing and Satori reads the day's key findings aloud — attendance, timesheets and allocation anomalies, summarised. You can mute the voice anytime and just read along.",
     narration: "Press the Daily Briefing card and I'll read you the day's key findings aloud — the attendance, timesheet and allocation anomalies I've spotted, summarised. You can mute my voice anytime and just read along." },
-  { selector: '[data-tour="nav-reports"]', placement: "right", page: "reports", title: "Report Builder",
-    body: "Describe the report you need and Satori builds it as a real table — refine it in chat, download as Excel or PDF, and share it with teammates as view-only or editable.",
-    narration: "This is the Report Builder. Describe the report you need and I'll build it as a real table. You can refine it in chat, download it as Excel or P D F, and share it with teammates." },
-  { selector: '[data-tour="nav-dashboards"]', placement: "right", page: "dashboards", title: "Dashboard Builder",
-    body: "Describe a dashboard and get live KPIs, charts and filters built from the warehouse. Click any chart to drill down, refine in chat, and share with your team.",
-    narration: "Next, the Dashboard Builder. Describe what you want to monitor and I'll build live KPIs, charts and filters. Click any chart to drill into the detail behind it, refine it in chat, and share it with your team." },
+  { selector: '[data-tour="nav-reports"]', placement: "right", page: "reports", title: "Reports",
+    body: "Prebuilt reports tailored to your data are ready and always up to date — or describe the report you need and Satori builds it as a real table. Refine in chat, download as Excel or PDF, and share with teammates.",
+    narration: "This is Reports. You'll find prebuilt reports tailored to your data that stay up to date on their own — or describe the report you need and I'll build it as a real table. You can refine it in chat, download it as Excel or P D F, and share it with teammates." },
+  { selector: '[data-tour="nav-dashboards"]', placement: "right", page: "dashboards", title: "Dashboards",
+    body: "Prebuilt live dashboards are ready for you — or describe one and get live KPIs, charts and filters built from the warehouse. Click any chart to drill down, refine in chat, and share with your team.",
+    narration: "Next, Dashboards. Prebuilt live dashboards are already waiting for you — or describe what you want to monitor and I'll build live KPIs, charts and filters. Click any chart to drill into the detail behind it, refine it in chat, and share it with your team." },
   { selector: '[data-tour="nav-calendar"]', placement: "right", page: "calendar", title: "Your Calendar",
     body: "Connect your Google Calendar and Satori shows your meetings in a month view — and the AI can answer schedule questions like “what's my next meeting?” or “am I free Thursday?”. It's read-only, per person, and never shared.",
     narration: "This is your Calendar. Connect your Google Calendar and I'll show your meetings in a month view — and you can ask me things like what's my next meeting, or am I free on Thursday. It's read-only, it's just yours, and I never share it." },
@@ -4314,6 +4315,8 @@ const HiddenColumnsMenu = ({ hidden, onAdd }) => {
 // ─── Reports Page (orchestrator: list / creating / viewing) ───
 const ReportsPage = () => {
   const [reports, setReports] = useState([]);
+  const [prebuilts, setPrebuilts] = useState([]);   // auto-updating, server-generated
+  const [activePrebuilt, setActivePrebuilt] = useState(null); // prebuilt key when viewing one
   const [loading, setLoading] = useState(true);
   const [mode, setMode] = useState("list");
 
@@ -4353,6 +4356,7 @@ const ReportsPage = () => {
       if (!res.ok) throw new Error("Failed to load reports");
       const list = await res.json();
       setReports(Array.isArray(list) ? list : list.reports || []);
+      setPrebuilts(Array.isArray(list) ? [] : list.prebuilt || []);
     } catch (err) {
       console.error("ReportsPage fetch error:", err);
     } finally {
@@ -4385,6 +4389,7 @@ const ReportsPage = () => {
       setActiveFavorite(!!full.is_favorite);
       setActiveIsShared(!!full.is_shared);
       setActiveCanEdit(!!full.can_edit);
+      setActivePrebuilt(null);
       setChatOpen(false);
       setShareOpen(false);
       setSaveState("idle");
@@ -4395,6 +4400,57 @@ const ReportsPage = () => {
     }
   };
 
+  // Prebuilt reports are generated server-side per user (dept-tailored,
+  // CURRENT_DATE-relative). Read-only — "Save my copy" clones into the user's
+  // own list where full editing/sharing/scheduling applies.
+  const openPrebuilt = async (pb) => {
+    const token = localStorage.getItem("token");
+    const base = import.meta.env.VITE_API_BASE || "";
+    try {
+      const res = await fetch(`${base}/api/reports/prebuilt/${pb.key}`, {
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      });
+      if (!res.ok) throw new Error("Failed to load");
+      const full = await res.json();
+      setActiveId(null);
+      setActiveConfig(full.config);
+      setActiveName(full.name || "Prebuilt report");
+      setActiveFavorite(false);
+      setActiveIsShared(false);
+      setActiveCanEdit(false);
+      setActivePrebuilt(pb.key);
+      setChatOpen(false);
+      setShareOpen(false);
+      setSaveState("idle");
+      setMode("viewing");
+      setPreviewRev((k) => k + 1);
+    } catch (err) {
+      alert("Failed to load: " + err.message);
+    }
+  };
+
+  const handleSaveCopy = async () => {
+    const token = localStorage.getItem("token");
+    const base = import.meta.env.VITE_API_BASE || "";
+    try {
+      const res = await fetch(`${base}/api/reports`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: activeName,
+          description: activeConfig?.description || "",
+          config: activeConfig,
+        }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+      const j = await res.json();
+      setActivePrebuilt(null);
+      await openReport({ id: j.id });
+    } catch (err) {
+      alert("Save failed: " + err.message);
+    }
+  };
+
   const startCreating = () => {
     setActiveId(null);
     setActiveConfig(null);
@@ -4402,6 +4458,7 @@ const ReportsPage = () => {
     setActiveFavorite(false);
     setActiveIsShared(false);
     setActiveCanEdit(true);
+    setActivePrebuilt(null);
     setChatOpen(false);
     setShareOpen(false);
     setSaveState("idle");
@@ -4412,6 +4469,7 @@ const ReportsPage = () => {
     setMode("list");
     setActiveId(null);
     setActiveConfig(null);
+    setActivePrebuilt(null);
     setSaveState("idle");
     fetchReports();
   };
@@ -4621,15 +4679,15 @@ const ReportsPage = () => {
               />
             ) : (
               <div
-                onClick={() => { if (!activeIsShared) { setTitleDraft(activeName); setEditingTitle(true); } }}
-                title={activeIsShared ? "Read-only — owner controls renaming" : "Click to rename"}
+                onClick={() => { if (!activeIsShared && !activePrebuilt) { setTitleDraft(activeName); setEditingTitle(true); } }}
+                title={(activeIsShared || activePrebuilt) ? "Read-only" : "Click to rename"}
                 style={{
                   fontSize: 20, fontWeight: 700, color: COLORS.textPrimary,
-                  cursor: activeIsShared ? "default" : "text",
+                  cursor: (activeIsShared || activePrebuilt) ? "default" : "text",
                   padding: "3px 6px", borderRadius: 6, border: "1px solid transparent",
                   overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 480
                 }}
-                onMouseEnter={(e) => { if (!activeIsShared) e.currentTarget.style.borderColor = COLORS.border; }}
+                onMouseEnter={(e) => { if (!activeIsShared && !activePrebuilt) e.currentTarget.style.borderColor = COLORS.border; }}
                 onMouseLeave={(e) => (e.currentTarget.style.borderColor = "transparent")}
               >
                 {activeName}
@@ -4644,10 +4702,30 @@ const ReportsPage = () => {
                 <Share2 size={11} /> Shared with you
               </span>
             )}
+            {activePrebuilt && (
+              <span style={{
+                fontSize: 11, fontWeight: 600, color: "var(--sem-ok-fg, #065F46)",
+                background: "var(--sem-ok-bg, #ECFDF5)", padding: "3px 10px", borderRadius: 20,
+                display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0,
+              }}>
+                <Sparkles size={11} /> Prebuilt · always up to date
+              </span>
+            )}
             <SaveStatePill state={saveState} />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-            {!activeIsShared && (
+            {activePrebuilt && (
+              <button onClick={handleSaveCopy} title="Save an editable copy into your own list" style={{
+                padding: "8px 14px", borderRadius: 8, border: "none",
+                background: `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})`,
+                color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
+                display: "flex", alignItems: "center", gap: 6,
+                boxShadow: "0 4px 12px rgba(53,48,133,0.25)",
+              }}>
+                <Copy size={14} /> Save my copy
+              </button>
+            )}
+            {!activeIsShared && !activePrebuilt && (
               <>
                 <button onClick={handleToggleFavorite} title={activeFavorite ? "Remove from favorites" : "Mark as favorite"} style={{
                   background: activeFavorite ? `${COLORS.warning}1a` : "#fff",
@@ -4710,7 +4788,7 @@ const ReportsPage = () => {
                 <Sparkles size={14} /> Edit with AI
               </button>
             )}
-            <div ref={menuRef} style={{ position: "relative" }}>
+            <div ref={menuRef} style={{ position: "relative", display: activePrebuilt ? "none" : "block" }}>
               <button onClick={() => setMenuOpen((v) => !v)} title="More" style={{
                 background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
                 padding: "8px 10px", cursor: "pointer", color: COLORS.textSecondary,
@@ -4749,7 +4827,7 @@ const ReportsPage = () => {
               configRev={previewRev}
               onConfigChange={handleSilentConfigEnrich}
               onSaveMeta={persistMeta}
-              isReadOnly={activeIsShared && !activeCanEdit}
+              isReadOnly={(activeIsShared && !activeCanEdit) || !!activePrebuilt}
             />
           </div>
           {chatOpen && (!activeIsShared || activeCanEdit) && (
@@ -4822,6 +4900,50 @@ const ReportsPage = () => {
         </div>
       )}
 
+      {!loading && prebuilts.length > 0 && (
+        <div style={{ marginBottom: 28 }}>
+          <div style={{
+            fontSize: 12, fontWeight: 700, color: COLORS.textSecondary, textTransform: "uppercase",
+            letterSpacing: 0.6, marginBottom: 12, display: "flex", alignItems: "center", gap: 7,
+          }}>
+            <Sparkles size={13} color={COLORS.accentDark} /> Prebuilt for you — always up to date
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
+            {prebuilts.map((pb) => (
+              <div
+                key={pb.id}
+                onClick={() => openPrebuilt(pb)}
+                style={{
+                  background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14,
+                  padding: 18, cursor: "pointer", transition: "box-shadow 0.15s ease",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.boxShadow = "0 6px 18px rgba(0,0,0,0.08)")}
+                onMouseLeave={(e) => (e.currentTarget.style.boxShadow = "none")}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                  <FileText size={18} color={COLORS.accentDark} />
+                  <span style={{
+                    fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+                    color: "var(--sem-ok-fg, #065F46)", background: "var(--sem-ok-bg, #ECFDF5)",
+                    padding: "2px 8px", borderRadius: 12,
+                  }}>LIVE</span>
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 4 }}>{pb.name}</div>
+                <div style={{ fontSize: 12, color: COLORS.textSecondary, lineHeight: 1.5 }}>{pb.description}</div>
+              </div>
+            ))}
+          </div>
+          {reports.length > 0 && (
+            <div style={{
+              fontSize: 12, fontWeight: 700, color: COLORS.textSecondary, textTransform: "uppercase",
+              letterSpacing: 0.6, marginTop: 28,
+            }}>
+              Your reports
+            </div>
+          )}
+        </div>
+      )}
+
       {!loading && reports.length === 0 && (
         <div style={{ textAlign: "center", padding: 80, background: COLORS.surface, borderRadius: 16, border: `1px dashed ${COLORS.border}` }}>
           <div style={{
@@ -4830,7 +4952,7 @@ const ReportsPage = () => {
           }}>
             <FileText size={32} color={COLORS.textMuted} />
           </div>
-          <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 6 }}>No reports yet</div>
+          <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 6 }}>No custom reports yet</div>
           <div style={{ fontSize: 13, color: COLORS.textSecondary, marginBottom: 22, maxWidth: 420, margin: "0 auto 22px", lineHeight: 1.55 }}>
             Describe the data you want to see and AI will design a tabular report — saved automatically, exportable to Excel or PDF.
           </div>
@@ -6388,10 +6510,15 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
   };
 
   const formatValue = (v, fmt) => {
-    if (fmt === "pkr") return fmtPkr(v);
-    if (fmt === "percent") return `${v}%`;
-    if (fmt === "number") return fmtQty(v);
-    return v ?? "0";
+    if (v == null || v === "") return "0";
+    // Non-numeric KPI values (avg check-in "09:58", names, statuses) must be
+    // shown as-is — Number("09:58") is NaN and used to render literally "NaN".
+    const n = Number(v);
+    if (!Number.isFinite(n)) return String(v);
+    if (fmt === "pkr") return fmtPkr(n);
+    if (fmt === "percent") return `${n}%`;
+    if (fmt === "number") return fmtQty(n);
+    return String(v);
   };
 
   const fetchData = useCallback(async () => {
@@ -8049,6 +8176,8 @@ const DashboardCard = ({ dashboard, onOpen, onDelete, onDuplicate, onRemoveFromL
 // ─── Dashboards Page (orchestrator: list / creating / viewing) ───
 const DashboardsPage = () => {
   const [dashboards, setDashboards] = useState([]);
+  const [prebuilts, setPrebuilts] = useState([]);   // auto-updating, server-generated
+  const [activePrebuilt, setActivePrebuilt] = useState(null); // prebuilt key when viewing one
   const [loading, setLoading] = useState(true);
   const [mode, setMode] = useState("list"); // "list" | "creating" | "viewing"
 
@@ -8088,6 +8217,7 @@ const DashboardsPage = () => {
       if (!res.ok) throw new Error("Failed to load dashboards");
       const list = await res.json();
       setDashboards(Array.isArray(list) ? list : list.dashboards || []);
+      setPrebuilts(Array.isArray(list) ? [] : list.prebuilt || []);
     } catch (err) {
       console.error("DashboardsPage fetch error:", err);
     } finally {
@@ -8121,6 +8251,7 @@ const DashboardsPage = () => {
       setActiveFavorite(!!full.is_favorite);
       setActiveIsShared(!!full.is_shared);
       setActiveCanEdit(!!full.can_edit);
+      setActivePrebuilt(null);
       setChatOpen(false);
       setShareOpen(false);
       setSaveState("idle");
@@ -8131,6 +8262,57 @@ const DashboardsPage = () => {
     }
   };
 
+  // Prebuilt dashboards are generated server-side per user (dept-tailored,
+  // CURRENT_DATE-relative). Read-only — "Save my copy" clones into the user's
+  // own list where full editing/sharing/scheduling applies.
+  const openPrebuilt = async (pb) => {
+    const token = localStorage.getItem("token");
+    const base = import.meta.env.VITE_API_BASE || "";
+    try {
+      const res = await fetch(`${base}/api/dashboards/prebuilt/${pb.key}`, {
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      });
+      if (!res.ok) throw new Error("Failed to load");
+      const full = await res.json();
+      setActiveId(null);
+      setActiveConfig(full.config);
+      setActiveName(full.name || "Prebuilt dashboard");
+      setActiveFavorite(false);
+      setActiveIsShared(false);
+      setActiveCanEdit(false);
+      setActivePrebuilt(pb.key);
+      setChatOpen(false);
+      setShareOpen(false);
+      setSaveState("idle");
+      setMode("viewing");
+      setRenderKey((k) => k + 1);
+    } catch (err) {
+      alert("Failed to load: " + err.message);
+    }
+  };
+
+  const handleSaveCopy = async () => {
+    const token = localStorage.getItem("token");
+    const base = import.meta.env.VITE_API_BASE || "";
+    try {
+      const res = await fetch(`${base}/api/dashboards`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: activeName,
+          description: activeConfig?.description || "",
+          config: activeConfig,
+        }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+      const j = await res.json();
+      setActivePrebuilt(null);
+      await openDashboard({ id: j.id });
+    } catch (err) {
+      alert("Save failed: " + err.message);
+    }
+  };
+
   const startCreating = () => {
     setActiveId(null);
     setActiveConfig(null);
@@ -8138,6 +8320,7 @@ const DashboardsPage = () => {
     setActiveFavorite(false);
     setActiveIsShared(false);
     setActiveCanEdit(true);
+    setActivePrebuilt(null);
     setChatOpen(false);
     setShareOpen(false);
     setSaveState("idle");
@@ -8148,6 +8331,7 @@ const DashboardsPage = () => {
     setMode("list");
     setActiveId(null);
     setActiveConfig(null);
+    setActivePrebuilt(null);
     setSaveState("idle");
     fetchDashboards();
   };
@@ -8328,15 +8512,15 @@ const DashboardsPage = () => {
               />
             ) : (
               <div
-                onClick={() => { if (!activeIsShared) { setTitleDraft(activeName); setEditingTitle(true); } }}
-                title={activeIsShared ? "Read-only — owner controls renaming" : "Click to rename"}
+                onClick={() => { if (!activeIsShared && !activePrebuilt) { setTitleDraft(activeName); setEditingTitle(true); } }}
+                title={(activeIsShared || activePrebuilt) ? "Read-only" : "Click to rename"}
                 style={{
                   fontSize: 20, fontWeight: 700, color: COLORS.textPrimary,
-                  cursor: activeIsShared ? "default" : "text",
+                  cursor: (activeIsShared || activePrebuilt) ? "default" : "text",
                   padding: "3px 6px", borderRadius: 6, border: "1px solid transparent",
                   overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 480
                 }}
-                onMouseEnter={(e) => { if (!activeIsShared) e.currentTarget.style.borderColor = COLORS.border; }}
+                onMouseEnter={(e) => { if (!activeIsShared && !activePrebuilt) e.currentTarget.style.borderColor = COLORS.border; }}
                 onMouseLeave={(e) => (e.currentTarget.style.borderColor = "transparent")}
               >
                 {activeName}
@@ -8351,10 +8535,30 @@ const DashboardsPage = () => {
                 <Share2 size={11} /> Shared with you
               </span>
             )}
+            {activePrebuilt && (
+              <span style={{
+                fontSize: 11, fontWeight: 600, color: "var(--sem-ok-fg, #065F46)",
+                background: "var(--sem-ok-bg, #ECFDF5)", padding: "3px 10px", borderRadius: 20,
+                display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0,
+              }}>
+                <Sparkles size={11} /> Prebuilt · always up to date
+              </span>
+            )}
             <SaveStatePill state={saveState} />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-            {!activeIsShared && (
+            {activePrebuilt && (
+              <button onClick={handleSaveCopy} title="Save an editable copy into your own list" style={{
+                padding: "8px 14px", borderRadius: 8, border: "none",
+                background: `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})`,
+                color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
+                display: "flex", alignItems: "center", gap: 6,
+                boxShadow: "0 4px 12px rgba(53,48,133,0.25)",
+              }}>
+                <Copy size={14} /> Save my copy
+              </button>
+            )}
+            {!activeIsShared && !activePrebuilt && (
               <>
                 <button onClick={handleToggleFavorite} title={activeFavorite ? "Remove from favorites" : "Mark as favorite"} style={{
                   background: activeFavorite ? `${COLORS.warning}1a` : "#fff",
@@ -8417,7 +8621,7 @@ const DashboardsPage = () => {
                 <Sparkles size={14} /> Edit with AI
               </button>
             )}
-            <div ref={menuRef} style={{ position: "relative" }}>
+            <div ref={menuRef} style={{ position: "relative", display: activePrebuilt ? "none" : "block" }}>
               <button onClick={() => setMenuOpen((v) => !v)} title="More" style={{
                 background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 8,
                 padding: "8px 10px", cursor: "pointer", color: COLORS.textSecondary,
@@ -8522,6 +8726,50 @@ const DashboardsPage = () => {
         </div>
       )}
 
+      {!loading && prebuilts.length > 0 && (
+        <div style={{ marginBottom: 28 }}>
+          <div style={{
+            fontSize: 12, fontWeight: 700, color: COLORS.textSecondary, textTransform: "uppercase",
+            letterSpacing: 0.6, marginBottom: 12, display: "flex", alignItems: "center", gap: 7,
+          }}>
+            <Sparkles size={13} color={COLORS.accentDark} /> Prebuilt for you — always up to date
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
+            {prebuilts.map((pb) => (
+              <div
+                key={pb.id}
+                onClick={() => openPrebuilt(pb)}
+                style={{
+                  background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 14,
+                  padding: 18, cursor: "pointer", transition: "box-shadow 0.15s ease",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.boxShadow = "0 6px 18px rgba(0,0,0,0.08)")}
+                onMouseLeave={(e) => (e.currentTarget.style.boxShadow = "none")}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                  <LayoutDashboard size={18} color={COLORS.accentDark} />
+                  <span style={{
+                    fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+                    color: "var(--sem-ok-fg, #065F46)", background: "var(--sem-ok-bg, #ECFDF5)",
+                    padding: "2px 8px", borderRadius: 12,
+                  }}>LIVE</span>
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 4 }}>{pb.name}</div>
+                <div style={{ fontSize: 12, color: COLORS.textSecondary, lineHeight: 1.5 }}>{pb.description}</div>
+              </div>
+            ))}
+          </div>
+          {dashboards.length > 0 && (
+            <div style={{
+              fontSize: 12, fontWeight: 700, color: COLORS.textSecondary, textTransform: "uppercase",
+              letterSpacing: 0.6, marginTop: 28,
+            }}>
+              Your dashboards
+            </div>
+          )}
+        </div>
+      )}
+
       {!loading && dashboards.length === 0 && (
         <div style={{ textAlign: "center", padding: 80, background: COLORS.surface, borderRadius: 16, border: `1px dashed ${COLORS.border}` }}>
           <div style={{
@@ -8530,7 +8778,7 @@ const DashboardsPage = () => {
           }}>
             <LayoutDashboard size={32} color={COLORS.textMuted} />
           </div>
-          <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 6 }}>No dashboards yet</div>
+          <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.textPrimary, marginBottom: 6 }}>No custom dashboards yet</div>
           <div style={{ fontSize: 13, color: COLORS.textSecondary, marginBottom: 22, maxWidth: 420, margin: "0 auto 22px", lineHeight: 1.55 }}>
             Describe what you want to track and AI will design it for you. Saved automatically.
           </div>
@@ -11637,12 +11885,13 @@ const FeedbackAdminPage = () => {
 const NAV_ITEMS = [
   { id: "_divider_workspace", label: "WORKSPACE", isDivider: true },
   { id: "agent", label: "Ask Me Anything", icon: Bot, component: AgentPage, requiresFeature: "agent" },
-  { id: "reports", label: "Report Builder", icon: FileText, component: ReportsPage, requiresFeature: "reportbuilder" },
-  { id: "dashboards", label: "Dashboard Builder", icon: LayoutDashboard, component: DashboardsPage, requiresFeature: "dashboards" },
+  { id: "reports", label: "Reports", icon: FileText, component: ReportsPage, requiresFeature: "reportbuilder" },
+  { id: "dashboards", label: "Dashboards", icon: LayoutDashboard, component: DashboardsPage, requiresFeature: "dashboards" },
   { id: "calendar", label: "Calendar", icon: Calendar, component: CalendarPage },
   { id: "inbox", label: "Inbox", icon: Mail, component: InboxPage },
   { id: "_divider_intelligence", label: "INTELLIGENCE", isDivider: true },
   { id: "availability", label: "Availability Engine", icon: Activity, component: AvailabilityEnginePage, requiresFeature: "availability" },
+  { id: "attendance", label: "Attendance", icon: Clock, component: AttendancePage, requiresFeature: "availability" },
   { id: "projects", label: "Delivery Engine", icon: Layers, component: ProjectsPage, requiresFeature: "availability" },
   { id: "_divider_admin", label: "ADMIN", isDivider: true, superAdminOnly: true },
   { id: "users", label: "User Management", icon: Users, component: UserManagementPage, superAdminOnly: true },

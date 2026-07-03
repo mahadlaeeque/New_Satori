@@ -6272,15 +6272,16 @@ Satori v2 is an AI-powered analytics platform for managers, HR, and sales leader
 
 KEY FEATURES:
 1. **Ask Me Anything** — Natural-language chat. Ask about attendance, allocation, pipeline, AM performance, etc. Replies stream live with citations from BigQuery.
-2. **Report Builder** — Conversational builder for tabular reports. Describe what you want, the AI proposes columns + filters, say "generate" to produce a downloadable Excel / PDF.
-3. **Dashboard Builder** — Conversational builder for interactive dashboards (KPIs, charts, filters). Re-runs every load against live BigQuery.
+2. **Reports** — Prebuilt, auto-updating reports tailored to each user's data, plus a conversational builder for custom tabular reports. Describe what you want, the AI proposes columns + filters, say "generate" to produce a downloadable Excel / PDF.
+3. **Dashboards** — Prebuilt live dashboards for every user, plus a conversational builder for custom interactive dashboards (KPIs, charts, filters). Re-runs every load against live BigQuery. Prebuilt items are read-only; "Save my copy" makes an editable copy.
+3b. **Attendance** — Dedicated attendance view: the employee directory with this-month stats, click any person for their complete month-by-month attendance record.
 4. **Voice Agent** — Floating mic at bottom-right. Tap, then ask questions aloud — Satori speaks the answer back.
 5. **Schema Settings** — System Settings → Schema Settings. Admins curate per-table descriptions that get injected into every AI agent's prompt, so Satori knows what each column means.
 6. **User Management / Audit Log** — Admin pages.
 7. **Dark Mode** — Toggle (Sun/Moon icon) at the top-right corner.
 
 NAVIGATION:
-- Sidebar (left): Ask Me Anything, Report Builder, Dashboard Builder, plus Admin pages.
+- Sidebar (left): Ask Me Anything, Reports, Dashboards, Attendance, Availability Engine, plus Admin pages.
 - Top bar: dark mode toggle, profile.
 - Floating buttons (bottom-right): green Mic and Help.
 
@@ -6405,7 +6406,12 @@ def list_reports(user: dict = Depends(get_current_user)):
     except Exception as e:
         print(f"[/api/reports] error: {e}")
     db.close()
-    return {"reports": rows}
+    try:
+        prebuilt = _pb_meta(_pb_report_defs(user), "report")
+    except Exception as e:
+        print(f"[/api/reports] prebuilt list error: {e}")
+        prebuilt = []
+    return {"reports": rows, "prebuilt": prebuilt}
 
 
 @app.get("/api/reports/{report_id}")
@@ -8204,7 +8210,12 @@ def list_dashboards(user: dict = Depends(get_current_user)):
     except Exception as e:
         print(f"[/api/dashboards] error: {e}")
     db.close()
-    return {"dashboards": rows}
+    try:
+        prebuilt = _pb_meta(_pb_dashboard_defs(user), "dashboard")
+    except Exception as e:
+        print(f"[/api/dashboards] prebuilt list error: {e}")
+        prebuilt = []
+    return {"dashboards": rows, "prebuilt": prebuilt}
 
 
 @app.post("/api/dashboards")
@@ -8287,6 +8298,351 @@ def update_dashboard(dashboard_id: int, body: dict, user: dict = Depends(get_cur
     cur.execute(f"UPDATE saved_dashboards SET {', '.join(sets)} WHERE id = ?", tuple(params))
     db.commit(); db.close()
     return {"ok": True}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PREBUILT DASHBOARDS + REPORTS  ──  auto-provided, tailored, always current
+#  ----------------------------------------------------------------------------
+#  Every user gets a set of ready-made dashboards/reports next to their own:
+#  generated per request from the user's dept scope (a Qlik practice head sees
+#  Qlik numbers, an admin sees the whole company, sales panels only for users
+#  who can see sales). All SQL is CURRENT_DATE-relative, so they stay fresh
+#  forever, and every panel runs through the same autofix + self-heal pipeline
+#  as user-built ones. Users can't edit a prebuilt in place — "Save my copy"
+#  clones it into their own list where full editing/sharing/scheduling applies.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_PB_NORM = lambda col: f"LTRIM(REGEXP_REPLACE(CAST({col} AS STRING), r'[^0-9]', ''), '0')"
+_PB_CIN = "TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', a.checkin_time))"
+_PB_COUT = "TIME(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', a.checkout_time))"
+_PB_ACTIVE = "LOWER(e.Employee_Type) IN ('mto','permanent','probation')"
+_PB_DATEKEY = ("COALESCE(SAFE_CAST(CAST(t.DATE_KEY AS STRING) AS DATE), "
+               "SAFE.PARSE_DATE('%Y%m%d', CAST(t.DATE_KEY AS STRING)))")
+
+
+def _pb_avg_time_sql(expr_time: str) -> str:
+    """Canonical avg-of-clock-time: average seconds-since-midnight, rebuild."""
+    return ("FORMAT_TIME('%H:%M', TIME(TIMESTAMP_SECONDS(CAST(AVG("
+            f"EXTRACT(HOUR FROM {expr_time}) * 3600 + EXTRACT(MINUTE FROM {expr_time}) * 60"
+            ") AS INT64))))")
+
+
+def _pb_scope(user):
+    """(dept_scope list | None, aliased-scope-clause fn, human label)."""
+    dept_scope = None
+    if (user.get("role") or "").lower() != "admin":
+        dept_scope = _get_user_dept_scope(int(user["sub"]))
+    def clause(alias: str) -> str:
+        if not dept_scope:
+            return ""
+        quoted = ", ".join("LOWER('" + str(v).replace("'", "''") + "')" for v in dept_scope)
+        return (f" AND LOWER(COALESCE(NULLIF(TRIM({alias}.EmployeeHierarchyNode), ''), 'Unspecified'))"
+                f" IN ({quoted})")
+    label = (", ".join(str(v) for v in dept_scope)) if dept_scope else "the whole company"
+    return dept_scope, clause, label
+
+
+def _pb_dashboard_defs(user) -> list:
+    """Build the prebuilt dashboard configs for this user. Cheap (string
+    building only) — no BQ or LLM calls happen here."""
+    dept_scope, scope, label = _pb_scope(user)
+    scoped = bool(dept_scope)
+    E = f"`{BQ_FULL}.Employee_Data`"
+    A = f"`{BQ_FULL}.Attendance_Data`"
+    AL = f"`{BQ_FULL}.Allocation_Data`"
+    T = f"`{BQ_FULL}.Timesheet_Data`"
+    att_join = f"JOIN {E} e ON {_PB_NORM('a.personal_no')} = {_PB_NORM('e.Employee_Code')}"
+    att_where = (f"a.attendance_date BETWEEN DATE_TRUNC(CURRENT_DATE(), MONTH) AND CURRENT_DATE() "
+                 f"AND a.is_weekend = 0 AND a.is_holiday = 0 AND {_PB_ACTIVE}{scope('e')}")
+    attended = "a.is_present + a.is_remote + a.is_missing_punch"
+
+    dash_attendance = {
+        "title": "Attendance Pulse",
+        "description": f"This month's attendance for {label} — auto-updating.",
+        "kpis": [
+            {"id": "pb_att_rate", "title": "Attendance Rate (This Month)", "format": "percent", "icon": "TrendingUp",
+             "sql": f"SELECT ROUND(100.0 * SUM({attended}) / NULLIF(COUNT(*), 0), 1) AS value "
+                    f"FROM {A} a {att_join} WHERE {att_where}"},
+            {"id": "pb_att_late", "title": "Late Arrivals (This Month)", "format": "number", "icon": "Clock",
+             "sql": f"SELECT COUNTIF(a.checkin_time IS NOT NULL AND {_PB_CIN} > TIME '09:30:00') AS value "
+                    f"FROM {A} a {att_join} WHERE {att_where}"},
+            {"id": "pb_att_cin", "title": "Avg Check-in (This Month)", "format": "number", "icon": "Clock",
+             "sql": f"SELECT {_pb_avg_time_sql(_PB_CIN)} AS value FROM {A} a {att_join} "
+                    f"WHERE {att_where} AND a.checkin_time IS NOT NULL"},
+            {"id": "pb_att_abs", "title": "Absences (This Month)", "format": "number", "icon": "Users",
+             "sql": f"SELECT SUM(a.is_absent) AS value FROM {A} a {att_join} WHERE {att_where}"},
+        ],
+        "charts": [
+            {"id": "pb_att_bydim", "type": "bar",
+             "title": ("Attendance % by Employee" if scoped else "Attendance % by Department"),
+             "sql": (f"SELECT e.Resource_Name AS employee, "
+                     f"ROUND(100.0 * SUM({attended}) / NULLIF(COUNT(*), 0), 1) AS attendance_pct "
+                     f"FROM {A} a {att_join} WHERE {att_where} "
+                     f"GROUP BY employee ORDER BY attendance_pct DESC LIMIT 50")
+             if scoped else
+             (f"SELECT COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified') AS department, "
+              f"ROUND(100.0 * SUM({attended}) / NULLIF(COUNT(*), 0), 1) AS attendance_pct "
+              f"FROM {A} a {att_join} WHERE {att_where} "
+              f"GROUP BY department ORDER BY attendance_pct DESC LIMIT 50")},
+            {"id": "pb_att_trend", "type": "line", "title": "Daily Attendance Trend (Last 30 Days)",
+             "sql": f"SELECT CAST(a.attendance_date AS STRING) AS date, SUM({attended}) AS attended "
+                    f"FROM {A} a {att_join} "
+                    f"WHERE a.attendance_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE() "
+                    f"AND a.is_weekend = 0 AND a.is_holiday = 0 AND {_PB_ACTIVE}{scope('e')} "
+                    f"GROUP BY date ORDER BY date LIMIT 50"},
+        ],
+        "filters": [],
+    }
+
+    alloc_ctes = (
+        f"WITH alloc AS ("
+        f"SELECT {_PB_NORM('al.employee_id')} AS nid, "
+        f"MAX(IF(al.Flag = 'Allocated', SAFE_CAST(al.allocation_percent AS FLOAT64), 0)) AS pct "
+        f"FROM {AL} al "
+        f"WHERE al.Date = (SELECT MAX(Date) FROM {AL} WHERE Date <= CURRENT_DATE()) "
+        f"GROUP BY nid), "
+        f"emp AS ("
+        f"SELECT {_PB_NORM('e.Employee_Code')} AS nid, e.Resource_Name AS name, "
+        f"COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified') AS dept "
+        f"FROM {E} e WHERE {_PB_ACTIVE}{scope('e')})"
+    )
+    dash_workforce = {
+        "title": "Workforce & Bench",
+        "description": f"Current-week allocation picture for {label} — auto-updating.",
+        "kpis": [
+            {"id": "pb_wf_total", "title": "Active Employees", "format": "number", "icon": "Users",
+             "sql": f"SELECT COUNT(DISTINCT e.Employee_Code) AS value FROM {E} e WHERE {_PB_ACTIVE}{scope('e')}"},
+            {"id": "pb_wf_bench", "title": "On Bench (Current Week)", "format": "number", "icon": "Layers",
+             "sql": f"{alloc_ctes} SELECT COUNTIF(COALESCE(al.pct, 0) = 0) AS value "
+                    f"FROM emp e LEFT JOIN alloc al ON al.nid = e.nid"},
+            {"id": "pb_wf_full", "title": "Fully Allocated", "format": "number", "icon": "TrendingUp",
+             "sql": f"{alloc_ctes} SELECT COUNTIF(COALESCE(al.pct, 0) >= 100) AS value "
+                    f"FROM emp e LEFT JOIN alloc al ON al.nid = e.nid"},
+            {"id": "pb_wf_avg", "title": "Avg Allocation %", "format": "percent", "icon": "Package",
+             "sql": f"{alloc_ctes} SELECT ROUND(AVG(COALESCE(al.pct, 0)), 1) AS value "
+                    f"FROM emp e LEFT JOIN alloc al ON al.nid = e.nid"},
+        ],
+        "charts": [
+            {"id": "pb_wf_split", "type": "pie", "title": "Allocation Status Split",
+             "sql": f"{alloc_ctes} SELECT CASE WHEN COALESCE(al.pct, 0) = 0 THEN 'Bench' "
+                    f"WHEN COALESCE(al.pct, 0) < 100 THEN 'Partial' ELSE 'Allocated' END AS status, "
+                    f"COUNT(*) AS employees FROM emp e LEFT JOIN alloc al ON al.nid = e.nid "
+                    f"GROUP BY status LIMIT 10"},
+            {"id": "pb_wf_bydim", "type": "bar",
+             "title": ("Current Allocation % by Employee" if scoped else "Bench Headcount by Department"),
+             "sql": (f"{alloc_ctes} SELECT e.name AS employee, ROUND(COALESCE(al.pct, 0), 0) AS allocation_pct "
+                     f"FROM emp e LEFT JOIN alloc al ON al.nid = e.nid "
+                     f"ORDER BY allocation_pct DESC LIMIT 40")
+             if scoped else
+             (f"{alloc_ctes} SELECT e.dept AS department, COUNTIF(COALESCE(al.pct, 0) = 0) AS bench "
+              f"FROM emp e LEFT JOIN alloc al ON al.nid = e.nid "
+              f"GROUP BY department ORDER BY bench DESC LIMIT 20")},
+        ],
+        "filters": [],
+    }
+
+    ts_join = f"JOIN {E} e ON {_PB_NORM('t.EMPLOYEE_CODE')} = {_PB_NORM('e.Employee_Code')}"
+    ts_where = (f"{_PB_DATEKEY} BETWEEN DATE_TRUNC(CURRENT_DATE(), MONTH) AND CURRENT_DATE() "
+                f"AND {_PB_ACTIVE}{scope('e')}")
+    dash_delivery = {
+        "title": "Delivery & Timesheets",
+        "description": f"This month's logged effort for {label} — auto-updating.",
+        "kpis": [
+            {"id": "pb_ts_hours", "title": "Hours Logged (This Month)", "format": "number", "icon": "FileText",
+             "sql": f"SELECT ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)), 0) AS value "
+                    f"FROM {T} t {ts_join} WHERE {ts_where}"},
+            {"id": "pb_ts_people", "title": "People Logging Time", "format": "number", "icon": "Users",
+             "sql": f"SELECT COUNT(DISTINCT {_PB_NORM('t.EMPLOYEE_CODE')}) AS value "
+                    f"FROM {T} t {ts_join} WHERE {ts_where}"},
+            {"id": "pb_ts_avg", "title": "Avg Hours / Person", "format": "number", "icon": "TrendingUp",
+             "sql": f"SELECT ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)) "
+                    f"/ NULLIF(COUNT(DISTINCT {_PB_NORM('t.EMPLOYEE_CODE')}), 0), 1) AS value "
+                    f"FROM {T} t {ts_join} WHERE {ts_where}"},
+        ],
+        "charts": [
+            {"id": "pb_ts_proj", "type": "bar", "title": "Top Projects by Hours (This Month)",
+             "sql": f"SELECT t.TICKET_PROJECT_LABEL AS project, "
+                    f"ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)), 0) AS hours "
+                    f"FROM {T} t {ts_join} WHERE {ts_where} "
+                    f"GROUP BY project ORDER BY hours DESC LIMIT 10"},
+            {"id": "pb_ts_trend", "type": "line", "title": "Daily Hours Trend (Last 30 Days)",
+             "sql": f"SELECT CAST({_PB_DATEKEY} AS STRING) AS date, "
+                    f"ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)), 0) AS hours "
+                    f"FROM {T} t {ts_join} "
+                    f"WHERE {_PB_DATEKEY} BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE() "
+                    f"AND {_PB_ACTIVE}{scope('e')} "
+                    f"GROUP BY date ORDER BY date LIMIT 50"},
+        ],
+        "filters": [],
+    }
+
+    defs = [
+        {"key": "attendance", "config": dash_attendance},
+        {"key": "workforce",  "config": dash_workforce},
+        {"key": "delivery",   "config": dash_delivery},
+    ]
+
+    if _user_can_see_sales(user):
+        SPH = f"`{BQ_FULL}.Sales_Pipeline_Health`"
+        SPP = f"`{BQ_FULL}.Sales_Plan_vs_Pipeline`"
+        defs.append({"key": "sales", "config": {
+            "title": "Sales Snapshot",
+            "description": "Live pipeline, deals and coverage across the sales team — auto-updating.",
+            "kpis": [
+                {"id": "pb_sl_pipe", "title": "Open Pipeline", "format": "number", "icon": "DollarSign",
+                 "sql": f"SELECT ROUND(SUM(SAFE_CAST(Open_Pipeline AS FLOAT64)), 0) AS value FROM {SPH}"},
+                {"id": "pb_sl_deals", "title": "Open Deals", "format": "number", "icon": "TrendingUp",
+                 "sql": f"SELECT SUM(Open_Deals) AS value FROM {SPH}"},
+                {"id": "pb_sl_win", "title": "Avg Win Rate", "format": "percent", "icon": "Target",
+                 "sql": f"SELECT ROUND(AVG(SAFE_CAST(Win_Rate_by AS FLOAT64)) * 100, 1) AS value FROM {SPH}"},
+            ],
+            "charts": [
+                {"id": "pb_sl_bysp", "type": "bar", "title": "Open Pipeline by Salesperson",
+                 "sql": f"SELECT Salesperson AS salesperson, "
+                        f"ROUND(SUM(SAFE_CAST(Open_Pipeline AS FLOAT64)), 0) AS pipeline "
+                        f"FROM {SPH} GROUP BY salesperson ORDER BY pipeline DESC LIMIT 20"},
+                {"id": "pb_sl_cov", "type": "bar", "title": "Pipeline Coverage by AM",
+                 "sql": f"SELECT AM AS am, ROUND(SAFE_CAST(Coverage_Ratio AS FLOAT64) * 100, 1) AS coverage_pct "
+                        f"FROM {SPP} ORDER BY coverage_pct DESC LIMIT 20"},
+            ],
+            "filters": [],
+        }})
+    return defs
+
+
+def _pb_report_defs(user) -> list:
+    dept_scope, scope, label = _pb_scope(user)
+    E = f"`{BQ_FULL}.Employee_Data`"
+    A = f"`{BQ_FULL}.Attendance_Data`"
+    AL = f"`{BQ_FULL}.Allocation_Data`"
+    T = f"`{BQ_FULL}.Timesheet_Data`"
+    PM = f"`{BQ_FULL}.Project_Master`"
+    cin_secs = (f"AVG(IF(a.checkin_time IS NOT NULL, "
+                f"EXTRACT(HOUR FROM {_PB_CIN}) * 3600 + EXTRACT(MINUTE FROM {_PB_CIN}) * 60, NULL))")
+
+    rep_attendance = {
+        "title": "Monthly Attendance Summary",
+        "description": f"Per-person attendance for the current month across {label} — regenerates live on every open.",
+        "sql": (
+            f"WITH wd AS (SELECT COUNTIF(off_rows < n/2) AS working_days FROM ("
+            f"SELECT attendance_date, COUNTIF(is_weekend = 1 OR is_holiday = 1) AS off_rows, COUNT(*) AS n "
+            f"FROM {A} WHERE attendance_date BETWEEN DATE_TRUNC(CURRENT_DATE(), MONTH) AND CURRENT_DATE() "
+            f"GROUP BY attendance_date)) "
+            f"SELECT e.Resource_Name AS employee, "
+            f"COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified') AS department, "
+            f"(SELECT working_days FROM wd) AS working_days, "
+            f"SUM(a.is_present) AS present, SUM(a.is_remote) AS remote, "
+            f"SUM(a.is_on_leave) AS on_leave, SUM(a.is_absent) AS absent, "
+            f"SUM(a.is_missing_punch) AS missing_punch, "
+            f"COUNTIF(a.checkin_time IS NOT NULL AND {_PB_CIN} > TIME '09:30:00') AS late_days, "
+            f"ROUND(100.0 * SUM(a.is_present + a.is_remote + a.is_missing_punch) "
+            f"/ NULLIF((SELECT working_days FROM wd), 0), 1) AS attendance_pct, "
+            f"FORMAT_TIME('%H:%M', TIME(TIMESTAMP_SECONDS(CAST({cin_secs} AS INT64)))) AS avg_checkin "
+            f"FROM {E} e LEFT JOIN {A} a "
+            f"ON {_PB_NORM('a.personal_no')} = {_PB_NORM('e.Employee_Code')} "
+            f"AND a.attendance_date BETWEEN DATE_TRUNC(CURRENT_DATE(), MONTH) AND CURRENT_DATE() "
+            f"AND a.is_weekend = 0 AND a.is_holiday = 0 "
+            f"WHERE {_PB_ACTIVE}{scope('e')} "
+            f"GROUP BY employee, department ORDER BY department, employee"
+        ),
+        "numeric_columns": ["working_days", "present", "remote", "on_leave", "absent",
+                            "missing_punch", "late_days", "attendance_pct"],
+    }
+
+    rep_hours = {
+        "title": "Project Hours This Month",
+        "description": f"Who logged how much on which project this month across {label} — regenerates live on every open.",
+        "sql": (
+            f"SELECT e.Resource_Name AS employee, "
+            f"COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified') AS department, "
+            f"t.TICKET_PROJECT_LABEL AS project, "
+            f"ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)), 1) AS hours "
+            f"FROM {T} t JOIN {E} e ON {_PB_NORM('t.EMPLOYEE_CODE')} = {_PB_NORM('e.Employee_Code')} "
+            f"WHERE {_PB_DATEKEY} BETWEEN DATE_TRUNC(CURRENT_DATE(), MONTH) AND CURRENT_DATE() "
+            f"AND {_PB_ACTIVE}{scope('e')} "
+            f"GROUP BY employee, department, project "
+            f"ORDER BY hours DESC LIMIT 200"
+        ),
+        "numeric_columns": ["hours"],
+        "total_columns": ["hours"],
+    }
+
+    rep_alloc = {
+        "title": "Current Allocation Snapshot",
+        "description": f"This week's project allocation per person across {label} — regenerates live on every open.",
+        "sql": (
+            f"WITH cur AS (SELECT MAX(Date) AS d FROM {AL} WHERE Date <= CURRENT_DATE()) "
+            f"SELECT e.Resource_Name AS employee, "
+            f"COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified') AS department, "
+            f"COALESCE(pm.Project_Name, CAST(al.project_id AS STRING)) AS project, "
+            f"MAX(SAFE_CAST(al.allocation_percent AS FLOAT64)) AS allocation_pct, "
+            f"ANY_VALUE(al.Flag) AS flag "
+            f"FROM {AL} al "
+            f"JOIN cur ON al.Date = cur.d "
+            f"JOIN {E} e ON {_PB_NORM('al.employee_id')} = {_PB_NORM('e.Employee_Code')} "
+            f"LEFT JOIN {PM} pm ON CAST(al.project_id AS STRING) = CAST(pm.Project_Code AS STRING) "
+            f"WHERE {_PB_ACTIVE}{scope('e')} "
+            f"GROUP BY employee, department, project "
+            f"HAVING allocation_pct > 0 "
+            f"ORDER BY employee, allocation_pct DESC LIMIT 500"
+        ),
+        "numeric_columns": ["allocation_pct"],
+    }
+
+    defs = [
+        {"key": "attendance", "config": rep_attendance},
+        {"key": "hours",      "config": rep_hours},
+        {"key": "allocation", "config": rep_alloc},
+    ]
+
+    if _user_can_see_sales(user):
+        SAM = f"`{BQ_FULL}.Sales_AM_Scorecard`"
+        defs.append({"key": "am_scorecard", "config": {
+            "title": "AM Scorecard",
+            "description": "Account-manager performance: target, achieved, pipeline and win rate — regenerates live on every open.",
+            "sql": (
+                f"SELECT AM AS am, Role AS role, City AS city, "
+                f"ROUND(SAFE_CAST(col_2026_Target AS FLOAT64), 0) AS target_2026, "
+                f"ROUND(SAFE_CAST(Q1_ACH AS FLOAT64), 0) AS q1_achieved, "
+                f"ROUND(SAFE_CAST(Open_Pipeline AS FLOAT64), 0) AS open_pipeline, "
+                f"ROUND(SAFE_CAST(Hist_Win_Rate AS FLOAT64) * 100, 1) AS win_rate_pct "
+                f"FROM {SAM} ORDER BY open_pipeline DESC LIMIT 100"
+            ),
+            "numeric_columns": ["target_2026", "q1_achieved", "open_pipeline", "win_rate_pct"],
+        }})
+    return defs
+
+
+def _pb_meta(defs: list, kind: str) -> list:
+    """Lightweight listing entries for the library pages."""
+    return [{
+        "id": f"pb-{d['key']}",
+        "key": d["key"],
+        "name": d["config"]["title"],
+        "description": d["config"].get("description") or "",
+        "is_prebuilt": True,
+        "kind": kind,
+    } for d in defs]
+
+
+@app.get("/api/dashboards/prebuilt/{key}")
+def get_prebuilt_dashboard(key: str, user: dict = Depends(get_current_user)):
+    for d in _pb_dashboard_defs(user):
+        if d["key"] == key:
+            return {"id": f"pb-{key}", "key": key, "name": d["config"]["title"],
+                    "description": d["config"].get("description") or "",
+                    "config": d["config"], "is_prebuilt": True}
+    raise HTTPException(status_code=404, detail="Prebuilt dashboard not found")
+
+
+@app.get("/api/reports/prebuilt/{key}")
+def get_prebuilt_report(key: str, user: dict = Depends(get_current_user)):
+    for d in _pb_report_defs(user):
+        if d["key"] == key:
+            return {"id": f"pb-{key}", "key": key, "name": d["config"]["title"],
+                    "description": d["config"].get("description") or "",
+                    "config": d["config"], "is_prebuilt": True}
+    raise HTTPException(status_code=404, detail="Prebuilt report not found")
 
 
 @app.delete("/api/dashboards/{dashboard_id}")
@@ -9655,6 +10011,308 @@ def availability_employee_attendance(code: str, days: int = 30,
             "total_worked_hrs": round(total_worked, 1),
         },
         "days_detail": days_detail,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ATTENDANCE VIEW  ──  dedicated directory + full per-employee history
+#  ----------------------------------------------------------------------------
+#  A standalone surface (separate from the Availability Engine, which keeps its
+#  30-day modal tab): the employee directory with this-month stats, and a
+#  click-through to the person's COMPLETE attendance record, month by month.
+#  Dept-scoped exactly like Availability (list filters in SQL; the per-employee
+#  endpoint goes through the shared fail-closed _require_emp_in_scope guard).
+#  Directory uses LOWER(employee_status)='active' (NOT the Employee_Type
+#  whitelist) so contractors/freelancers — real people with attendance — show.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_ATT_TS_PARSE_IN  = "SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkin_time)"
+_ATT_TS_PARSE_OUT = "SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', checkout_time)"
+
+
+def _att_iv(v):
+    """Defensive 0/1-int parse for bq_run_query's stringified values."""
+    s = str(v).strip().lower() if v is not None else ""
+    if s in ("", "none", "null", "false"):
+        return 0
+    if s == "true":
+        return 1
+    try:
+        return int(float(s))
+    except Exception:
+        return 0
+
+
+def _att_mins(hhmm):
+    try:
+        h, m = str(hhmm).split(":")
+        return int(h) * 60 + int(m)
+    except Exception:
+        return None
+
+
+def _att_avg_hhmm(vals):
+    if not vals:
+        return None
+    m = round(sum(vals) / len(vals))
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+@app.get("/api/attendance/employees")
+def attendance_employees(user: dict = Depends(get_current_user)):
+    """Attendance directory: every active employee in the caller's scope with
+    this-month stats (present/remote/leave/absent/late, avg check-in, last
+    seen). One BQ query; the working-day denominator is the COMPANY calendar
+    (majority vote per date), the same single source of truth every other
+    surface uses."""
+    dept_scope = _get_user_dept_scope(int(user["sub"])) if (user.get("role") or "").lower() != "admin" else None
+    scope_clause = _dept_scope_clause(dept_scope)
+    sql = f"""
+        WITH wd AS (
+          SELECT COUNTIF(off_rows < n/2) AS working_days
+          FROM (SELECT attendance_date,
+                       COUNTIF(is_weekend = 1 OR is_holiday = 1) AS off_rows,
+                       COUNT(*) AS n
+                FROM {_bq_avail('Attendance_Data')}
+                WHERE attendance_date BETWEEN DATE_TRUNC(CURRENT_DATE(), MONTH) AND CURRENT_DATE()
+                GROUP BY attendance_date)
+        ),
+        emp AS (
+          SELECT CAST(Employee_Code AS STRING) AS code,
+                 Resource_Name AS name,
+                 COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS dept,
+                 EmployeePosition AS position,
+                 EmployeeLocation AS location,
+                 {_norm_emp_id('Employee_Code')} AS nid
+          FROM {_bq_avail('Employee_Data')}
+          WHERE LOWER(employee_status) = 'active'{scope_clause}
+        ),
+        att AS (
+          SELECT {_norm_emp_id('personal_no')} AS nid,
+                 SUM(is_present) AS present, SUM(is_remote) AS remote,
+                 SUM(is_on_leave) AS on_leave, SUM(is_absent) AS absent,
+                 SUM(is_missing_punch) AS missing,
+                 COUNTIF(checkin_time IS NOT NULL
+                         AND TIME({_ATT_TS_PARSE_IN}) > TIME '09:30:00') AS late,
+                 CAST(AVG(IF(checkin_time IS NOT NULL,
+                             EXTRACT(HOUR FROM TIME({_ATT_TS_PARSE_IN})) * 3600
+                             + EXTRACT(MINUTE FROM TIME({_ATT_TS_PARSE_IN})) * 60,
+                             NULL)) AS INT64) AS avg_cin_secs,
+                 CAST(MAX(IF(is_present = 1 OR is_remote = 1, attendance_date, NULL)) AS STRING) AS last_seen
+          FROM {_bq_avail('Attendance_Data')}
+          WHERE attendance_date BETWEEN DATE_TRUNC(CURRENT_DATE(), MONTH) AND CURRENT_DATE()
+          GROUP BY nid
+        )
+        SELECT e.code, e.name, e.dept, e.position, e.location,
+               a.present, a.remote, a.on_leave, a.absent, a.missing, a.late,
+               FORMAT_TIME('%H:%M', TIME(TIMESTAMP_SECONDS(a.avg_cin_secs))) AS avg_checkin,
+               a.last_seen,
+               (SELECT working_days FROM wd) AS working_days
+        FROM emp e
+        LEFT JOIN att a ON a.nid = e.nid
+        ORDER BY e.name
+    """
+    sql = normalize_bq_project(sql)
+    r = bq_run_query(sql, max_rows=2000)
+    if "error" in r:
+        print(f"[/api/attendance/employees] BQ error: {r['error']}")
+        raise HTTPException(status_code=500, detail=r["error"])
+    out = []
+    working_days = 0
+    for row in (r.get("rows") or []):
+        wd = _att_iv(row.get("working_days"))
+        working_days = wd or working_days
+        present = _att_iv(row.get("present")); remote = _att_iv(row.get("remote"))
+        missing = _att_iv(row.get("missing"))
+        attended = present + remote + missing  # missing punch = punched in, worked
+        out.append({
+            "code":       row.get("code"),
+            "name":       row.get("name"),
+            "dept":       row.get("dept"),
+            "position":   row.get("position"),
+            "location":   row.get("location"),
+            "present":    present,
+            "remote":     remote,
+            "on_leave":   _att_iv(row.get("on_leave")),
+            "absent":     _att_iv(row.get("absent")),
+            "missing":    missing,
+            "late":       _att_iv(row.get("late")),
+            "avg_checkin": row.get("avg_checkin") or None,
+            "last_seen":  row.get("last_seen") or None,
+            "attendance_rate": round(100.0 * attended / wd, 1) if wd else None,
+        })
+    return {"month_working_days": working_days, "employees": out,
+            "scoped_to": dept_scope or None}
+
+
+@app.get("/api/attendance/employees/{code}/history")
+def attendance_employee_history(code: str, user: dict = Depends(get_current_user)):
+    """The complete attendance record for one employee, grouped by month —
+    everything the warehouse has (capped at ~15 months). Each month carries a
+    rollup (working days, present/remote/leave/absent/missing, late/on-time,
+    avg check-in/out, worked hours, attendance %) plus the day-by-day detail.
+    Dept-scope guarded (fail-closed)."""
+    emp_code = (code or "").strip()
+    if not emp_code:
+        raise HTTPException(status_code=400, detail="Employee code is required.")
+    _require_emp_in_scope(user, emp_code)
+    safe_code = emp_code.replace("'", "''")
+    norm_target = _norm_emp_id(f"'{safe_code}'")
+
+    prof_sql = normalize_bq_project(f"""
+        SELECT CAST(Employee_Code AS STRING) AS code, Resource_Name AS name,
+               COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS dept,
+               EmployeePosition AS position, EmployeeLocation AS location
+        FROM {_bq_avail('Employee_Data')}
+        WHERE CAST(Employee_Code AS STRING) = '{safe_code}'
+        LIMIT 1
+    """)
+    pr = bq_run_query(prof_sql, max_rows=1)
+    prows = pr.get("rows") or []
+    profile = prows[0] if prows else {"code": emp_code}
+
+    # Full-range day grid: company calendar verdict per date LEFT JOINed with
+    # this employee's punches. 460-day cap keeps the payload sane (~15 months).
+    hist_sql = f"""
+        WITH cal AS (
+          SELECT attendance_date,
+                 COUNTIF(is_weekend = 1 OR is_holiday = 1) >= COUNT(*) / 2 AS is_off
+          FROM {_bq_avail('Attendance_Data')}
+          WHERE attendance_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 460 DAY)
+                                    AND CURRENT_DATE()
+          GROUP BY attendance_date
+        ),
+        mine AS (
+          SELECT a.attendance_date,
+                 ANY_VALUE(a.attendance_status_text) AS status,
+                 ANY_VALUE(NULLIF(TRIM(a.leave_type_name), '')) AS leave_type,
+                 MAX(a.is_present) AS f_present, MAX(a.is_absent) AS f_absent,
+                 MAX(a.is_on_leave) AS f_leave, MAX(a.is_remote) AS f_remote,
+                 MAX(a.is_missing_punch) AS f_missing,
+                 ANY_VALUE(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', a.checkin_time)) AS cints,
+                 ANY_VALUE(SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', a.checkout_time)) AS coutts
+          FROM {_bq_avail('Attendance_Data')} a
+          WHERE {_norm_emp_id('a.personal_no')} = {norm_target}
+            AND a.attendance_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 460 DAY)
+                                      AND CURRENT_DATE()
+          GROUP BY a.attendance_date
+        )
+        SELECT CAST(cal.attendance_date AS STRING) AS d,
+               CAST(cal.is_off AS INT64) AS is_off,
+               m.status, m.leave_type,
+               m.f_present, m.f_absent, m.f_leave, m.f_remote, m.f_missing,
+               FORMAT_TIME('%H:%M', TIME(m.cints)) AS cin,
+               FORMAT_TIME('%H:%M', TIME(m.coutts)) AS cout,
+               IF(TIME(m.cints) > TIME '09:30:00', 1, 0) AS is_late,
+               ROUND(SAFE_DIVIDE(TIMESTAMP_DIFF(m.coutts, m.cints, MINUTE), 60.0), 1) AS worked_hrs
+        FROM cal
+        LEFT JOIN mine m ON cal.attendance_date = m.attendance_date
+        ORDER BY d DESC
+    """
+    hist_sql = normalize_bq_project(hist_sql)
+    ra = bq_run_query(hist_sql, max_rows=500)
+    if "error" in ra:
+        print(f"[/api/attendance/history] BQ error: {ra['error']}")
+        raise HTTPException(status_code=500, detail=ra["error"])
+
+    months = {}  # "2026-06" -> accumulator
+    for row in (ra.get("rows") or []):
+        d = str(row.get("d") or "")
+        if len(d) < 7:
+            continue
+        mkey = d[:7]
+        m = months.setdefault(mkey, {
+            "month": mkey, "working_days": 0, "present": 0, "remote": 0,
+            "on_leave": 0, "absent": 0, "missing": 0, "late": 0, "ontime": 0,
+            "cin_mins": [], "cout_mins": [], "worked": 0.0, "days": [],
+        })
+        is_off = _att_iv(row.get("is_off")) == 1
+        has_row = row.get("status") is not None
+        if not is_off:
+            m["working_days"] += 1
+            m["present"]  += _att_iv(row.get("f_present"))
+            m["remote"]   += _att_iv(row.get("f_remote"))
+            m["on_leave"] += _att_iv(row.get("f_leave"))
+            m["absent"]   += _att_iv(row.get("f_absent"))
+            m["missing"]  += _att_iv(row.get("f_missing"))
+        cm, om = _att_mins(row.get("cin")), _att_mins(row.get("cout"))
+        if cm is not None:
+            m["cin_mins"].append(cm)
+            if _att_iv(row.get("is_late")) == 1:
+                m["late"] += 1
+            else:
+                m["ontime"] += 1
+        if om is not None:
+            m["cout_mins"].append(om)
+        wh = row.get("worked_hrs")
+        if wh is not None:
+            try:
+                m["worked"] += float(wh)
+            except Exception:
+                pass
+        m["days"].append({
+            "date":           d,
+            "is_working_day": not is_off,
+            "status":         row.get("status") if has_row else ("Weekend/Holiday" if is_off else "No Record"),
+            "leave_type":     row.get("leave_type") or None,
+            "checkin":        row.get("cin") or None,
+            "checkout":       row.get("cout") or None,
+            "late":           _att_iv(row.get("is_late")) == 1,
+            "worked_hrs":     (float(wh) if wh is not None else None),
+        })
+
+    month_list = []
+    tot = {"working_days": 0, "attended": 0, "present": 0, "remote": 0, "on_leave": 0,
+           "absent": 0, "missing": 0, "late": 0, "worked": 0.0}
+    all_cin, all_cout = [], []
+    for mkey in sorted(months.keys(), reverse=True):
+        m = months[mkey]
+        attended = m["present"] + m["remote"] + m["missing"]
+        worked_days = len(m["cin_mins"])
+        month_list.append({
+            "month":           m["month"],
+            "working_days":    m["working_days"],
+            "present":         m["present"],
+            "remote":          m["remote"],
+            "on_leave":        m["on_leave"],
+            "absent":          m["absent"],
+            "missing":         m["missing"],
+            "attended":        attended,
+            "attendance_rate": round(100.0 * attended / m["working_days"], 1) if m["working_days"] else None,
+            "late":            m["late"],
+            "ontime":          m["ontime"],
+            "avg_checkin":     _att_avg_hhmm(m["cin_mins"]),
+            "avg_checkout":    _att_avg_hhmm(m["cout_mins"]),
+            "total_worked_hrs": round(m["worked"], 1),
+            "avg_worked_hrs":  round(m["worked"] / worked_days, 1) if worked_days else None,
+            "days":            m["days"],
+        })
+        tot["working_days"] += m["working_days"]; tot["attended"] += attended
+        tot["present"] += m["present"]; tot["remote"] += m["remote"]
+        tot["on_leave"] += m["on_leave"]; tot["absent"] += m["absent"]
+        tot["missing"] += m["missing"]; tot["late"] += m["late"]
+        tot["worked"] += m["worked"]
+        all_cin.extend(m["cin_mins"]); all_cout.extend(m["cout_mins"])
+
+    return {
+        "code": emp_code,
+        "profile": profile,
+        "overall": {
+            "months":          len(month_list),
+            "working_days":    tot["working_days"],
+            "attended":        tot["attended"],
+            "attendance_rate": round(100.0 * tot["attended"] / tot["working_days"], 1) if tot["working_days"] else None,
+            "present":         tot["present"],
+            "remote":          tot["remote"],
+            "on_leave":        tot["on_leave"],
+            "absent":          tot["absent"],
+            "missing":         tot["missing"],
+            "late":            tot["late"],
+            "avg_checkin":     _att_avg_hhmm(all_cin),
+            "avg_checkout":    _att_avg_hhmm(all_cout),
+            "total_worked_hrs": round(tot["worked"], 1),
+        },
+        "months": month_list,
     }
 
 
