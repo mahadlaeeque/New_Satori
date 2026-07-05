@@ -8351,44 +8351,54 @@ def _pb_dashboard_defs(user) -> list:
     A = f"`{BQ_FULL}.Attendance_Data`"
     AL = f"`{BQ_FULL}.Allocation_Data`"
     T = f"`{BQ_FULL}.Timesheet_Data`"
-    att_join = f"JOIN {E} e ON {_PB_NORM('a.personal_no')} = {_PB_NORM('e.Employee_Code')}"
+    # Scoped-employee CTE: filter Employee_Data FIRST (a dept scope is ~25
+    # people), then join attendance to the small set. Also keeps the autofix
+    # join-rewriter away from these hand-tuned joins (it only rewrites joins
+    # against the Employee_Data table name, not a CTE alias).
+    emp_cte = (f"WITH emp AS (SELECT {_PB_NORM('e.Employee_Code')} AS nid, "
+               f"e.Resource_Name AS name, "
+               f"COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified') AS dept "
+               f"FROM {E} e WHERE {_PB_ACTIVE}{scope('e')})")
+    att_join = f"JOIN emp e ON {_PB_NORM('a.personal_no')} = e.nid"
     att_where = (f"a.attendance_date BETWEEN DATE_TRUNC(CURRENT_DATE(), MONTH) AND CURRENT_DATE() "
-                 f"AND a.is_weekend = 0 AND a.is_holiday = 0 AND {_PB_ACTIVE}{scope('e')}")
-    attended = "a.is_present + a.is_remote + a.is_missing_punch"
+                 f"AND a.is_weekend = 0 AND a.is_holiday = 0")
+    # GREATEST not SUM-of-flags: a day can carry more than one flag (e.g.
+    # present + remote), and summing pushed some departments past 100%.
+    attended = "GREATEST(a.is_present, a.is_remote, a.is_missing_punch)"
 
     dash_attendance = {
         "title": "Attendance Pulse",
         "description": f"This month's attendance for {label} — auto-updating.",
         "kpis": [
             {"id": "pb_att_rate", "title": "Attendance Rate (This Month)", "format": "percent", "icon": "TrendingUp",
-             "sql": f"SELECT ROUND(100.0 * SUM({attended}) / NULLIF(COUNT(*), 0), 1) AS value "
+             "sql": f"{emp_cte} SELECT ROUND(100.0 * SUM({attended}) / NULLIF(COUNT(*), 0), 1) AS value "
                     f"FROM {A} a {att_join} WHERE {att_where}"},
             {"id": "pb_att_late", "title": "Late Arrivals (This Month)", "format": "number", "icon": "Clock",
-             "sql": f"SELECT COUNTIF(a.checkin_time IS NOT NULL AND {_PB_CIN} > TIME '09:30:00') AS value "
+             "sql": f"{emp_cte} SELECT COUNTIF(a.checkin_time IS NOT NULL AND {_PB_CIN} > TIME '09:30:00') AS value "
                     f"FROM {A} a {att_join} WHERE {att_where}"},
             {"id": "pb_att_cin", "title": "Avg Check-in (This Month)", "format": "number", "icon": "Clock",
-             "sql": f"SELECT {_pb_avg_time_sql(_PB_CIN)} AS value FROM {A} a {att_join} "
+             "sql": f"{emp_cte} SELECT {_pb_avg_time_sql(_PB_CIN)} AS value FROM {A} a {att_join} "
                     f"WHERE {att_where} AND a.checkin_time IS NOT NULL"},
             {"id": "pb_att_abs", "title": "Absences (This Month)", "format": "number", "icon": "Users",
-             "sql": f"SELECT SUM(a.is_absent) AS value FROM {A} a {att_join} WHERE {att_where}"},
+             "sql": f"{emp_cte} SELECT SUM(a.is_absent) AS value FROM {A} a {att_join} WHERE {att_where}"},
         ],
         "charts": [
             {"id": "pb_att_bydim", "type": "bar",
              "title": ("Attendance % by Employee" if scoped else "Attendance % by Department"),
-             "sql": (f"SELECT e.Resource_Name AS employee, "
+             "sql": (f"{emp_cte} SELECT e.name AS employee, "
                      f"ROUND(100.0 * SUM({attended}) / NULLIF(COUNT(*), 0), 1) AS attendance_pct "
                      f"FROM {A} a {att_join} WHERE {att_where} "
                      f"GROUP BY employee ORDER BY attendance_pct DESC LIMIT 50")
              if scoped else
-             (f"SELECT COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified') AS department, "
+             (f"{emp_cte} SELECT e.dept AS department, "
               f"ROUND(100.0 * SUM({attended}) / NULLIF(COUNT(*), 0), 1) AS attendance_pct "
               f"FROM {A} a {att_join} WHERE {att_where} "
               f"GROUP BY department ORDER BY attendance_pct DESC LIMIT 50")},
             {"id": "pb_att_trend", "type": "line", "title": "Daily Attendance Trend (Last 30 Days)",
-             "sql": f"SELECT CAST(a.attendance_date AS STRING) AS date, SUM({attended}) AS attended "
+             "sql": f"{emp_cte} SELECT CAST(a.attendance_date AS STRING) AS date, SUM({attended}) AS attended "
                     f"FROM {A} a {att_join} "
                     f"WHERE a.attendance_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE() "
-                    f"AND a.is_weekend = 0 AND a.is_holiday = 0 AND {_PB_ACTIVE}{scope('e')} "
+                    f"AND a.is_weekend = 0 AND a.is_holiday = 0 "
                     f"GROUP BY date ORDER BY date LIMIT 50"},
         ],
         "filters": [],
@@ -8424,9 +8434,12 @@ def _pb_dashboard_defs(user) -> list:
         ],
         "charts": [
             {"id": "pb_wf_split", "type": "pie", "title": "Allocation Status Split",
+             # COUNT(DISTINCT e.nid) not COUNT(*): the autofix's headcount
+             # heuristic rewrites `COUNT(*) AS employees` to a non-existent
+             # employee_id here; the explicit distinct is also just correct.
              "sql": f"{alloc_ctes} SELECT CASE WHEN COALESCE(al.pct, 0) = 0 THEN 'Bench' "
                     f"WHEN COALESCE(al.pct, 0) < 100 THEN 'Partial' ELSE 'Allocated' END AS status, "
-                    f"COUNT(*) AS employees FROM emp e LEFT JOIN alloc al ON al.nid = e.nid "
+                    f"COUNT(DISTINCT e.nid) AS employees FROM emp e LEFT JOIN alloc al ON al.nid = e.nid "
                     f"GROUP BY status LIMIT 10"},
             {"id": "pb_wf_bydim", "type": "bar",
              "title": ("Current Allocation % by Employee" if scoped else "Bench Headcount by Department"),
@@ -8441,36 +8454,34 @@ def _pb_dashboard_defs(user) -> list:
         "filters": [],
     }
 
-    ts_join = f"JOIN {E} e ON {_PB_NORM('t.EMPLOYEE_CODE')} = {_PB_NORM('e.Employee_Code')}"
-    ts_where = (f"{_PB_DATEKEY} BETWEEN DATE_TRUNC(CURRENT_DATE(), MONTH) AND CURRENT_DATE() "
-                f"AND {_PB_ACTIVE}{scope('e')}")
+    ts_join = f"JOIN emp e ON {_PB_NORM('t.EMPLOYEE_CODE')} = e.nid"
+    ts_where = f"{_PB_DATEKEY} BETWEEN DATE_TRUNC(CURRENT_DATE(), MONTH) AND CURRENT_DATE()"
     dash_delivery = {
         "title": "Delivery & Timesheets",
         "description": f"This month's logged effort for {label} — auto-updating.",
         "kpis": [
             {"id": "pb_ts_hours", "title": "Hours Logged (This Month)", "format": "number", "icon": "FileText",
-             "sql": f"SELECT ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)), 0) AS value "
+             "sql": f"{emp_cte} SELECT ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)), 0) AS value "
                     f"FROM {T} t {ts_join} WHERE {ts_where}"},
             {"id": "pb_ts_people", "title": "People Logging Time", "format": "number", "icon": "Users",
-             "sql": f"SELECT COUNT(DISTINCT {_PB_NORM('t.EMPLOYEE_CODE')}) AS value "
+             "sql": f"{emp_cte} SELECT COUNT(DISTINCT e.nid) AS value "
                     f"FROM {T} t {ts_join} WHERE {ts_where}"},
             {"id": "pb_ts_avg", "title": "Avg Hours / Person", "format": "number", "icon": "TrendingUp",
-             "sql": f"SELECT ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)) "
-                    f"/ NULLIF(COUNT(DISTINCT {_PB_NORM('t.EMPLOYEE_CODE')}), 0), 1) AS value "
+             "sql": f"{emp_cte} SELECT ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)) "
+                    f"/ NULLIF(COUNT(DISTINCT e.nid), 0), 1) AS value "
                     f"FROM {T} t {ts_join} WHERE {ts_where}"},
         ],
         "charts": [
             {"id": "pb_ts_proj", "type": "bar", "title": "Top Projects by Hours (This Month)",
-             "sql": f"SELECT t.TICKET_PROJECT_LABEL AS project, "
+             "sql": f"{emp_cte} SELECT t.TICKET_PROJECT_LABEL AS project, "
                     f"ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)), 0) AS hours "
                     f"FROM {T} t {ts_join} WHERE {ts_where} "
                     f"GROUP BY project ORDER BY hours DESC LIMIT 10"},
             {"id": "pb_ts_trend", "type": "line", "title": "Daily Hours Trend (Last 30 Days)",
-             "sql": f"SELECT CAST({_PB_DATEKEY} AS STRING) AS date, "
+             "sql": f"{emp_cte} SELECT CAST({_PB_DATEKEY} AS STRING) AS date, "
                     f"ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)), 0) AS hours "
                     f"FROM {T} t {ts_join} "
                     f"WHERE {_PB_DATEKEY} BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE() "
-                    f"AND {_PB_ACTIVE}{scope('e')} "
                     f"GROUP BY date ORDER BY date LIMIT 50"},
         ],
         "filters": [],
@@ -8485,25 +8496,37 @@ def _pb_dashboard_defs(user) -> list:
     if _user_can_see_sales(user):
         SPH = f"`{BQ_FULL}.Sales_Pipeline_Health`"
         SPP = f"`{BQ_FULL}.Sales_Plan_vs_Pipeline`"
+        SAM = f"`{BQ_FULL}.Sales_AM_Scorecard`"
+        # Sales_Pipeline_Health is a spreadsheet dump: it carries a 'Total'
+        # row, an embedded header row and narrative "Read-out" lines. Keep only
+        # real per-person rows (deal count parses AND name isn't Total/header).
+        # NOTE: Win_Rate_by here is actually "Historical Lost ($)" — the real
+        # win rate lives in Sales_AM_Scorecard.Hist_Win_Rate (0-1 decimal).
+        sph_real = ("SAFE_CAST(Open_Deals AS INT64) IS NOT NULL "
+                    "AND LOWER(TRIM(Salesperson)) NOT IN ('total', 'salesperson')")
         defs.append({"key": "sales", "config": {
             "title": "Sales Snapshot",
             "description": "Live pipeline, deals and coverage across the sales team — auto-updating.",
             "kpis": [
-                {"id": "pb_sl_pipe", "title": "Open Pipeline", "format": "number", "icon": "DollarSign",
-                 "sql": f"SELECT ROUND(SUM(SAFE_CAST(Open_Pipeline AS FLOAT64)), 0) AS value FROM {SPH}"},
+                {"id": "pb_sl_pipe", "title": "Open Pipeline ($)", "format": "number", "icon": "DollarSign",
+                 "sql": f"SELECT ROUND(SUM(SAFE_CAST(Open_Pipeline AS FLOAT64)), 0) AS value FROM {SPH} "
+                        f"WHERE {sph_real}"},
                 {"id": "pb_sl_deals", "title": "Open Deals", "format": "number", "icon": "TrendingUp",
-                 "sql": f"SELECT SUM(Open_Deals) AS value FROM {SPH}"},
+                 "sql": f"SELECT SUM(SAFE_CAST(Open_Deals AS INT64)) AS value FROM {SPH} WHERE {sph_real}"},
                 {"id": "pb_sl_win", "title": "Avg Win Rate", "format": "percent", "icon": "Target",
-                 "sql": f"SELECT ROUND(AVG(SAFE_CAST(Win_Rate_by AS FLOAT64)) * 100, 1) AS value FROM {SPH}"},
+                 "sql": f"SELECT ROUND(AVG(SAFE_CAST(Hist_Win_Rate AS FLOAT64)) * 100, 1) AS value FROM {SAM} "
+                        f"WHERE AM IS NOT NULL AND SAFE_CAST(Hist_Win_Rate AS FLOAT64) IS NOT NULL"},
             ],
             "charts": [
                 {"id": "pb_sl_bysp", "type": "bar", "title": "Open Pipeline by Salesperson",
                  "sql": f"SELECT Salesperson AS salesperson, "
                         f"ROUND(SUM(SAFE_CAST(Open_Pipeline AS FLOAT64)), 0) AS pipeline "
-                        f"FROM {SPH} GROUP BY salesperson ORDER BY pipeline DESC LIMIT 20"},
+                        f"FROM {SPH} WHERE {sph_real} "
+                        f"GROUP BY salesperson ORDER BY pipeline DESC LIMIT 20"},
                 {"id": "pb_sl_cov", "type": "bar", "title": "Pipeline Coverage by AM",
                  "sql": f"SELECT AM AS am, ROUND(SAFE_CAST(Coverage_Ratio AS FLOAT64) * 100, 1) AS coverage_pct "
-                        f"FROM {SPP} ORDER BY coverage_pct DESC LIMIT 20"},
+                        f"FROM {SPP} WHERE AM IS NOT NULL AND SAFE_CAST(Coverage_Ratio AS FLOAT64) IS NOT NULL "
+                        f"ORDER BY coverage_pct DESC LIMIT 20"},
             ],
             "filters": [],
         }})
@@ -8535,7 +8558,7 @@ def _pb_report_defs(user) -> list:
             f"SUM(a.is_on_leave) AS on_leave, SUM(a.is_absent) AS absent, "
             f"SUM(a.is_missing_punch) AS missing_punch, "
             f"COUNTIF(a.checkin_time IS NOT NULL AND {_PB_CIN} > TIME '09:30:00') AS late_days, "
-            f"ROUND(100.0 * SUM(a.is_present + a.is_remote + a.is_missing_punch) "
+            f"ROUND(100.0 * SUM(GREATEST(a.is_present, a.is_remote, a.is_missing_punch)) "
             f"/ NULLIF((SELECT working_days FROM wd), 0), 1) AS attendance_pct, "
             f"FORMAT_TIME('%H:%M', TIME(TIMESTAMP_SECONDS(CAST({cin_secs} AS INT64)))) AS avg_checkin "
             f"FROM {E} e LEFT JOIN {A} a "
@@ -8549,17 +8572,24 @@ def _pb_report_defs(user) -> list:
                             "missing_punch", "late_days", "attendance_pct"],
     }
 
+    # Same emp-CTE pattern as the dashboards: scope Employee_Data first, and
+    # keep the autofix join-rewriter (which only matches the Employee_Data
+    # table name) away from these hand-tuned INNER joins.
+    rep_emp_cte = (f"emp AS (SELECT {_PB_NORM('e.Employee_Code')} AS nid, "
+                   f"COALESCE(NULLIF(TRIM(e.Resource_Name), ''), CAST(e.Employee_Code AS STRING)) AS name, "
+                   f"COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified') AS dept "
+                   f"FROM {E} e WHERE {_PB_ACTIVE}{scope('e')})")
+
     rep_hours = {
         "title": "Project Hours This Month",
         "description": f"Who logged how much on which project this month across {label} — regenerates live on every open.",
         "sql": (
-            f"SELECT e.Resource_Name AS employee, "
-            f"COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified') AS department, "
+            f"WITH {rep_emp_cte} "
+            f"SELECT e.name AS employee, e.dept AS department, "
             f"t.TICKET_PROJECT_LABEL AS project, "
             f"ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)), 1) AS hours "
-            f"FROM {T} t JOIN {E} e ON {_PB_NORM('t.EMPLOYEE_CODE')} = {_PB_NORM('e.Employee_Code')} "
+            f"FROM {T} t JOIN emp e ON {_PB_NORM('t.EMPLOYEE_CODE')} = e.nid "
             f"WHERE {_PB_DATEKEY} BETWEEN DATE_TRUNC(CURRENT_DATE(), MONTH) AND CURRENT_DATE() "
-            f"AND {_PB_ACTIVE}{scope('e')} "
             f"GROUP BY employee, department, project "
             f"ORDER BY hours DESC LIMIT 200"
         ),
@@ -8571,17 +8601,16 @@ def _pb_report_defs(user) -> list:
         "title": "Current Allocation Snapshot",
         "description": f"This week's project allocation per person across {label} — regenerates live on every open.",
         "sql": (
-            f"WITH cur AS (SELECT MAX(Date) AS d FROM {AL} WHERE Date <= CURRENT_DATE()) "
-            f"SELECT e.Resource_Name AS employee, "
-            f"COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified') AS department, "
+            f"WITH cur AS (SELECT MAX(Date) AS d FROM {AL} WHERE Date <= CURRENT_DATE()), "
+            f"{rep_emp_cte} "
+            f"SELECT e.name AS employee, e.dept AS department, "
             f"COALESCE(pm.Project_Name, CAST(al.project_id AS STRING)) AS project, "
             f"MAX(SAFE_CAST(al.allocation_percent AS FLOAT64)) AS allocation_pct, "
             f"ANY_VALUE(al.Flag) AS flag "
             f"FROM {AL} al "
             f"JOIN cur ON al.Date = cur.d "
-            f"JOIN {E} e ON {_PB_NORM('al.employee_id')} = {_PB_NORM('e.Employee_Code')} "
+            f"JOIN emp e ON {_PB_NORM('al.employee_id')} = e.nid "
             f"LEFT JOIN {PM} pm ON CAST(al.project_id AS STRING) = CAST(pm.Project_Code AS STRING) "
-            f"WHERE {_PB_ACTIVE}{scope('e')} "
             f"GROUP BY employee, department, project "
             f"HAVING allocation_pct > 0 "
             f"ORDER BY employee, allocation_pct DESC LIMIT 500"
@@ -8606,7 +8635,8 @@ def _pb_report_defs(user) -> list:
                 f"ROUND(SAFE_CAST(Q1_ACH AS FLOAT64), 0) AS q1_achieved, "
                 f"ROUND(SAFE_CAST(Open_Pipeline AS FLOAT64), 0) AS open_pipeline, "
                 f"ROUND(SAFE_CAST(Hist_Win_Rate AS FLOAT64) * 100, 1) AS win_rate_pct "
-                f"FROM {SAM} ORDER BY open_pipeline DESC LIMIT 100"
+                f"FROM {SAM} WHERE AM IS NOT NULL AND TRIM(AM) != '' "
+                f"ORDER BY open_pipeline DESC LIMIT 100"
             ),
             "numeric_columns": ["target_2026", "q1_achieved", "open_pipeline", "win_rate_pct"],
         }})
@@ -10092,6 +10122,7 @@ def attendance_employees(user: dict = Depends(get_current_user)):
                  SUM(is_present) AS present, SUM(is_remote) AS remote,
                  SUM(is_on_leave) AS on_leave, SUM(is_absent) AS absent,
                  SUM(is_missing_punch) AS missing,
+                 SUM(GREATEST(is_present, is_remote, is_missing_punch)) AS attended,
                  COUNTIF(checkin_time IS NOT NULL
                          AND TIME({_ATT_TS_PARSE_IN}) > TIME '09:30:00') AS late,
                  CAST(AVG(IF(checkin_time IS NOT NULL,
@@ -10104,7 +10135,7 @@ def attendance_employees(user: dict = Depends(get_current_user)):
           GROUP BY nid
         )
         SELECT e.code, e.name, e.dept, e.position, e.location,
-               a.present, a.remote, a.on_leave, a.absent, a.missing, a.late,
+               a.present, a.remote, a.on_leave, a.absent, a.missing, a.attended, a.late,
                FORMAT_TIME('%H:%M', TIME(TIMESTAMP_SECONDS(a.avg_cin_secs))) AS avg_checkin,
                a.last_seen,
                (SELECT working_days FROM wd) AS working_days
@@ -10124,7 +10155,9 @@ def attendance_employees(user: dict = Depends(get_current_user)):
         working_days = wd or working_days
         present = _att_iv(row.get("present")); remote = _att_iv(row.get("remote"))
         missing = _att_iv(row.get("missing"))
-        attended = present + remote + missing  # missing punch = punched in, worked
+        # attended is computed in SQL as GREATEST over the flags per day, so a
+        # day carrying both present + remote flags counts once, not twice.
+        attended = _att_iv(row.get("attended"))
         out.append({
             "code":       row.get("code"),
             "name":       row.get("name"),
@@ -10223,7 +10256,8 @@ def attendance_employee_history(code: str, user: dict = Depends(get_current_user
         mkey = d[:7]
         m = months.setdefault(mkey, {
             "month": mkey, "working_days": 0, "present": 0, "remote": 0,
-            "on_leave": 0, "absent": 0, "missing": 0, "late": 0, "ontime": 0,
+            "on_leave": 0, "absent": 0, "missing": 0, "attended": 0,
+            "late": 0, "ontime": 0,
             "cin_mins": [], "cout_mins": [], "worked": 0.0, "days": [],
         })
         is_off = _att_iv(row.get("is_off")) == 1
@@ -10235,6 +10269,9 @@ def attendance_employee_history(code: str, user: dict = Depends(get_current_user
             m["on_leave"] += _att_iv(row.get("f_leave"))
             m["absent"]   += _att_iv(row.get("f_absent"))
             m["missing"]  += _att_iv(row.get("f_missing"))
+            # a day carrying more than one flag still counts once
+            m["attended"] += max(_att_iv(row.get("f_present")), _att_iv(row.get("f_remote")),
+                                 _att_iv(row.get("f_missing")))
         cm, om = _att_mins(row.get("cin")), _att_mins(row.get("cout"))
         if cm is not None:
             m["cin_mins"].append(cm)
@@ -10267,7 +10304,7 @@ def attendance_employee_history(code: str, user: dict = Depends(get_current_user
     all_cin, all_cout = [], []
     for mkey in sorted(months.keys(), reverse=True):
         m = months[mkey]
-        attended = m["present"] + m["remote"] + m["missing"]
+        attended = m["attended"]
         worked_days = len(m["cin_mins"])
         month_list.append({
             "month":           m["month"],
