@@ -89,6 +89,7 @@ def init_db():
     _migrate_add_totp_columns()
     _migrate_add_governance_tables()
     _migrate_add_data_scope_tables()
+    _migrate_rename_dept_scope_values()
     _migrate_add_system_settings()
     _migrate_add_availability_tasks()
     _migrate_add_chat_tables()
@@ -1529,6 +1530,36 @@ def _migrate_add_feedback_tables():
         print("[DB] Migration: response_feedback + pulse_responses tables ready")
     except Exception as e:
         print(f"[DB] feedback tables migration error: {e}")
+
+
+def _migrate_rename_dept_scope_values():
+    """Idempotent: repair user_data_scope 'department' values orphaned by
+    warehouse hierarchy renames. The Drive-fed Employee_Data sheet reorganised
+    its hierarchy in July 2026 — 'Qlik' became 'BOD / Delivery / Data /
+    Business Intelligence' (verified live: E-451/E-827/E-1558 all moved there,
+    and no employee carries 'Qlik' any more). A scope value that matches no
+    EmployeeHierarchyNode silently empties EVERY surface for that user (chat,
+    dashboards, availability, attendance), so stale values are rewritten to
+    the new node. Extend the map when the source sheet renames again."""
+    dept_renames = {
+        "qlik": "BOD / Delivery / Data / Business Intelligence",
+    }
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        changed = 0
+        for old, new in dept_renames.items():
+            cur.execute(
+                "UPDATE user_data_scope SET value = ? "
+                "WHERE dimension = 'department' AND LOWER(TRIM(value)) = ? AND value != ?",
+                (new, old, new),
+            )
+            changed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        conn.commit()
+        conn.close()
+        print(f"[DB] Migration: dept scope renames applied ({changed} row(s) updated)")
+    except Exception as e:
+        print(f"[DB] Dept scope rename migration error (safe to ignore on fresh DB): {e}")
 
 
 def _migrate_rename_sfml_to_tmc():
