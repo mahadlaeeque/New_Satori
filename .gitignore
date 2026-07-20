@@ -18,6 +18,8 @@ frontend/.vite/
 # Secrets / env
 .env
 .env.*
+# the shareable template carries NO secrets and IS tracked
+!.env.example
 *.pem
 *.key
 service-account/
