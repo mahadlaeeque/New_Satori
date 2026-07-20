@@ -31,6 +31,7 @@ import {
   Download, LayoutGrid, Grid3x3, Radar
 } from "lucide-react";
 import SatoriAvatar from "./components/SatoriAvatar.jsx";
+import { confirmDialog, alertDialog } from "./components/Dialogs.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 
@@ -1473,9 +1474,9 @@ const TaskDetailModal = ({ task, onClose, onOpenEmployee, onToggleStatus, onDele
 
   // Confirm-then-delete inline (avoids window.confirm chained inside modal which iOS handles weirdly).
   const handleDeleteClick = () => {
-    if (window.confirm(`Delete task "${task.name}"? This cannot be undone.`)) {
-      onDelete && onDelete(task.id);
-    }
+    confirmDialog({ title: "Delete task?", message: `"${task.name}" will be permanently deleted. This can't be undone.`, danger: true, confirmLabel: "Delete" }).then((ok) => {
+      if (ok) onDelete && onDelete(task.id);
+    });
   };
 
   return (
@@ -1939,19 +1940,19 @@ const AvailabilityEnginePage = () => {
       setTasks(t.tasks || []);
       setBestFitOpen(false);
     } catch (e) {
-      alert("Failed to save task: " + (e.message || e));
+      alertDialog("Failed to save task: " + (e.message || e));
     } finally {
       setSavingTask(false);
     }
   };
 
   const handleDeleteTask = async (id) => {
-    if (!window.confirm("Delete this task?")) return;
+    if (!(await confirmDialog({ title: "Delete task?", message: "This task will be deleted.", danger: true, confirmLabel: "Delete" }))) return;
     try {
       await fetchJson(`/api/availability/tasks/${id}`, { method: "DELETE" });
       setTasks(ts => ts.filter(t => t.id !== id));
     } catch (e) {
-      alert("Delete failed: " + (e.message || e));
+      alertDialog("Delete failed: " + (e.message || e));
     }
   };
 
@@ -1960,7 +1961,7 @@ const AvailabilityEnginePage = () => {
       await fetchJson(`/api/availability/tasks/${id}`, { method: "PUT", body: JSON.stringify({ status }) });
       setTasks(ts => ts.map(t => t.id === id ? { ...t, status } : t));
     } catch (e) {
-      alert("Update failed: " + (e.message || e));
+      alertDialog("Update failed: " + (e.message || e));
     }
   };
 

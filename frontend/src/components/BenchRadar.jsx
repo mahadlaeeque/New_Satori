@@ -17,6 +17,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Radar, ChevronRight, Sparkles, X, Loader2, CheckCircle, Plus } from "lucide-react";
 import SatoriAvatar from "./SatoriAvatar.jsx";
+import { alertDialog } from "./Dialogs.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 
@@ -119,7 +120,7 @@ export const SuggestWorkModal = ({ item, onClose, onSaved }) => {
       setSavedIdx(prev => { const n = new Set(prev); n.add(i); return n; });
       onSaved && onSaved();
     } catch (e) {
-      alert("Failed to save task: " + (e.message || e));
+      alertDialog("Failed to save task: " + (e.message || e));
     } finally {
       setSavingIdx(null);
     }

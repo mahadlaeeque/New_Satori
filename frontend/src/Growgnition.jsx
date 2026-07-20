@@ -24,6 +24,7 @@ const AvailabilityEnginePage = lazy(() => import("./AvailabilityEngine.jsx"));
 const ProjectsPage = lazy(() => import("./ProjectsPage.jsx"));
 const AttendancePage = lazy(() => import("./Attendance.jsx"));
 import SatoriAvatar from "./components/SatoriAvatar.jsx";
+import { DialogHost, confirmDialog, alertDialog } from "./components/Dialogs.jsx";
 
 // ─── TMC Brand Color Palette ───
 // Theme-aware tokens go through CSS custom properties so the same JSX inline
@@ -1428,7 +1429,7 @@ const FabButtons = ({ pageLabel } = {}) => {
       setReportMsg("");
       setTimeout(() => { setReportOpen(false); setReportDone(false); }, 1800);
     } catch (e) {
-      alert("Couldn't send your report: " + (e?.message || "unknown error"));
+      alertDialog("Couldn't send your report: " + (e?.message || "unknown error"));
     } finally {
       setReportBusy(false);
     }
@@ -2775,7 +2776,12 @@ const AgentPage = () => {
 
   const deleteConversation = async (convId, e) => {
     e?.stopPropagation?.();
-    if (!confirm("Delete this conversation? This can't be undone.")) return;
+    const ok = await confirmDialog({
+      title: "Delete conversation?",
+      message: "This conversation and all its messages will be permanently removed. This can't be undone.",
+      danger: true, confirmLabel: "Delete", icon: Trash2,
+    });
+    if (!ok) return;
     const token = localStorage.getItem("token");
     try {
       const res = await fetch(`${API_BASE}/api/chat/conversations/${convId}`, {
@@ -3002,7 +3008,7 @@ const AgentPage = () => {
 
     } catch (err) {
       console.error("Voice init error:", err);
-      alert("Could not access microphone. Please allow microphone access and try again.");
+      alertDialog("Could not access microphone. Please allow microphone access and try again.");
       stopVoice();
     }
   };
@@ -4063,7 +4069,7 @@ const ReportPreview = ({ config, configRev, onConfigChange, onSaveMeta, isReadOn
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
     } catch (err) {
-      alert("Download failed: " + err.message);
+      alertDialog("Download failed: " + err.message);
     } finally {
       setDownloading(null);
     }
@@ -4396,7 +4402,7 @@ const ReportsPage = () => {
       setMode("viewing");
       setPreviewRev((k) => k + 1);
     } catch (err) {
-      alert("Failed to load: " + err.message);
+      alertDialog("Failed to load: " + err.message);
     }
   };
 
@@ -4425,7 +4431,7 @@ const ReportsPage = () => {
       setMode("viewing");
       setPreviewRev((k) => k + 1);
     } catch (err) {
-      alert("Failed to load: " + err.message);
+      alertDialog("Failed to load: " + err.message);
     }
   };
 
@@ -4447,7 +4453,7 @@ const ReportsPage = () => {
       setActivePrebuilt(null);
       await openReport({ id: j.id });
     } catch (err) {
-      alert("Save failed: " + err.message);
+      alertDialog("Save failed: " + err.message);
     }
   };
 
@@ -4557,7 +4563,7 @@ const ReportsPage = () => {
   };
 
   const handleDelete = async (id, name) => {
-    if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return;
+    if (!(await confirmDialog({ title: "Delete permanently?", message: `"${name}" will be permanently deleted. This can't be undone.`, danger: true, confirmLabel: "Delete", icon: Trash2 }))) return;
     const token = localStorage.getItem("token");
     const base = import.meta.env.VITE_API_BASE || "";
     try {
@@ -4568,7 +4574,7 @@ const ReportsPage = () => {
       setReports((prev) => prev.filter((r) => (r.id || r._id) !== id));
       if (activeId === id) backToList();
     } catch (err) {
-      alert("Delete failed: " + err.message);
+      alertDialog("Delete failed: " + err.message);
     }
   };
 
@@ -4594,7 +4600,7 @@ const ReportsPage = () => {
       if (!dupRes.ok) throw new Error("Duplicate failed");
       await fetchReports();
     } catch (err) {
-      alert("Duplicate failed: " + err.message);
+      alertDialog("Duplicate failed: " + err.message);
     }
   };
 
@@ -4602,7 +4608,7 @@ const ReportsPage = () => {
   // delete their own share row.
   const handleRemoveFromMyList = async (id) => {
     if (!currentUserId) return;
-    if (!window.confirm("Remove this report from your list? You'll lose access until the owner shares it again.")) return;
+    if (!(await confirmDialog({ title: "Remove report?", message: "You'll lose access until the owner shares it with you again.", danger: true, confirmLabel: "Remove" }))) return;
     const token = localStorage.getItem("token");
     const base = import.meta.env.VITE_API_BASE || "";
     try {
@@ -4614,7 +4620,7 @@ const ReportsPage = () => {
       setReports((prev) => prev.filter((r) => (r.id || r._id) !== id));
       if (activeId === id) backToList();
     } catch (err) {
-      alert("Could not remove: " + err.message);
+      alertDialog("Could not remove: " + err.message);
     }
   };
 
@@ -8258,7 +8264,7 @@ const DashboardsPage = () => {
       setMode("viewing");
       setRenderKey((k) => k + 1);
     } catch (err) {
-      alert("Failed to load: " + err.message);
+      alertDialog("Failed to load: " + err.message);
     }
   };
 
@@ -8287,7 +8293,7 @@ const DashboardsPage = () => {
       setMode("viewing");
       setRenderKey((k) => k + 1);
     } catch (err) {
-      alert("Failed to load: " + err.message);
+      alertDialog("Failed to load: " + err.message);
     }
   };
 
@@ -8309,7 +8315,7 @@ const DashboardsPage = () => {
       setActivePrebuilt(null);
       await openDashboard({ id: j.id });
     } catch (err) {
-      alert("Save failed: " + err.message);
+      alertDialog("Save failed: " + err.message);
     }
   };
 
@@ -8390,7 +8396,7 @@ const DashboardsPage = () => {
   };
 
   const handleDelete = async (id, name) => {
-    if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return;
+    if (!(await confirmDialog({ title: "Delete permanently?", message: `"${name}" will be permanently deleted. This can't be undone.`, danger: true, confirmLabel: "Delete", icon: Trash2 }))) return;
     const token = localStorage.getItem("token");
     const base = import.meta.env.VITE_API_BASE || "";
     try {
@@ -8401,7 +8407,7 @@ const DashboardsPage = () => {
       setDashboards((prev) => prev.filter((d) => (d.id || d._id) !== id));
       if (activeId === id) backToList();
     } catch (err) {
-      alert("Delete failed: " + err.message);
+      alertDialog("Delete failed: " + err.message);
     }
   };
 
@@ -8427,7 +8433,7 @@ const DashboardsPage = () => {
       if (!dupRes.ok) throw new Error("Duplicate failed");
       await fetchDashboards();
     } catch (err) {
-      alert("Duplicate failed: " + err.message);
+      alertDialog("Duplicate failed: " + err.message);
     }
   };
 
@@ -8435,7 +8441,7 @@ const DashboardsPage = () => {
   // to the current user — backend permits owner OR self.
   const handleRemoveFromMyList = async (id) => {
     if (!currentUserId) return;
-    if (!window.confirm("Remove this dashboard from your list? You'll lose access until the owner shares it again.")) return;
+    if (!(await confirmDialog({ title: "Remove dashboard?", message: "You'll lose access until the owner shares it with you again.", danger: true, confirmLabel: "Remove" }))) return;
     const token = localStorage.getItem("token");
     const base = import.meta.env.VITE_API_BASE || "";
     try {
@@ -8447,7 +8453,7 @@ const DashboardsPage = () => {
       setDashboards((prev) => prev.filter((d) => (d.id || d._id) !== id));
       if (activeId === id) backToList();
     } catch (err) {
-      alert("Could not remove: " + err.message);
+      alertDialog("Could not remove: " + err.message);
     }
   };
 
@@ -8872,30 +8878,30 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Update failed");
       fetchAll();
     } catch (e) {
-      alert(e.message);
+      alertDialog(e.message);
     }
   };
 
   // Admin escape hatch — wipe the target user's TOTP secret + backup codes so
   // they re-enroll on next login. Used when a user has lost their device.
   const handleReset2fa = async (u) => {
-    if (!window.confirm(`Reset 2FA for ${u.full_name}? They'll be forced to enroll a new Authenticator app on their next sign-in. Their existing backup codes will stop working.`)) return;
+    if (!(await confirmDialog({ title: "Reset 2FA?", message: `${u.full_name} will be forced to enroll a new Authenticator app on their next sign-in. Their existing backup codes will stop working.`, danger: true, confirmLabel: "Reset 2FA" }))) return;
     try {
       const res = await fetch(`${apiBase}/api/admin/users/${u.id}/2fa`, {
         method: "DELETE",
         headers: authHeaders(),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Reset failed");
-      alert(`2FA reset for ${u.full_name}.`);
+      alertDialog({ title: "2FA reset", message: `2FA reset for ${u.full_name}. They'll enroll a new Authenticator app on next sign-in.` });
       fetchAll();
     } catch (e) {
-      alert(e.message);
+      alertDialog(e.message);
     }
   };
 
   const handleDelete = async (u) => {
     if (u.id === currentUserId) return;
-    if (!confirm(`Permanently delete user "${u.full_name}" (${u.email})?\n\nThis removes the account and all of their dashboards, reports, chats, and scope settings. This cannot be undone. To temporarily disable instead, use Deactivate.`)) return;
+    if (!(await confirmDialog({ title: "Permanently delete user?", message: `"${u.full_name}" (${u.email})\n\nThis removes the account and all of their dashboards, reports, chats, and scope settings. This can't be undone. To temporarily disable instead, use Deactivate.`, danger: true, confirmLabel: "Delete user" }))) return;
     try {
       const res = await fetch(`${apiBase}/api/admin/users/${u.id}`, {
         method: "DELETE", headers: authHeaders(),
@@ -8903,13 +8909,13 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Delete failed");
       fetchAll();
     } catch (e) {
-      alert(e.message);
+      alertDialog(e.message);
     }
   };
 
   const [syncingDepts, setSyncingDepts] = useState(false);
   const handleSyncDepartments = async () => {
-    if (!confirm("Re-sync every imported practice head's department(s) from the Practice Heads list?\n\nThis overwrites each matching user's department scope with the values from the source file (e.g. Mirza Amir Baig → SAP Analytics; Rai Sohaib Amjad → SAP Finance + SAP Controlling).")) return;
+    if (!(await confirmDialog({ title: "Re-sync practice-head departments?", message: "This overwrites each matching user's department scope with the values from the Practice Heads source file (e.g. Mirza Amir Baig → SAP Analytics; Rai Sohaib Amjad → SAP Finance + SAP Controlling).", confirmLabel: "Re-sync" }))) return;
     setSyncingDepts(true);
     try {
       const res = await fetch(`${apiBase}/api/admin/users/resync-practice-head-scopes`, {
@@ -8917,10 +8923,10 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || "Sync failed");
-      alert(`Departments synced — updated ${data.summary?.updated ?? 0} user(s), ${data.summary?.no_user ?? 0} unmatched.`);
+      alertDialog({ title: "Departments synced", message: `Updated ${data.summary?.updated ?? 0} user(s); ${data.summary?.no_user ?? 0} unmatched.` });
       fetchAll();
     } catch (e) {
-      alert(e.message);
+      alertDialog(e.message);
     } finally {
       setSyncingDepts(false);
     }
@@ -10454,7 +10460,7 @@ const SchemaSettingsCard = () => {
   };
 
   const resetDefaults = async () => {
-    if (!confirm("Reset all schema settings to the TMC defaults? This wipes any custom descriptions you've added.")) return;
+    if (!(await confirmDialog({ title: "Reset schema settings?", message: "All schema settings return to the TMC defaults. Any custom descriptions you've added will be wiped.", danger: true, confirmLabel: "Reset" }))) return;
     setResetting(true); setError(""); setSuccess("");
     try {
       const res = await fetch(`${apiBase}/api/admin/schema-settings/reset`, {
@@ -11047,7 +11053,7 @@ const EventDetailsModal = ({ event: e, onClose, onEdit, onDeleted }) => {
   };
 
   const remove = async () => {
-    if (!window.confirm(`Delete "${e.summary}"? Attendees will be notified.`)) return;
+    if (!(await confirmDialog({ title: "Delete event?", message: `"${e.summary}" will be deleted and its attendees will be notified.`, danger: true, confirmLabel: "Delete", icon: Trash2 }))) return;
     setDeleting(true); setError(null);
     try {
       const r = await fetch(`${API_BASE}/api/calendar/events/${encodeURIComponent(e.id)}`, { method: "DELETE", headers: authHeaders() });
@@ -11201,7 +11207,7 @@ const EventEditorModal = ({ event, defaultDate, onClose, onSaved }) => {
   };
 
   const remove = async () => {
-    if (!window.confirm(`Delete "${event.summary}"? Attendees will be notified.`)) return;
+    if (!(await confirmDialog({ title: "Delete event?", message: `"${event.summary}" will be deleted and its attendees will be notified.`, danger: true, confirmLabel: "Delete", icon: Trash2 }))) return;
     setDeleting(true); setError(null);
     try {
       const r = await fetch(`${API_BASE}/api/calendar/events/${encodeURIComponent(event.id)}`, { method: "DELETE", headers: authHeaders() });
@@ -11355,7 +11361,7 @@ const CalendarPage = () => {
   };
 
   const disconnect = async () => {
-    if (!window.confirm("Disconnect Google Calendar from Satori? Satori will no longer see your meetings.")) return;
+    if (!(await confirmDialog({ title: "Disconnect Google Calendar?", message: "Satori will no longer see your meetings.", danger: true, confirmLabel: "Disconnect" }))) return;
     setBusy(true);
     try {
       await fetch(`${API_BASE}/api/integrations/google/disconnect`, { method: "POST", headers: authHeaders() });
@@ -11771,7 +11777,7 @@ const InboxPage = () => {
               <button onClick={() => modify(open.id, "archive")} style={{ padding: "8px 14px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: "transparent", color: COLORS.textSecondary, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Archive</button>
               <button onClick={() => modify(open.id, open.unread ? "markread" : "markunread")} style={{ padding: "8px 14px", borderRadius: 9, border: `1px solid ${COLORS.border}`, background: "transparent", color: COLORS.textSecondary, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Mark {open.unread ? "read" : "unread"}</button>
               <div style={{ flex: 1 }} />
-              <button onClick={() => { if (window.confirm("Move this email to Trash?")) modify(open.id, "trash"); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9, border: "1px solid var(--sem-danger-bg)", background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)", fontWeight: 700, fontSize: 13, cursor: "pointer" }}><Trash2 size={14} /> Trash</button>
+              <button onClick={() => { confirmDialog({ title: "Move to Trash?", message: "This email will be moved to Trash.", danger: true, confirmLabel: "Trash" }).then((ok) => { if (ok) modify(open.id, "trash"); }); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9, border: "1px solid var(--sem-danger-bg)", background: "var(--sem-danger-bg)", color: "var(--sem-danger-fg)", fontWeight: 700, fontSize: 13, cursor: "pointer" }}><Trash2 size={14} /> Trash</button>
             </div>
           </div>
         </div>
@@ -14053,6 +14059,9 @@ export default function App() {
 
       {/* Pulse survey + welcome-back nudge */}
       <EngagementPrompts />
+
+      {/* In-app confirm/alert dialogs (replaces native window.confirm/alert) */}
+      <DialogHost />
 
 
       {/* Global Styles */}

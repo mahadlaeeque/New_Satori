@@ -1084,6 +1084,7 @@ def admin_delete_user(user_id: int, request: Request, admin: dict = Depends(requ
     db.close()
     try:
         _scope_policy_cache.pop(int(user_id), None)
+        _identity_addon_cache.pop(int(user_id), None)
     except Exception:
         pass
     audit_log.record(
@@ -1491,6 +1492,7 @@ def admin_resync_practice_head_scopes(admin: dict = Depends(require_superadmin))
         # request recomputes the policy with the fresh scope rows.
         try:
             _scope_policy_cache.pop(int(uid), None)
+            _identity_addon_cache.pop(int(uid), None)
         except Exception:
             pass
     db.commit()
@@ -2394,6 +2396,7 @@ def admin_set_user_scope(
     # dashboard / report request recomputes their policy with the new scope.
     try:
         _scope_policy_cache.pop(int(user_id), None)
+        _identity_addon_cache.pop(int(user_id), None)
     except Exception:
         pass
     audit_log.record(
@@ -3655,6 +3658,13 @@ def _enforce_dept_scope_on_sql(sql: str, dept_scope: "list[str] | None") -> str:
 
 _scope_policy_cache: "dict[int, str]" = {}
 
+# Deterministic self-identity anchor cache (uid -> USER CONTEXT identity addon,
+# resolved from Employee_Data by login email). Process-lifetime. Only
+# successful matches and definitive "no record" results are cached; a transient
+# BigQuery/ADC error is NOT cached so the next request retries and behaviour
+# never degrades below the name-based fallback.
+_identity_addon_cache: "dict[int, str]" = {}
+
 _SCOPE_AGENT_PROMPT = """You are the Satori Data-Access Policy Agent at TallyMarks Consulting (TMC).
 
 A user is signing in to Satori. Based on their role and the department they head, decide what workforce data they should be allowed to query through the main Satori agent, and write that policy as direct instructions to the main agent.
@@ -3760,6 +3770,100 @@ def _compute_scope_policy(user: dict) -> str:
     return addon
 
 
+def _clean_resource_name(name: str) -> str:
+    """Strip a leading 'E-1571 ' style Employee_Code prefix from Resource_Name
+    (Resource_Name carries the code prefix in this warehouse)."""
+    import re as _re
+    return _re.sub(r"^\s*E-?\d+\s+", "", (name or "").strip(), flags=_re.IGNORECASE).strip()
+
+
+def _employee_identity_addon(user: dict) -> str:
+    """Deterministic self-identity anchor.
+
+    Resolves the signed-in user (by login email) to their Employee_Data row
+    ONCE per process and returns a USER CONTEXT fragment stating exactly who
+    they are (Employee_Code / title / department). This turns 'my title',
+    'my department', 'my attendance' into exact Employee_Code lookups instead
+    of a fuzzy, temperature-sensitive name match that could pick the wrong
+    namesake or fabricate an answer.
+
+    Safety:
+    - Never raises. On any BigQuery/ADC error returns '' (falls back to the
+      existing name-based behaviour) and does NOT cache, so it retries.
+    - No warehouse match -> an explicit 'no record, do not fabricate' notice
+      (only governs FIRST-PERSON questions; third-person lookups are
+      unaffected). This IS cached (won't change mid-process).
+    """
+    if not user:
+        return ""
+    email = (user.get("email") or "").strip().lower()
+    if not email:
+        return ""
+    try:
+        uid = int(user.get("sub") or user.get("id") or 0)
+    except Exception:
+        uid = 0
+    if uid and uid in _identity_addon_cache:
+        return _identity_addon_cache[uid]
+
+    try:
+        from bigquery_client import run_query as _rq
+        safe_email = email.replace("'", "''")
+        sql = normalize_bq_project(
+            "SELECT Employee_Code, Resource_Name, EmployeePosition, "
+            "EmployeeHierarchyNode "
+            f"FROM {sql_table('Employee_Data')} "
+            f"WHERE LOWER(TRIM(EmployeeEmail)) = '{safe_email}' "
+            "LIMIT 1"
+        )
+        r = _rq(sql, max_rows=1)
+        if isinstance(r, dict) and r.get("error"):
+            # Transient (expired ADC / permission / BQ hiccup): do NOT cache;
+            # returning '' means the prompt keeps today's name-based behaviour.
+            print(f"[identity] BQ lookup error for {email} (continuing, not cached): {r.get('error')}")
+            return ""
+        rows = (r.get("rows") or []) if isinstance(r, dict) else []
+
+        if rows:
+            row = rows[0] if isinstance(rows[0], dict) else {}
+            code = (row.get("Employee_Code") or "").strip()
+            rname = _clean_resource_name(row.get("Resource_Name") or "")
+            pos = (row.get("EmployeePosition") or "").strip()
+            dept = (row.get("EmployeeHierarchyNode") or "").strip()
+            display = rname or (user.get("name") or user.get("full_name") or email)
+            addon = (
+                "\n\nYOUR IDENTITY (the signed-in user — authoritative, never guess this):\n"
+                f"- Name: {display}\n"
+                f"- Employee_Code: {code}\n"
+                f"- EmployeePosition (their job title): {pos or 'not recorded in Employee_Data'}\n"
+                f"- Department (EmployeeHierarchyNode): {dept or 'not recorded in Employee_Data'}\n"
+                "When the user asks about THEMSELVES ('my title', 'my role', 'my department', "
+                "'my check-in/attendance', 'my timesheet', 'my allocation'), they ARE this "
+                f"employee (Employee_Code = {code}). Answer 'my title' and 'my department' "
+                "DIRECTLY from the values above with NO tool call. For their own attendance / "
+                "timesheet / allocation, resolve strictly by this Employee_Code via the standard "
+                "digit-normalized join — do NOT fuzzy-match their name.\n"
+            )
+        else:
+            display = (user.get("name") or user.get("full_name") or email)
+            addon = (
+                "\n\nYOUR IDENTITY (the signed-in user):\n"
+                f"- {display} ({email}) has NO matching row in Employee_Data.\n"
+                "If they ask about THEIR OWN title, role, department, attendance, timesheet or "
+                "allocation, tell them plainly that you don't have an employee record linked to "
+                "their account, so you can't share their personal workforce data. Do NOT guess, "
+                "infer, or fabricate a title, department, or any personal figures for them. "
+                "(Questions about OTHER named people are unaffected — resolve those normally.)\n"
+            )
+
+        if uid:
+            _identity_addon_cache[uid] = addon
+        return addon
+    except Exception as e:
+        print(f"[identity] addon build failed for {email} (continuing without it): {e}")
+        return ""
+
+
 def _user_context_addon(user: dict) -> str:
     """Thin wrapper: returns the cached / freshly-computed scope-policy
     addon for this user. Safe to call on every chat/voice/dashboard/
@@ -3767,9 +3871,10 @@ def _user_context_addon(user: dict) -> str:
     call per user_id per process."""
     if not user:
         return ""
-    # Scope policy + (if connected) the user's own calendar for today, so the
-    # agent can answer "what's my next meeting?" type questions.
-    return _compute_scope_policy(user) + _calendar_context_block(user)
+    # Scope policy + deterministic self-identity anchor + (if connected) the
+    # user's own calendar for today, so the agent can answer "what's my title?"
+    # and "what's my next meeting?" type questions reliably.
+    return _compute_scope_policy(user) + _employee_identity_addon(user) + _calendar_context_block(user)
 
 
 def _log_chat_error(user: dict, user_message: str, sql_attempted: str,
@@ -4152,7 +4257,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                 contents=contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
-                    temperature=0.7,
+                    temperature=0.2,
                     max_output_tokens=512,
                 ),
             )
@@ -4219,7 +4324,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                 contents=contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
-                    temperature=0.7,
+                    temperature=0.2,
                     max_output_tokens=8192,
                     tools=[_CHAT_SQL_TOOL, _BENCH_TOOL, _CALENDAR_TOOL, _GMAIL_TOOL],
                     # Cap thinking budget so internal reasoning can't eat
@@ -4498,7 +4603,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
             contents=contents,
             config=genai.types.GenerateContentConfig(
                 system_instruction=system_prompt_final,
-                temperature=0.5,
+                temperature=0.2,
                 max_output_tokens=6144,
                 # Cap thinking so a complex post-rounds compose still has output budget
                 # left for the actual answer — but allow some reasoning.
@@ -4608,7 +4713,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                 contents=summary_contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
-                    temperature=0.7,
+                    temperature=0.2,
                     max_output_tokens=1024,
                 ),
             )
@@ -4733,7 +4838,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                     contents=local_contents,
                     config=genai.types.GenerateContentConfig(
                         system_instruction=system_prompt_final,
-                        temperature=0.7,
+                        temperature=0.2,
                         max_output_tokens=1024,
                         tools=[_CHAT_SQL_TOOL, _BENCH_TOOL, _CALENDAR_TOOL, _GMAIL_TOOL],
                     ),
@@ -4854,7 +4959,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
                 contents=local_contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
-                    temperature=0.5,
+                    temperature=0.2,
                     max_output_tokens=8192,
                 ),
             ):
