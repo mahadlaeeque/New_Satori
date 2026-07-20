@@ -395,6 +395,8 @@ _SEED_ADMIN_USERS = [
     # NOT superadmins (not in main.py _SUPERADMIN_EMAILS) → no Admin/Settings tab.
     ("salman.sohail@tmcltd.com", "Salman Sohail"),
     ("anas.wahab@tmcltd.com",    "Anas Wahab"),
+    # Superadmin (email IS in main.py _SUPERADMIN_EMAILS): full Admin tab.
+    ("muhammad.fawwaz@tmcltd.com", "Muhammad Fawwaz Wattoo"),
 ]
 
 
@@ -441,6 +443,22 @@ def _migrate_seed_admin_users():
             except Exception:
                 pass
             print(f"[DB] Admin-user seed: skipped {email} ({e})")
+    # Promote-if-existing: superadmin gating in main.py requires role='admin',
+    # so an account that already existed as a regular user must be lifted.
+    # Idempotent (only touches non-admin rows for these specific emails).
+    for email in ("muhammad.fawwaz@tmcltd.com",):
+        try:
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("UPDATE users SET role = 'admin' WHERE LOWER(email) = LOWER(?) AND role != 'admin'", (email,))
+            if cur.rowcount:
+                print(f"[DB] Admin-user seed: promoted existing user {email} to admin")
+            conn.commit(); conn.close()
+        except Exception as e:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            print(f"[DB] Admin-user promote: skipped {email} ({e})")
     print(f"[DB] Migration: admin users provisioned ({created} new)")
 
 

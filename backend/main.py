@@ -234,6 +234,7 @@ SUPERADMIN_EMAIL = (os.environ.get("SUPERADMIN_EMAIL") or "superadmin@tmc.com").
 _SUPERADMIN_EMAILS = {
     "numair.mazhar@tmcltd.com",
     "mahad.laeeque@tmcltd.com",
+    "muhammad.fawwaz@tmcltd.com",
 }
 
 
