@@ -34,6 +34,14 @@ class _PgCursorWrapper:
         # Not reliable for PG — use RETURNING in init_db instead
         return None
 
+    @property
+    def rowcount(self):
+        # psycopg2 exposes rowcount on the raw cursor; surface it so code
+        # written against sqlite3's cursor API works on both engines. (Its
+        # absence made the 2026-07 promote/scope-rename migrations silently
+        # roll back on prod — an AttributeError before commit().)
+        return self._cur.rowcount
+
 
 class _PgConnWrapper:
     def __init__(self, conn):
@@ -450,8 +458,14 @@ def _migrate_seed_admin_users():
     for email in ("muhammad.fawwaz@tmcltd.com",):
         try:
             conn = get_db(); cur = conn.cursor()
-            cur.execute("UPDATE users SET role = 'admin' WHERE LOWER(email) = LOWER(?) AND role != 'admin'", (email,))
-            if cur.rowcount:
+            # SELECT-then-UPDATE (not rowcount) so a cursor-API difference
+            # between sqlite3 and the PG wrapper can never abort the commit —
+            # exactly what happened on prod on 2026-07-20.
+            cur.execute("SELECT role FROM users WHERE LOWER(email) = LOWER(?)", (email,))
+            row = cur.fetchone()
+            role = ((row["role"] if isinstance(row, dict) else row[0]) or "") if row else None
+            if row is not None and role.lower() != "admin":
+                cur.execute("UPDATE users SET role = 'admin' WHERE LOWER(email) = LOWER(?)", (email,))
                 print(f"[DB] Admin-user seed: promoted existing user {email} to admin")
             conn.commit(); conn.close()
         except Exception as e:
@@ -1554,7 +1568,12 @@ def _migrate_rename_dept_scope_values():
                 "WHERE dimension = 'department' AND LOWER(TRIM(value)) = ? AND value != ?",
                 (new, old, new),
             )
-            changed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            try:
+                # count is log-only — never let a cursor-API difference
+                # abort the commit (bit us on prod 2026-07-20)
+                changed += max(int(cur.rowcount or 0), 0)
+            except Exception:
+                pass
         conn.commit()
         conn.close()
         print(f"[DB] Migration: dept scope renames applied ({changed} row(s) updated)")
