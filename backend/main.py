@@ -2541,6 +2541,71 @@ def _get_user_scope_values(user_id: int, dimension: str) -> "list[str] | None":
         return None
 
 
+# ── Hierarchy-aware department scope expansion ──────────────────────────────
+# 2026-07: the Employee_Data taxonomy became a PATH hierarchy — e.g. the old
+# flat 'SAP Analytics' practice now also exists as 'BOD / Delivery / Data /
+# SAP Analytics', and the old 'Qlik' team lives under 'BOD / Delivery / Data'
+# as five sub-nodes (Business Intelligence, Capability(Data), Data Engineering,
+# SAP Analytics, SAP Platform). A stored scope value therefore covers:
+#   - the exact node itself,
+#   - every DESCENDANT node ('<value> / …'),
+#   - every node where the value is a PATH SEGMENT ('… / <value>' or
+#     '… / <value> / …') — so a head scoped to the old flat name still owns
+#     the practice after it moved under a hierarchy path.
+# Expansion happens ONCE here (the single choke point every surface reads
+# scope through), so the chat validator, availability/attendance SQL, the
+# per-employee guard and the prebuilts all keep their exact-match logic but
+# see the full concrete node list.
+_dept_nodes_cache: dict = {"at": 0.0, "nodes": []}
+_DEPT_NODES_TTL_SECS = 900  # taxonomy changes rarely; 15 min is plenty
+
+
+def _live_dept_nodes() -> list:
+    """Distinct EmployeeHierarchyNode values from the live warehouse (cached).
+    Returns [] on any failure so callers can fall back to the raw values."""
+    import time as _t
+    now = _t.time()
+    if _dept_nodes_cache["nodes"] and now - _dept_nodes_cache["at"] < _DEPT_NODES_TTL_SECS:
+        return _dept_nodes_cache["nodes"]
+    try:
+        r = bq_run_query(normalize_bq_project(
+            f"SELECT DISTINCT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS n "
+            f"FROM `{BQ_FULL}.Employee_Data`"), max_rows=500)
+        nodes = [row.get("n") for row in (r.get("rows") or []) if row.get("n")]
+        if nodes:
+            _dept_nodes_cache["nodes"] = nodes
+            _dept_nodes_cache["at"] = now
+        return _dept_nodes_cache["nodes"]
+    except Exception as e:
+        print(f"[scope] dept-node probe failed (falling back to raw scope values): {e}")
+        return _dept_nodes_cache["nodes"]
+
+
+def _expand_dept_scope(values: list) -> list:
+    """Expand stored scope values to every concrete hierarchy node they cover.
+    Always keeps the raw values themselves (fail-safe: if the live node probe
+    is unavailable the behavior degrades to today's exact matching)."""
+    out, seen = [], set()
+    def _add(v):
+        k = str(v).strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            out.append(str(v).strip())
+    for v in values:
+        _add(v)
+    nodes = _live_dept_nodes()
+    for v in values:
+        s = str(v).strip().lower()
+        if not s:
+            continue
+        for node in nodes:
+            n = str(node).strip().lower()
+            if (n == s or n.startswith(s + " / ")
+                    or n.endswith(" / " + s) or (" / " + s + " / ") in n):
+                _add(node)
+    return out
+
+
 def _get_user_dept_scope(user_id: int):
     """Returns the list of department/practice values the user is restricted
     to (matches `Employee_Data.EmployeeHierarchyNode`), or None when unrestricted.
@@ -2576,7 +2641,11 @@ def _get_user_dept_scope(user_id: int):
         db.close()
         if not rows:
             return None
-        return [r["value"] if isinstance(r, dict) else r[0] for r in rows]
+        values = [r["value"] if isinstance(r, dict) else r[0] for r in rows]
+        # HIERARCHY-AWARE: the warehouse taxonomy became a path hierarchy
+        # ('BOD / Delivery / Data / SAP Analytics'), so a stored scope value is
+        # expanded to every concrete node it covers before any matcher sees it.
+        return _expand_dept_scope(values)
     except Exception:
         return None
 
@@ -8464,7 +8533,13 @@ def _pb_scope(user):
         quoted = ", ".join("LOWER('" + str(v).replace("'", "''") + "')" for v in dept_scope)
         return (f" AND LOWER(COALESCE(NULLIF(TRIM({alias}.EmployeeHierarchyNode), ''), 'Unspecified'))"
                 f" IN ({quoted})")
-    label = (", ".join(str(v) for v in dept_scope)) if dept_scope else "the whole company"
+    if dept_scope:
+        # scope values are hierarchy-expanded; keep titles/descriptions short
+        label = ", ".join(str(v) for v in dept_scope[:2])
+        if len(dept_scope) > 2:
+            label += f" (+{len(dept_scope) - 2} more)"
+    else:
+        label = "the whole company"
     return dept_scope, clause, label
 
 

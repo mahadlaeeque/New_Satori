@@ -1556,7 +1556,13 @@ def _migrate_rename_dept_scope_values():
     dashboards, availability, attendance), so stale values are rewritten to
     the new node. Extend the map when the source sheet renames again."""
     dept_renames = {
-        "qlik": "BOD / Delivery / Data / Business Intelligence",
+        # 2026-07-23: the Data practice split into 5 sub-nodes (Business
+        # Intelligence, Capability(Data), Data Engineering, SAP Analytics,
+        # SAP Platform). Scope matching is hierarchy-aware (main.py
+        # _expand_dept_scope), so the parent path covers all of them — map the
+        # ex-Qlik head (and the interim BI-only remap from 07-20) to the parent.
+        "qlik": "BOD / Delivery / Data",
+        "bod / delivery / data / business intelligence": "BOD / Delivery / Data",
     }
     try:
         conn = get_db()
