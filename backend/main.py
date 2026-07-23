@@ -2674,7 +2674,10 @@ When the user names a person ("Hamza", "what time did Hamza check in today"), FI
   - **Hamza Ali** (E-2101) — SAP Finance · Senior Consultant
   - **Hamza Sheikh** (E-0987) — Digital · Analyst"
   When they answer (or if the name they gave already narrows it to one — "Hamza Iftikhar"), continue with THAT person and keep them as the conversation's subject per the conversation-context rule (do not re-ask on follow-ups).
-- ZERO matches → say no employee by that name was found; suggest checking the spelling.
+- ZERO matches → DO NOT give up yet. Transliterated names vary by vowels (Ahmed/Ahmad, Khaleel/Khalil, Kareem/Karim, Saeed/Saad/Said, Osama/Usama) — retry ONCE vowel-insensitively by stripping vowels from BOTH sides. Each pattern = the searched token, lowercased, with vowels removed; use this for tokens whose stripped form is 3+ letters (keep shorter tokens as plain LIKE):
+  SELECT Employee_Code, Resource_Name, EmployeeHierarchyNode, EmployeePosition FROM Employee_Data WHERE REGEXP_CONTAINS(REGEXP_REPLACE(LOWER(Resource_Name), r'[aeiou]', ''), r'khll') AND REGEXP_CONTAINS(REGEXP_REPLACE(LOWER(Resource_Name), r'[aeiou]', ''), r'hmd') AND LOWER(employee_status) = 'active'
+  (user typed "Khaleel Ahmed" → patterns khll + hmd → finds the real "Khaleel Ahmad"). Whatever this returns are candidates — apply the ONE/MULTIPLE rules above, and state the person's ACTUAL stored name in your answer so the user sees the correct spelling.
+- Only when the vowel-insensitive retry ALSO returns zero → say no employee by that name was found; suggest checking the spelling.
 This applies to EVERY per-person question — attendance, check-in time, timesheets, allocation, profile — in chat AND voice. Answering with the wrong namesake's data is a serious error; one clarifying question is always better.
 ### END PERSON DISAMBIGUATION ###
 
@@ -3036,7 +3039,7 @@ DO NOT answer from memory.
 
 AMBIGUOUS NAMES — NEVER GUESS BETWEEN NAMESAKES: when the user names a person, FIRST resolve them. Match EACH word of the name as its own LOWER(Resource_Name) LIKE (token-AND, order-independent — handles middle names + Muhammad/Mohammad spelling), and filter on employee_status, NOT the Employee_Type whitelist (it hides contractors/freelancers):
   run_sql: SELECT Employee_Code, Resource_Name, EmployeeHierarchyNode FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%adeel%' AND LOWER(Resource_Name) LIKE '%abbas%' AND LOWER(employee_status) = 'active'
-If MORE THAN ONE employee matches, do NOT answer yet — speak the options briefly and ask which one: "We have three Hamzas — Hamza Iftikhar in Qlik, Hamza Ali in SAP Finance, and Hamza Sheikh in Digital. Which one do you mean?" Then answer for the person they pick and remember that choice for follow-ups. If exactly one matches, answer and say their full name.
+If MORE THAN ONE employee matches, do NOT answer yet — speak the options briefly and ask which one: "We have three Hamzas — Hamza Iftikhar in Qlik, Hamza Ali in SAP Finance, and Hamza Sheikh in Digital. Which one do you mean?" Then answer for the person they pick and remember that choice for follow-ups. If exactly one matches, answer and say their full name. If NOBODY matches, retry ONCE vowel-insensitively before saying not-found (transliterations vary: Ahmed/Ahmad, Khaleel/Khalil): per token whose vowel-stripped form is 3+ letters, REGEXP_CONTAINS(REGEXP_REPLACE(LOWER(Resource_Name), r'[aeiou]', ''), r'hmd') — 'ahmed' → 'hmd' finds 'Ahmad' — then apply the same one/many/none rules and speak the actual stored name.
 
 ═══ run_sql EXAMPLES (mimic these patterns — these cover most question types) ═══
 
@@ -5763,6 +5766,13 @@ DEFAULT FILTERS — apply automatically without asking:
      Employee_Type whitelist (that EXCLUDES contractors/freelancers who are real
      active people). FIRST run an identity lookup on Employee_Data
      (Employee_Code, Resource_Name, EmployeeHierarchyNode, EmployeePosition).
+   - ZERO hits → retry ONCE vowel-insensitively before reporting not-found.
+     Transliterated names vary by vowels (Ahmed/Ahmad, Khaleel/Khalil,
+     Kareem/Karim): for each token whose vowel-stripped form is 3+ letters,
+     match REGEXP_CONTAINS(REGEXP_REPLACE(LOWER(Resource_Name), r'[aeiou]', ''),
+     r'hmd') — i.e. the token lowercased with vowels removed ('ahmed' → 'hmd'
+     finds 'Ahmad'). Treat results as candidates via the rules below and state
+     the person's actual stored name.
    - Exactly ONE match → proceed and state who you resolved to.
    - MULTIPLE matches → stop and ask which one, listing each candidate's full
      name, code, department and position. Answer only after the user picks
@@ -7269,7 +7279,17 @@ def _autofix_dashboard_sql(sql: str) -> str:
         core = [t for t in toks if t not in _MUHAMMAD_VARIANTS] or toks
         if not core:
             return ""
-        return "(" + " AND ".join(f"LOWER({col_expr}) LIKE '%{t}%'" for t in core) + ")"
+        def _tok_cond(t: str) -> str:
+            # Transliterated names vary by vowels (Ahmed/Ahmad, Khaleel/Khalil),
+            # so each token also matches vowel-insensitively via its consonant
+            # skeleton — but only when the skeleton is long enough (>=3) to
+            # stay selective ('ali' -> 'l' would match everyone).
+            skel = _re.sub(r"[aeiou]", "", t)
+            if skel != t and len(skel) >= 3:
+                return (f"(LOWER({col_expr}) LIKE '%{t}%' OR "
+                        f"REGEXP_CONTAINS(REGEXP_REPLACE(LOWER({col_expr}), r'[aeiou]', ''), r'{skel}'))")
+            return f"LOWER({col_expr}) LIKE '%{t}%'"
+        return "(" + " AND ".join(_tok_cond(t) for t in core) + ")"
 
     def _fix_name_eq(m):
         col = (m.group("pfx") or "") + m.group("col")
@@ -13014,7 +13034,7 @@ This dataset DOES NOT contain SAP/MRP concepts (plant, storage_location, materia
 - For any "who did X more than Y" request: SELECT both X and Y and their difference, ORDER BY the difference DESC, and use HAVING to keep only the rows that exceed (e.g. HAVING overrun_hours > 0).
 
 ═══ DON'T BUILD AN EMPTY REPORT ═══
-- Resolve a named person to their Employee_Code FIRST (Employee_Data: LOWER(Resource_Name) LIKE '%name%'), and remember most people are assigned to only a FEW projects.
+- Resolve a named person to their Employee_Code FIRST (Employee_Data: one LOWER(Resource_Name) LIKE per name word, token-AND). ZERO hits → retry once vowel-insensitively (Ahmed/Ahmad, Khaleel/Khalil): per token with a 3+-letter vowel-stripped form, REGEXP_CONTAINS(REGEXP_REPLACE(LOWER(Resource_Name), r'[aeiou]', ''), r'<token minus vowels>'). Remember most people are assigned to only a FEW projects.
 - Be careful AND-ing a person + a specific project + a status — that combination is frequently empty (e.g. the person isn't on that project, or has nothing 'Completed'). If the user names both a person and a project, either confirm the person actually works on it, or scope to the one they emphasised and mention the other as a note. NEVER silently add a status filter (Completed/etc.) the user didn't ask for.
 
 ═══ JSON FIELDS ═══
@@ -13697,7 +13717,7 @@ _DEFAULT_SCHEMA_SETTINGS = [
             "FROM Allocation_Data a JOIN cur ON a.Date=cur.d LEFT JOIN Project_Master p ON CAST(a.project_id AS STRING)=p.Project_Code "
             "WHERE norm(a.employee_id)='<digits>' GROUP BY project HAVING pct>0 ORDER BY pct DESC. "
             "Show ONLY active rows (pct>0); these can sum to >100% (overallocated). Omit 0% rows and the Bench project unless asked. For a SPECIFIC MONTH use that month's latest week (MAX(Date) WHERE Year=Y AND Month=M). NEVER use MAX(allocation_percent) across all history, and never group-by-month-pick-one (that yields 'Qlik Bench 100%').\n"
-            "IDENTITY: resolve the exact Employee_Code by name FIRST — match EACH name word as its own LOWER(Resource_Name) LIKE (token-AND, order-independent, tolerant of middle names + Muhammad/Mohammad spelling) and filter on employee_status, NOT the Employee_Type whitelist (it hides contractors): SELECT Employee_Code, Resource_Name, EmployeeHierarchyNode FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%adeel%' AND LOWER(Resource_Name) LIKE '%abbas%' AND LOWER(employee_status)='active'. If MULTIPLE employees match, do NOT pick one — list candidates (full name, code, department) and ASK which they mean. If exactly one matches, use THAT code, state it, never guess.\n"
+            "IDENTITY: resolve the exact Employee_Code by name FIRST — match EACH name word as its own LOWER(Resource_Name) LIKE (token-AND, order-independent, tolerant of middle names + Muhammad/Mohammad spelling) and filter on employee_status, NOT the Employee_Type whitelist (it hides contractors): SELECT Employee_Code, Resource_Name, EmployeeHierarchyNode FROM Employee_Data WHERE LOWER(Resource_Name) LIKE '%adeel%' AND LOWER(Resource_Name) LIKE '%abbas%' AND LOWER(employee_status)='active'. If MULTIPLE employees match, do NOT pick one — list candidates (full name, code, department) and ASK which they mean. If exactly one matches, use THAT code, state it, never guess. If ZERO match, retry ONCE vowel-insensitively before saying not-found (transliterations vary: Ahmed/Ahmad, Khaleel/Khalil): per name token whose vowel-stripped form is 3+ letters, REGEXP_CONTAINS(REGEXP_REPLACE(LOWER(Resource_Name), r'[aeiou]', ''), r'<token minus vowels>') — 'ahmed' -> 'hmd' finds 'Ahmad' — then apply the same one/many rules and state the actual stored name.\n"
             "⚠️ BENCH IS PER-WEEK, NOT 'EVER' — the #1 mistake. 'On the bench' / 'zero allocation' means on bench in a SPECIFIC week (default = the CURRENT/latest week), NEVER 'has ever had one 0% week'. Someone allocated this week but benched months ago is NOT on the bench. CURRENT bench population recipe: WITH cur AS (SELECT MAX(Date) d FROM Allocation_Data WHERE Date<=CURRENT_DATE()) SELECT e.Resource_Name FROM Employee_Data e WHERE <active + dept filter> AND NOT EXISTS (SELECT 1 FROM Allocation_Data a, cur WHERE norm(a.employee_id)=norm(e.Employee_Code) AND a.Date=cur.d AND a.Flag='Allocated' AND SAFE_CAST(a.allocation_percent AS FLOAT64)>0).\n"
             "WHEN LISTING WHO IS ON BENCH, do NOT return a flat name list — report each person's WEEKS-ON-BENCH (how many consecutive recent weeks at 0% allocated), because a flat list hides that one person is benched 1 week and another 75. weeks-on-bench recipe: WITH wk AS (SELECT a.Date d, SUM(IF(a.Flag='Allocated',SAFE_CAST(a.allocation_percent AS FLOAT64),0)) alloc FROM Allocation_Data a WHERE norm(a.employee_id)=norm('<code>') AND a.Date<=CURRENT_DATE() GROUP BY d), ranked AS (SELECT d,alloc,ROW_NUMBER() OVER(ORDER BY d DESC) rn FROM wk) SELECT COUNTIF(alloc=0 AND rn <= (SELECT MIN(IF(alloc>0,rn,999999)) FROM ranked)-1) AS weeks_on_bench.\n"
             "WEEK-BY-WEEK allocation for a person (incl. FUTURE weeks): SELECT a.Date AS week_date, ROUND(SUM(IF(a.Flag='Allocated',SAFE_CAST(a.allocation_percent AS FLOAT64),0)),0) AS allocated_pct FROM Allocation_Data a WHERE norm(a.employee_id)=norm('<code>') GROUP BY week_date ORDER BY week_date (alias the date column week_date, NOT 'week' — it collides with the Week column). For 'allocation per week / for which week / upcoming weeks' show this series, not a single snapshot.\n"
@@ -13850,6 +13870,7 @@ _STALE_SCHEMA_NOTE_MARKERS = (
     "restrict to LOWER(attendance_status_text) IN ('present','remote work')",  # pre checkin=NOT NULL (Missing-Punch has a real check-in) note
     "Attendance % = ROUND(100.0*SUM(is_present)/NULLIF(COUNT(*),0),1)",  # pre company-calendar working-days note
     "there is usually exactly ONE match (e.g. 'Adnan Raza' = E-218)",   # pre namesake-disambiguation note
+    "state it, never guess.\n",                                         # pre vowel-insensitive-retry IDENTITY note (newline right after 'guess.')
     "'work package' / 'WP' ALWAYS means TICKET_WP_ID.",                 # pre WP_Report cross-reference note
     "Use WP_Report for what a work package IS",                         # v1 WP_Report note (pre verified columns/join)
     "WP_Report = what a WP is (owner, dates, statuses, planned %)",     # v2 WP_Report note (pre people-columns + recipes)
