@@ -780,22 +780,50 @@ def ai_insights(body: InsightsRequest, request: Request, user: dict = Depends(ge
     )
     prompt = (f"{noun.upper()} TITLE: {body.title or '(untitled)'}\n\n"
               f"DATA:\n{safe}\n\nWrite the insights now.")
-    try:
-        client = get_genai_client()
-        resp = client.models.generate_content(
+
+    def _finish_reason(resp) -> str:
+        try:
+            return str((resp.candidates or [None])[0].finish_reason or "")
+        except Exception:
+            return ""
+
+    def _attempt(data_text: str, budget: int, no_think: bool):
+        cfg = dict(system_instruction=system, temperature=0.4, max_output_tokens=budget)
+        if no_think:
+            cfg["thinking_config"] = genai.types.ThinkingConfig(thinking_budget=0)
+        return get_genai_client().models.generate_content(
             model="gemini-3.5-flash-lite",
-            contents=prompt,
-            config=genai.types.GenerateContentConfig(
-                system_instruction=system,
-                temperature=0.4,
-                max_output_tokens=1024,
-                thinking_config=genai.types.ThinkingConfig(thinking_budget=0),
-            ),
+            contents=(f"{noun.upper()} TITLE: {body.title or '(untitled)'}\n\n"
+                      f"DATA:\n{data_text}\n\nWrite the insights now."),
+            config=genai.types.GenerateContentConfig(**cfg),
         )
-        text = (resp.text or "").strip()
-    except Exception as e:
-        print(f"[insights] generation error: {e}")
-        return {"insights": "", "error": str(e)[:200]}
+
+    # An empty completion here is NOT an exception — it comes back as a
+    # perfectly successful response with no text, which the UI could only
+    # render as "Couldn't generate insights right now". Two known causes, both
+    # already bitten elsewhere in this file: internal thinking tokens consuming
+    # the whole output budget (see the drilldown + report_generator notes), and
+    # a fat DATA block pushing the completion into MAX_TOKENS. So: give it real
+    # headroom, and on an empty first pass retry once with a trimmed payload
+    # and a bigger budget before giving up.
+    text, last_err, finish = "", "", ""
+    for data_text, budget, no_think in ((safe, 2048, True), (safe[:3000], 4096, False)):
+        try:
+            resp = _attempt(data_text, budget, no_think)
+            text = (resp.text or "").strip()
+            finish = _finish_reason(resp)
+        except Exception as e:
+            last_err = str(e)[:300]
+            print(f"[insights] generation error (budget={budget}, no_think={no_think}): {e}")
+            continue
+        if text:
+            break
+        print(f"[insights] empty completion (budget={budget}, no_think={no_think}, "
+              f"finish_reason={finish or 'unknown'}, data_chars={len(data_text)}) — retrying")
+    if not text:
+        return {"insights": "",
+                "error": (last_err or f"the model returned no text (finish_reason="
+                                      f"{finish or 'unknown'})")}
     try:
         audit_log.record(user=user, request=request, action="ai.insights",
                          resource_type=noun, resource_id=None, detail={"title": body.title})
@@ -8005,7 +8033,12 @@ _FILTER_REGISTRY = {
     "employee_gl":            ("Employee_Data", "Employee_GL", "Employee_GL"),
     "seniority":              ("Employee_Data", "Employee_GL", "Employee_GL"),
     # employee identity — the dropdown lists names; WHERE matches the same col.
-    "employee_name":          ("Attendance_Data", "employee_name", "employee_name"),
+    # The stored names carry ragged internal whitespace ("Muhammad   Faisal
+    # Akram"), which both uglifies the dropdown and splits one person across
+    # two entries. Collapse it for the OPTIONS only — the WHERE side stays the
+    # raw column because _autofix Fix 21 rewrites a name literal into a
+    # token-AND LIKE group, so spacing never has to match.
+    "employee_name":          ("Attendance_Data", r"REGEXP_REPLACE(TRIM(employee_name), r'\s+', ' ')", "employee_name"),
     "resource_name":          ("Employee_Data", "Resource_Name", "Resource_Name"),
     "employee":               ("Attendance_Data", "employee_name", "employee_name"),
     # attendance
@@ -8202,12 +8235,18 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         widget_meta.setdefault("context", dash_context)
         kind = widget_meta.get("kind") or ""
 
+        # Most panels are aggregates that fit comfortably in 200 rows. A geo
+        # layer is not: one month of punches rolls up to well over a thousand
+        # distinct location cells, and truncating that silently would draw a
+        # map that looks like the company has a handful of sites.
+        panel_max_rows = int(widget_meta.get("max_rows") or 200)
+
         def _run_template(tpl):
             s = _substitute_params(tpl, user_filters)
             s = _substitute_where(s, user_filters)
             s = normalize_bq_project(s)
             s = _autofix_dashboard_sql(s)
-            rr = bq_run_query(s, max_rows=200)
+            rr = bq_run_query(s, max_rows=panel_max_rows)
             rr["sql"] = s  # substituted SQL so the frontend can show it on error
             return rr
 
@@ -8338,7 +8377,8 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
     # surface — map + status mix + ranking + trend + times + detail table.
     for i, c in enumerate((config.get("charts") or [])[:8]):
         cid = c.get("id") or f"chart{i}"
-        r = _exec(c.get("sql"), f"chart[{cid}]", {"kind": "chart", "title": c.get("title"), "type": c.get("type")})
+        r = _exec(c.get("sql"), f"chart[{cid}]", {"kind": "chart", "title": c.get("title"),
+                                                  "type": c.get("type"), "max_rows": c.get("maxRows")})
         rows = r.get("rows") or []
         cols = r.get("columns") or []
         label_key, value_keys = _infer_chart_keys(cols, rows, c)
@@ -8430,12 +8470,19 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
     # blank dropdown.
     import re as _re
 
+    # 3000, not 500: "Resource Name" resolves to ~1,200 distinct people and the
+    # probe sorts alphabetically, so a 500 cap silently truncated the list
+    # partway through the K's — searching for anyone later in the alphabet
+    # returned "No matches" even though their attendance was right there in the
+    # panels. The dropdown has a type-ahead, so a long list costs nothing.
+    _FILTER_OPTION_CAP = 3000
+
     def _probe_distinct(table: str, expr: str):
         sql = (f"SELECT DISTINCT {expr} AS v FROM {sql_table(table)} "
                f"WHERE {expr} IS NOT NULL AND TRIM(CAST({expr} AS STRING)) != '' "
-               f"ORDER BY v LIMIT 500")
+               f"ORDER BY v LIMIT {_FILTER_OPTION_CAP}")
         sql = normalize_bq_project(sql)
-        res = bq_run_query(sql, max_rows=500)
+        res = bq_run_query(sql, max_rows=_FILTER_OPTION_CAP)
         if "error" in res:
             return None  # signal failure so callers can try the next candidate
         return [row.get("v") for row in (res.get("rows") or []) if row.get("v") not in (None, "")]
@@ -8732,14 +8779,20 @@ def _pb_dashboard_defs(user) -> list:
     # month never reports a window that runs past the data — and the cap uses
     # the same `<= CURRENT_DATE()` guard as the default, so a stray future-dated
     # row can't stretch the window either.
+    # Month and Year both move the window, Qlik-style, and Month wins when both
+    # are set. Year matters more than it looks: a single early-in-the-month
+    # window makes the punch map look like the company has three sites, when a
+    # year of the same data covers four continents.
+    _mstart = "SAFE.PARSE_DATE('%Y-%m-%d', CONCAT(NULLIF('{f:month}', ''), '-01'))"
+    _ystart = "SAFE.PARSE_DATE('%Y-%m-%d', CONCAT(NULLIF('{f:year}', ''), '-01-01'))"
     per_cte = (
-        "per AS (SELECT d0, LEAST(LAST_DAY(d0), "
-        f"(SELECT MAX(attendance_date) FROM {A} WHERE attendance_date <= CURRENT_DATE())) AS d1 FROM ("
-        "SELECT DATE_TRUNC(COALESCE("
-        # empty selection → CONCAT(NULL,'-01') → NULL → fall through to latest
-        "SAFE.PARSE_DATE('%Y-%m-%d', CONCAT(NULLIF('{f:month}', ''), '-01')), "
-        f"(SELECT MAX(attendance_date) FROM {A} WHERE attendance_date <= CURRENT_DATE())"
-        "), MONTH) AS d0))"
+        "per AS (SELECT d0, LEAST(d1x, maxd) AS d1 FROM (SELECT "
+        # empty selection → CONCAT(NULL,…) → NULL → fall through to the next option
+        f"COALESCE({_mstart}, {_ystart}, DATE_TRUNC(maxd, MONTH)) AS d0, "
+        f"COALESCE(LAST_DAY({_mstart}), "
+        f"DATE_ADD(DATE_ADD({_ystart}, INTERVAL 1 YEAR), INTERVAL -1 DAY), "
+        "LAST_DAY(maxd)) AS d1x, maxd FROM ("
+        f"SELECT (SELECT MAX(attendance_date) FROM {A} WHERE attendance_date <= CURRENT_DATE()) AS maxd)))"
     )
     att_emp_cte = (
         f"emp AS (SELECT {_PB_NORM('e.Employee_Code')} AS nid, e.Employee_Code AS code, "
@@ -8763,16 +8816,22 @@ def _pb_dashboard_defs(user) -> list:
     punch_out_expr = _pb_permitted_sql("a.checkout_is_permitted_location")
 
     def _geo_layer(kind: str, latc: str, lonc: str, permc: str) -> str:
-        """One point layer for the map — punches rolled up to a ~11 km cell so a
-        month of traffic reads as places, not 90,000 overlapping dots."""
-        lat = f"ROUND(SAFE_CAST(a.{latc} AS FLOAT64), 1)"
-        lon = f"ROUND(SAFE_CAST(a.{lonc} AS FLOAT64), 1)"
+        """One point layer for the map — punches rolled up to a ~1 km cell.
+
+        2 decimals, not 1: at ~11 km every site in a city merged into a single
+        dot, so a month of real traffic drew as a handful of blobs and read as
+        "we barely track locations". ~1 km separates individual offices and
+        client sites while still collapsing the GPS jitter of one person
+        punching from the same desk 20 days running.
+        """
+        lat = f"ROUND(SAFE_CAST(a.{latc} AS FLOAT64), 2)"
+        lon = f"ROUND(SAFE_CAST(a.{lonc} AS FLOAT64), 2)"
         return (
             f"SELECT '{kind}' AS layer, "
             # `zone` doubles as the drill key — the drill query rebuilds this
             # exact expression, so a click maps back to its rows with no
             # guesswork (and no LLM round-trip).
-            f"FORMAT('{kind} @ %.1f, %.1f', {lat}, {lon}) AS zone, "
+            f"FORMAT('{kind} @ %.2f, %.2f', {lat}, {lon}) AS zone, "
             f"{lat} AS lat, {lon} AS lon, COUNT(*) AS punches, "
             "COUNT(DISTINCT a.employee_name) AS people, "
             f"ROUND(100.0 * COUNTIF(SAFE_CAST(a.{permc} AS INT64) = 1) / COUNT(*), 0) AS permitted_pct "
@@ -8789,7 +8848,7 @@ def _pb_dashboard_defs(user) -> list:
                + _geo_layer("Check-in", "checkin_latitude", "checkin_longitude", "checkin_is_permitted_location")
                + " UNION ALL "
                + _geo_layer("Check-out", "checkout_latitude", "checkout_longitude", "checkout_is_permitted_location")
-               + ") ORDER BY punches DESC LIMIT 200")
+               + ") ORDER BY punches DESC LIMIT 2000")
 
     map_drill_sql = (
         W + "SELECT a.employee_name AS resource_name, e.EmployeeHierarchyNode AS department, "
@@ -8799,10 +8858,10 @@ def _pb_dashboard_defs(user) -> list:
         "a.attendance_status_text AS attendance_status, "
         f"{punch_in_expr} AS punch_in_location, {punch_out_expr} AS punch_out_location "
         f"FROM {A} a {aj} WHERE {ab} AND ("
-        "FORMAT('Check-in @ %.1f, %.1f', ROUND(SAFE_CAST(a.checkin_latitude AS FLOAT64), 1), "
-        "ROUND(SAFE_CAST(a.checkin_longitude AS FLOAT64), 1)) = '{label}' OR "
-        "FORMAT('Check-out @ %.1f, %.1f', ROUND(SAFE_CAST(a.checkout_latitude AS FLOAT64), 1), "
-        "ROUND(SAFE_CAST(a.checkout_longitude AS FLOAT64), 1)) = '{label}') "
+        "FORMAT('Check-in @ %.2f, %.2f', ROUND(SAFE_CAST(a.checkin_latitude AS FLOAT64), 2), "
+        "ROUND(SAFE_CAST(a.checkin_longitude AS FLOAT64), 2)) = '{label}' OR "
+        "FORMAT('Check-out @ %.2f, %.2f', ROUND(SAFE_CAST(a.checkout_latitude AS FLOAT64), 2), "
+        "ROUND(SAFE_CAST(a.checkout_longitude AS FLOAT64), 2)) = '{label}') "
         "{where} ORDER BY a.attendance_date DESC, resource_name LIMIT 200"
     )
 
@@ -8851,6 +8910,7 @@ def _pb_dashboard_defs(user) -> list:
              "subtitle": "Punches rolled up to ~11 km cells. Toggle a layer, scroll to zoom, click a point for the rows behind it.",
              "labelKey": "zone", "valueKeys": ["punches"],
              "latKey": "lat", "lonKey": "lon", "groupKey": "layer",
+             "maxRows": 2000,   # geo cells, not aggregate rows — see _exec
              "sql": map_sql,
              "drillSql": map_drill_sql,
              "drillTitle": "Punches at {label}",
@@ -8940,7 +9000,8 @@ def _pb_dashboard_defs(user) -> list:
         # carry (Dated / DeviceLoginType). Department is dropped for scoped
         # users — their scope already pins it, and offering the others would
         # just hand them dropdown entries that can only ever return nothing.
-        "filters": ([{"field": "month", "label": "Month"},
+        "filters": ([{"field": "year", "label": "Year"},
+                     {"field": "month", "label": "Month"},
                      {"field": "status", "label": "Status"}]
                     + ([] if scoped else [{"field": "department", "label": "Department"}])
                     + [{"field": "employee_name", "label": "Resource Name"},
@@ -8950,7 +9011,11 @@ def _pb_dashboard_defs(user) -> list:
         # Resolved server-side and echoed back so the header can name the window
         # the panels actually used — the default is data-driven, so "latest
         # month" has to be spelled out rather than assumed.
-        "periodSql": (f"WITH {per_cte} SELECT FORMAT_DATE('%B %Y', d0) AS label, "
+        # A whole-year window mustn't label itself "January 2026" — say what it
+        # actually spans.
+        "periodSql": (f"WITH {per_cte} SELECT IF(DATE_TRUNC(d0, MONTH) = DATE_TRUNC(d1, MONTH), "
+                      "FORMAT_DATE('%B %Y', d0), "
+                      "CONCAT(FORMAT_DATE('%b %Y', d0), ' – ', FORMAT_DATE('%b %Y', d1))) AS label, "
                       "CAST(d0 AS STRING) AS start_date, CAST(d1 AS STRING) AS end_date FROM per"),
         "periodNote": period_note,
     }

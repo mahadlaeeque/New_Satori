@@ -27,6 +27,7 @@ const AttendancePage = lazy(() => import("./Attendance.jsx"));
 // it only loads for the dashboards that actually contain a map panel.
 const WorldMap = lazy(() => import("./components/WorldMap.jsx"));
 import DataTablePanel from "./components/DataTable.jsx";
+import PieDonutPanel from "./components/PieDonutPanel.jsx";
 import SatoriAvatar from "./components/SatoriAvatar.jsx";
 import { DialogHost, confirmDialog, alertDialog } from "./components/Dialogs.jsx";
 
@@ -3855,8 +3856,15 @@ const AiInsights = ({ kind, title, summary }) => {
       body: JSON.stringify({ kind, title: title || "", data_summary: s }),
     })
       .then((r) => r.json())
-      .then((d) => { if (!cancelled) { setText(d.insights || ""); if (!d.insights) setErr("Couldn't generate insights right now."); } })
-      .catch(() => { if (!cancelled) setErr("Couldn't generate insights right now."); })
+      // Surface WHY. A bare "couldn't generate" is undebuggable — the backend
+      // already knows whether it was an API error, an empty completion or a
+      // truncated one, so say which.
+      .then((d) => {
+        if (cancelled) return;
+        setText(d.insights || "");
+        if (!d.insights) setErr(d.error ? `Couldn't generate insights — ${d.error}` : "Couldn't generate insights right now.");
+      })
+      .catch((e) => { if (!cancelled) setErr(`Couldn't generate insights — ${String(e?.message || e).slice(0, 200)}`); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [kind, title, summary]);
@@ -6637,15 +6645,6 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
 
   // Pie charts with more than this many slices get rolled up into a single
   // "Other" wedge so we don't draw 40 micro-slivers with overlapping labels.
-  const MAX_PIE_SLICES = 8;
-  const compactPieData = (rows, labelKey, valueKey) => {
-    if (!rows || rows.length <= MAX_PIE_SLICES) return rows || [];
-    const sorted = [...rows].sort((a, b) => Number(b?.[valueKey] || 0) - Number(a?.[valueKey] || 0));
-    const top = sorted.slice(0, MAX_PIE_SLICES - 1);
-    const otherValue = sorted.slice(MAX_PIE_SLICES - 1).reduce((sum, r) => sum + Number(r?.[valueKey] || 0), 0);
-    return [...top, { [labelKey]: "Other", [valueKey]: otherValue }];
-  };
-
   const renderChart = (chart, idx) => {
     const { title, data: chartData, type, labelKey = "label", valueKeys = ["value"], variant, error } = chart;
     const colors = COLORS.chartColors;
@@ -6765,30 +6764,17 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
     const valTooltipFmt = allTime ? ((v) => hoursToClock(v)) : ((v) => fmtTooltip(v));
 
     if (type === "pie" || type === "donut") {
-      const pieData = compactPieData(plotData, labelKey, valueKeys[0]);
       return (
-        <ChartCard key={idx} title={title}>
-          <ResponsiveContainer width="100%" height={300}>
-            <PieChart>
-              <Pie
-                data={pieData}
-                dataKey={valueKeys[0]}
-                nameKey={labelKey}
-                cx="50%"
-                cy="50%"
-                innerRadius={type === "donut" ? 58 : 0}
-                outerRadius={100}
-                paddingAngle={type === "donut" ? 2 : 0}
-                label={(entry) => clipLabel(entry?.[labelKey], 18)}
-                onClick={(d) => openDrill(chart, d?.[labelKey] ?? d?.name)}
-                style={{ cursor: "pointer" }}
-              >
-                {pieData.map((_, i) => <Cell key={i} fill={colors[i % colors.length]} />)}
-              </Pie>
-              <Tooltip formatter={valTooltipFmt} />
-              <Legend />
-            </PieChart>
-          </ResponsiveContainer>
+        <ChartCard key={idx} title={title} subtitle={chart.subtitle}>
+          <PieDonutPanel
+            rows={plotData}
+            labelKey={labelKey}
+            valueKey={valueKeys[0]}
+            type={type}
+            colors={colors}
+            formatValue={allTime ? hoursToClock : fmtTooltip}
+            onSliceClick={(lbl) => openDrill(chart, lbl)}
+          />
           {drillHint}
         </ChartCard>
       );
