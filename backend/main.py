@@ -8448,6 +8448,13 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         if _is_date_filter_field(field):
             filter_options[field] = []   # date filters aren't value dropdowns
             continue
+        # An options-only field (month/year) has no WHERE expression — it only
+        # does anything if the config actually reads it through a {f:<field>}
+        # placeholder. Offering it otherwise would render a dropdown that
+        # silently changes nothing, which is worse than not showing it.
+        if field.lower() in _FILTER_OPTIONS_ONLY and f"{{f:{field.lower()}}}" not in json.dumps(config).lower():
+            filter_options[field] = []
+            continue
         vals = None
         reg = _FILTER_REGISTRY.get(field.lower())
         if reg:
