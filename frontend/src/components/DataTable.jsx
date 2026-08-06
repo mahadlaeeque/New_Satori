@@ -108,6 +108,9 @@ const downloadCsv = (filename, columns, rows, labels) => {
 export const DataTablePanel = ({
   columns = [], rows = [], columnLabels, columnRules, onRowClick,
   maxHeight = 440, exportName = "table",
+  // The backend caps every panel query at 200 rows. A register that silently
+  // stops at the cap reads as "that's all of it" — say so instead.
+  rowCap = 200,
 }) => {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState(null); // { col, dir: 1 | -1 }
@@ -238,6 +241,11 @@ export const DataTablePanel = ({
           </tbody>
         </table>
       </div>
+      {(rows || []).length >= rowCap && (
+        <div style={{ fontSize: 11, color: COLORS.textMuted, textAlign: "center", marginTop: 6 }}>
+          Showing the first {rowCap} rows — narrow the period or add a filter to see the rest.
+        </div>
+      )}
       {onRowClick && (
         <div style={{ fontSize: 11, color: COLORS.textMuted, textAlign: "center", marginTop: 6 }}>
           Click any row to see the detail behind it
