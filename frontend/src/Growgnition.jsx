@@ -23,6 +23,10 @@ import {
 const AvailabilityEnginePage = lazy(() => import("./AvailabilityEngine.jsx"));
 const ProjectsPage = lazy(() => import("./ProjectsPage.jsx"));
 const AttendancePage = lazy(() => import("./Attendance.jsx"));
+// Same reasoning: the punch map carries ~88 KB of inlined world geometry, so
+// it only loads for the dashboards that actually contain a map panel.
+const WorldMap = lazy(() => import("./components/WorldMap.jsx"));
+import DataTablePanel from "./components/DataTable.jsx";
 import SatoriAvatar from "./components/SatoriAvatar.jsx";
 import { DialogHost, confirmDialog, alertDialog } from "./components/Dialogs.jsx";
 
@@ -5601,36 +5605,64 @@ const RulesEnginePage = () => {
 };
 
 // ─── Shared Filter Dropdown ───
-const FilterDropdown = ({ label, options, value, onChange }) => {
+const FilterDropdown = ({ label, options, value, onChange, hint }) => {
   const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
   const ref = useRef(null);
   useEffect(() => {
     const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
+  // A "Resource Name" filter resolves to several hundred people — scrolling
+  // that list is unusable, so anything long gets a type-ahead.
+  const SEARCH_AT = 12;
+  const all = options || [];
+  const shown = q.trim()
+    ? all.filter((o) => String(o).toLowerCase().includes(q.trim().toLowerCase()))
+    : all;
   return (
     <div ref={ref} style={{ position: "relative" }}>
       <div
-        onClick={() => setOpen(!open)}
+        onClick={() => { setQ(""); setOpen(!open); }}
         style={{
           display: "flex", alignItems: "center", gap: 6, background: value ? `${COLORS.accent}20` : COLORS.surfaceAlt,
           border: `1px solid ${value ? COLORS.accent : COLORS.border}`, borderRadius: 8, padding: "6px 14px",
           fontSize: 12.5, color: value ? COLORS.textPrimary : COLORS.textSecondary, cursor: "pointer", fontWeight: 500, whiteSpace: "nowrap",
         }}
       >
-        {value || label} <ChevronDown size={13} />
+        {value || label}
+        {!value && hint && <span style={{ color: COLORS.textMuted, fontWeight: 400 }}>: {hint}</span>}
+        <ChevronDown size={13} />
       </div>
       {open && (
         <div style={{
           position: "absolute", top: "100%", left: 0, marginTop: 4, background: COLORS.surface, border: `1px solid ${COLORS.border}`,
-          borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.12)", zIndex: 100, maxHeight: 240, overflowY: "auto", minWidth: 180,
+          borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.12)", zIndex: 100, maxHeight: 280, overflowY: "auto", minWidth: 200,
         }}>
+          {all.length > SEARCH_AT && (
+            <div style={{ padding: 8, borderBottom: `1px solid ${COLORS.border}`, position: "sticky", top: 0, background: COLORS.surface }}>
+              <input
+                autoFocus
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder={`Search ${String(label).toLowerCase()}…`}
+                style={{
+                  width: "100%", padding: "6px 9px", fontSize: 12.5, outline: "none",
+                  border: `1px solid ${COLORS.border}`, borderRadius: 6,
+                  background: COLORS.surface, color: COLORS.textPrimary,
+                }}
+              />
+            </div>
+          )}
           <div onClick={() => { onChange(null); setOpen(false); }} style={{
             padding: "8px 14px", fontSize: 12.5, cursor: "pointer", color: COLORS.textMuted, fontStyle: "italic",
             borderBottom: `1px solid ${COLORS.border}`,
           }}>Clear filter</div>
-          {(options || []).map(opt => (
+          {shown.length === 0 && (
+            <div style={{ padding: "10px 14px", fontSize: 12, color: COLORS.textMuted }}>No matches.</div>
+          )}
+          {shown.map(opt => (
             <div key={opt} onClick={() => { onChange(opt); setOpen(false); }} style={{
               padding: "7px 14px", fontSize: 12.5, cursor: "pointer", background: opt === value ? `${COLORS.accent}15` : "transparent",
               fontWeight: opt === value ? 600 : 400, color: COLORS.textPrimary,
@@ -6456,8 +6488,16 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
       if (ch.error || !ch.data?.length) continue;
       const lk = ch.labelKey || "label";
       const vks = ch.valueKeys || ["value"];
-      const pts = ch.data.slice(0, 20).map((d) => `${d[lk]}: ${vks.map((vk) => `${vk}=${d[vk]}`).join(", ")}`).join("; ");
-      parts.push(`Chart "${ch.title}": ${pts}`);
+      // Register tables are row-level detail — 200 rows of names and punch
+      // times would swamp the prompt without telling the model anything the
+      // aggregate panels don't already say.
+      if (ch.type === "table") {
+        parts.push(`Table "${ch.title}": ${ch.data.length} rows of row-level detail (not summarised here).`);
+        continue;
+      }
+      const top = ch.type === "map" ? ch.data.slice(0, 10) : ch.data.slice(0, 20);
+      const pts = top.map((d) => `${d[lk]}: ${vks.map((vk) => `${vk}=${d[vk]}`).join(", ")}`).join("; ");
+      parts.push(`${ch.type === "map" ? "Map" : "Chart"} "${ch.title}": ${pts}`);
     }
     return parts.join("\n");
   }, [data]);
@@ -6470,9 +6510,13 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
     const base = import.meta.env.VITE_API_BASE || "";
     setDrill({
       loading: true,
-      title: `${chart.title} — ${clickedLabel}`,
+      title: (chart.drillTitle || `${chart.title} — {label}`).replace("{label}", clickedLabel),
       label: clickedLabel,
       parentTitle: chart.title,
+      // Pretty headers + conditional colouring carry into the drill table too,
+      // so a punch register looks the same wherever it's shown.
+      columnLabels: chart.columnLabels,
+      columnRules: chart.columnRules,
       rows: [],
       columns: [],
     });
@@ -6487,6 +6531,10 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
           label_key:    chart.labelKey,
           label_value:  clickedLabel,
           value_keys:   chart.valueKeys,
+          // When the panel ships its own drill query the backend runs it
+          // verbatim — exact, instant, and no Gemini round-trip.
+          drill_sql:    chart.drillSql || null,
+          drill_title:  chart.drillTitle || null,
         }),
       });
       const result = await res.json();
@@ -6504,7 +6552,10 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
   }, []);
   const closeDrill = useCallback(() => setDrill(null), []);
 
-  const ICON_MAP = { Package, Layers, Users, FileText, DollarSign, TrendingUp, Factory, Globe, Truck, Warehouse };
+  const ICON_MAP = {
+    Package, Layers, Users, FileText, DollarSign, TrendingUp, Factory, Globe, Truck, Warehouse,
+    Clock, AlertTriangle, Target, Calendar, Activity, CheckCircle, Shield, BarChart3, Zap,
+  };
 
   const fmtPkr = (v) => {
     if (v == null) return "0";
@@ -6622,6 +6673,46 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
               </>
             )}
           </div>
+        </ChartCard>
+      );
+    }
+
+    // ── Geo + tabular panels ────────────────────────────────────────────
+    // These bypass the Recharts path entirely: they don't have a numeric
+    // series to plot, they have places and rows.
+    if (type === "map") {
+      return (
+        <ChartCard key={idx} title={title} subtitle={chart.subtitle}>
+          <Suspense fallback={
+            <div style={{ height: 460, display: "flex", alignItems: "center", justifyContent: "center", color: COLORS.textSecondary, fontSize: 13 }}>
+              <Activity size={18} style={{ animation: "spin 1s linear infinite", marginRight: 8 }} /> Loading map…
+            </div>
+          }>
+            <WorldMap
+              rows={chartData}
+              latKey={chart.latKey || "lat"}
+              lonKey={chart.lonKey || "lon"}
+              labelKey={labelKey}
+              valueKey={valueKeys[0]}
+              groupKey={chart.groupKey || "layer"}
+              onPointClick={(pointLabel) => openDrill(chart, pointLabel)}
+            />
+          </Suspense>
+        </ChartCard>
+      );
+    }
+
+    if (type === "table") {
+      return (
+        <ChartCard key={idx} title={title} subtitle={chart.subtitle}>
+          <DataTablePanel
+            columns={chart.columns}
+            rows={chartData}
+            columnLabels={chart.columnLabels}
+            columnRules={chart.columnRules}
+            exportName={title}
+            onRowClick={chart.drillSql ? (row) => openDrill(chart, row?.[labelKey]) : null}
+          />
         </ChartCard>
       );
     }
@@ -6954,7 +7045,10 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
     );
   };
 
-  const kpiCols = Math.min((data.kpis || []).length, 4) || 1;
+  // 6 KPIs read far better as 3×2 than as 4+2 with two orphans on the second
+  // row; anything divisible by three gets the 3-up treatment.
+  const kpiCount = (data.kpis || []).length;
+  const kpiCols = kpiCount <= 4 ? (kpiCount || 1) : (kpiCount % 3 === 0 ? 3 : 4);
 
   return (
     <div>
@@ -6971,7 +7065,22 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
         <div>
           <div style={{ fontSize: 20, fontWeight: 700, color: COLORS.textPrimary }}>{spec?.title || "Dashboard"}</div>
           {spec?.description && <div style={{ fontSize: 13, color: COLORS.textSecondary, marginTop: 2 }}>{spec.description}</div>}
-          <DataAsOf style={{ marginTop: 4 }} />
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <DataAsOf style={{ marginTop: 4 }} />
+            {/* A data-driven default window has to name itself — otherwise every
+                number on the page is unlabelled. */}
+            {data.period?.label && (
+              <span style={{
+                marginTop: 4, display: "inline-flex", alignItems: "center", gap: 5,
+                fontSize: 11.5, fontWeight: 600, padding: "3px 10px", borderRadius: 20,
+                background: "var(--sem-info-bg)", color: "var(--sem-info-fg)",
+              }}>
+                <Calendar size={11} />
+                {data.period.label}
+                {!filterValues.month && <span style={{ fontWeight: 400, opacity: 0.8 }}>· latest</span>}
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
@@ -6986,15 +7095,26 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
         if (usable.length === 0) return null;
         return (
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
-            {usable.map((f) => (
-              <FilterDropdown
-                key={f.field}
-                label={f.label || f.field}
-                options={data.filterOptions[f.field]}
-                value={filterValues[f.field] || null}
-                onChange={(v) => handleFilterChange(f.field, v)}
-              />
-            ))}
+            {usable.map((f) => {
+              const isPeriod = f.field === "month" || f.field === "year";
+              // Periods come back ascending; the month people want is almost
+              // always the newest one, so it belongs at the top of the list.
+              const opts = isPeriod
+                ? [...data.filterOptions[f.field]].reverse()
+                : data.filterOptions[f.field];
+              return (
+                <FilterDropdown
+                  key={f.field}
+                  label={f.label || f.field}
+                  options={opts}
+                  value={filterValues[f.field] || null}
+                  // Unselected, the period filter isn't "no filter" — it's the
+                  // latest month. Say which one rather than looking empty.
+                  hint={f.field === "month" ? data.period?.label : undefined}
+                  onChange={(v) => handleFilterChange(f.field, v)}
+                />
+              );
+            })}
           </div>
         );
       })()}
@@ -7137,10 +7257,15 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
             </div>
           )}
 
-          {/* Charts: 2 per row */}
+          {/* Charts: 2 per row, except panels that ask for the full width
+              (maps and register tables are unreadable in a half column). */}
           {data.charts?.length > 0 && (
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-              {data.charts.map((chart, i) => renderChart(chart, i))}
+              {data.charts.map((chart, i) => (
+                <div key={i} style={{ gridColumn: chart.span === "full" ? "1 / -1" : "auto", minWidth: 0 }}>
+                  {renderChart(chart, i)}
+                </div>
+              ))}
             </div>
           )}
           {!loading && dashInsightSummary && (
@@ -7206,44 +7331,17 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
                   No detail rows for this category.
                 </div>
               ) : (
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                    <thead>
-                      <tr style={{ borderBottom: `2px solid ${COLORS.border}` }}>
-                        {drill.columns.map((c) => (
-                          <th key={c} style={{
-                            textAlign: "left", padding: "10px 12px", fontSize: 12,
-                            fontWeight: 600, color: COLORS.textSecondary,
-                            textTransform: "uppercase", letterSpacing: 0.4,
-                            background: COLORS.surfaceAlt,
-                          }}>{c.replace(/_/g, " ")}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {drill.rows.map((row, ri) => (
-                        <tr key={ri} style={{ borderBottom: `1px solid ${COLORS.border}` }}>
-                          {drill.columns.map((c) => {
-                            const v = row[c];
-                            const isNum = typeof v === "number" || (!isNaN(Number(v)) && v !== null && v !== "");
-                            return (
-                              <td key={c} style={{
-                                padding: "10px 12px", color: COLORS.textPrimary,
-                                textAlign: isNum ? "right" : "left",
-                                fontVariantNumeric: isNum ? "tabular-nums" : undefined,
-                              }}>
-                                {v == null ? "—" : (isNum ? Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(v))}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <div style={{ marginTop: 12, fontSize: 11, color: COLORS.textMuted, textAlign: "right" }}>
-                    {drill.rows.length} {drill.rows.length === 1 ? "row" : "rows"}
-                  </div>
-                </div>
+                // Same register component as the table panels — so a punch
+                // breakdown is searchable, sortable, colour-coded and
+                // exportable here too, not just on the dashboard surface.
+                <DataTablePanel
+                  columns={drill.columns}
+                  rows={drill.rows}
+                  columnLabels={drill.columnLabels}
+                  columnRules={drill.columnRules}
+                  exportName={drill.title}
+                  maxHeight="55vh"
+                />
               )}
             </div>
           </div>
@@ -12574,6 +12672,9 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           --g-brand:      linear-gradient(135deg, #333333, #8AC441);
           --g-brand-deep: linear-gradient(135deg, #333333, #68933F);
           --c-disabled:   #E2E8F0;
+          /* Vector basemap (WorldMap.jsx). Muted on purpose — the punch points
+             carry the meaning, the continents are only there for orientation. */
+          --map-ocean: #EAF2F7;  --map-land: #DCE7DA;  --map-coast: #AFC3B6;  --map-grid: #CDDAE3;
         }
         html[data-satori-theme="dark"] {
           --c-primary:         #F1F5F9;
@@ -12600,6 +12701,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           --g-brand:      linear-gradient(135deg, #5E8B33, #8AC441);
           --g-brand-deep: linear-gradient(135deg, #46682A, #74A93A);
           --c-disabled:   #243049;
+          --map-ocean: #0C1421;  --map-land: #1E2A3D;  --map-coast: #33455F;  --map-grid: #1A2536;
         }
         html[data-satori-theme="dark"] body { background: var(--c-page-bg); color: var(--c-text-primary); }
 

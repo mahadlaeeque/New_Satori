@@ -783,7 +783,7 @@ def ai_insights(body: InsightsRequest, request: Request, user: dict = Depends(ge
     try:
         client = get_genai_client()
         resp = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
             contents=prompt,
             config=genai.types.GenerateContentConfig(
                 system_instruction=system,
@@ -4325,7 +4325,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
         # Voice mode stays simple (no tools) — the voice WS has its own tool path
         if body.voice_mode:
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.5-flash-lite",
                 contents=contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
@@ -4392,7 +4392,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
         MAX_ROUNDS = 5
         for round_num in range(MAX_ROUNDS):
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.5-flash-lite",
                 contents=contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
@@ -4445,7 +4445,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                     try:
                         _user_first = (user.get("name") or user.get("full_name") or "there").split()[0]
                         emergency_resp = client.models.generate_content(
-                            model="gemini-2.5-flash",
+                            model="gemini-3.5-flash-lite",
                             contents=[genai.types.Content(
                                 role="user",
                                 parts=[genai.types.Part(text=(
@@ -4671,7 +4671,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
             ))],
         ))
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
             contents=contents,
             config=genai.types.GenerateContentConfig(
                 system_instruction=system_prompt_final,
@@ -4693,7 +4693,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
             try:
                 _user_first = (user.get("name") or user.get("full_name") or "there").split()[0]
                 emergency_resp = client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.5-flash-lite",
                     contents=[genai.types.Content(
                         role="user",
                         parts=[genai.types.Part(text=(
@@ -4781,7 +4781,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                 parts=[genai.types.Part(text=f"User asked: {body.message}\n\nI ran this SQL and got these results:\n{result_text}\n\nGive a direct, concise answer to the user's question using these numbers. Do NOT mention SQL or announce anything.")],
             )]
             summary_response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.5-flash-lite",
                 contents=summary_contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
@@ -4906,7 +4906,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
             tool_resolved = False
             for round_num in range(MAX_ROUNDS):
                 resp = client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.5-flash-lite",
                     contents=local_contents,
                     config=genai.types.GenerateContentConfig(
                         system_instruction=system_prompt_final,
@@ -5027,7 +5027,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
             # truncate the visible answer mid-sentence.
             streamed_any_text = False
             for chunk in client.models.generate_content_stream(
-                model="gemini-2.5-flash",
+                model="gemini-3.5-flash-lite",
                 contents=local_contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
@@ -5046,7 +5046,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
             if not streamed_any_text:
                 print("[CHAT-STREAM] streaming yielded no text — running non-streaming fallback (thinking_budget=0)")
                 fallback_resp = client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.5-flash-lite",
                     contents=local_contents,
                     config=genai.types.GenerateContentConfig(
                         system_instruction=system_prompt_final,
@@ -6232,7 +6232,7 @@ def refine_dashboard(user_message: str, history: list, existing_config=None, sco
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
             contents=contents,
             config=genai.types.GenerateContentConfig(
                 system_instruction=system,
@@ -6367,10 +6367,8 @@ def voice_session(request: Request, user: dict = Depends(get_current_user)):
         # The probe below also accepts ANY bidiGenerateContent model the API
         # lists, so this self-heals as model names change again.
         preferred = [
-            "models/gemini-2.5-flash-native-audio-latest",
-            "models/gemini-2.5-flash-native-audio-preview-12-2025",
-            "models/gemini-2.5-flash-native-audio-preview-09-2025",
             "models/gemini-3.1-flash-live-preview",
+            "models/gemini-3.5-live-translate-preview",
         ]
         try:
             import urllib.request
@@ -6393,9 +6391,9 @@ def voice_session(request: Request, user: dict = Depends(get_current_user)):
         except Exception as e:
             print(f"[voice/session] model probe failed: {e}")
         if not model:
-            # Probe failed/empty — default to native audio for auto language
-            # matching (NOT the retired gemini-2.0-flash-live-001).
-            model = "models/gemini-2.5-flash-native-audio-latest"
+            # Probe failed/empty — default to the primary live model
+            # (gemini-3.1-flash-live-preview).
+            model = "models/gemini-3.1-flash-live-preview"
         cache["model"] = model
         voice_session._model_cache = cache  # type: ignore[attr-defined]
         print(f"[voice/session] using model {model}")
@@ -6486,7 +6484,7 @@ def satori_help(body: dict):
     try:
         client = get_genai_client()
         resp = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
             contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=question)])],
             config=genai.types.GenerateContentConfig(
                 system_instruction=_SATORI_HELP_PROMPT,
@@ -7540,7 +7538,7 @@ def _generate_drilldown_sql(parent_sql: str, parent_title: str, parent_type: str
             f"Generate the row-level drill-down SQL. Output ONLY the complete SQL."
         )
         resp = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
             contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
             config=genai.types.GenerateContentConfig(
                 system_instruction=_DRILLDOWN_PROMPT.format(BQ_FULL=BQ_FULL),
@@ -7596,8 +7594,28 @@ def dashboard_drill(body: dict, user: dict = Depends(get_current_user)):
     label_value = body.get("label_value")
     value_keys = body.get("value_keys") or []
 
-    if not parent_sql or label_value in (None, ""):
-        return {"error": "Missing parent SQL or clicked value.", "rows": [], "columns": []}
+    # A panel may ship its own drill query with a {label} placeholder. That is
+    # exact by construction (it re-uses the panel's own CTEs and scope clause),
+    # instant, and free — so it wins over asking Gemini to infer one. Used by
+    # the map + detail-table panels, where the clicked "category" is a
+    # synthetic key (a geo zone) the model could only guess at.
+    drill_tpl = (body.get("drill_sql") or "").strip()
+    if drill_tpl:
+        if not _user_can_see_sales(user) and _sql_touches_sales(drill_tpl):
+            raise HTTPException(status_code=403, detail="Sales data is only available to admins.")
+        safe_label = str(label_value).replace("\\", "\\\\").replace("'", "\\'")
+        dsql = _autofix_dashboard_sql(normalize_bq_project(drill_tpl.replace("{label}", safe_label)))
+        print(f"[drilldown] deterministic: {dsql[:300]}{'...' if len(dsql) > 300 else ''}")
+        rd = bq_run_query(dsql, max_rows=200)
+        out = {
+            "title":   (body.get("drill_title") or f"{parent_title} — {label_value}").replace("{label}", str(label_value)),
+            "sql":     dsql,
+            "columns": rd.get("columns") or [],
+            "rows":    rd.get("rows") or [],
+        }
+        if "error" in rd:
+            out["error"] = rd["error"]
+        return out
 
     # Department-scoped users only get their own department's rows in the drill.
     drill_dept_scope = None
@@ -7675,7 +7693,7 @@ def _repair_widget_sql(failed_sql: str, error_msg: str, widget_meta: dict) -> st
             + "Return ONLY the fixed SQL."
         )
         resp = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
             contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
             config=genai.types.GenerateContentConfig(
                 system_instruction=_REPAIR_PROMPT.format(BQ_FULL=BQ_FULL),
@@ -7757,7 +7775,7 @@ def _record_sql_lesson(surface: str, failure_kind: str, bad_sql: str, fixed_sql:
                 "functions) — never about this specific person/date/project>\"}"
             )
             resp = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.5-flash-lite",
                 contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
                 config=genai.types.GenerateContentConfig(temperature=0.1, max_output_tokens=300),
             )
@@ -7826,7 +7844,7 @@ def _llm_heal_json(system: str, user_msg: str, tag: str, max_tokens: int = 4096)
     try:
         client = get_genai_client()
         resp = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
             contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
             config=genai.types.GenerateContentConfig(
                 system_instruction=system, temperature=0.15, max_output_tokens=max_tokens,
@@ -7994,6 +8012,22 @@ _FILTER_REGISTRY = {
     "attendance_status_text": ("Attendance_Data", "attendance_status_text", "LOWER(attendance_status_text)"),
     "attendance_status":      ("Attendance_Data", "attendance_status_text", "LOWER(attendance_status_text)"),
     "status":                 ("Attendance_Data", "attendance_status_text", "LOWER(attendance_status_text)"),
+    # Permitted-location punch (Qlik's PunchInLocationStatus / PunchOutLocationStatus).
+    # Stored as STRING '1'/'0' — surfaced as human labels in both the dropdown
+    # and the WHERE clause so the two always agree.
+    "punch_in_status":  ("Attendance_Data",
+                         "IF(SAFE_CAST(checkin_is_permitted_location AS INT64) = 1, 'Permitted', 'Not Permitted')",
+                         "IF(SAFE_CAST(checkin_is_permitted_location AS INT64) = 1, 'Permitted', 'Not Permitted')"),
+    "punch_out_status": ("Attendance_Data",
+                         "IF(SAFE_CAST(checkout_is_permitted_location AS INT64) = 1, 'Permitted', 'Not Permitted')",
+                         "IF(SAFE_CAST(checkout_is_permitted_location AS INT64) = 1, 'Permitted', 'Not Permitted')"),
+    # ── Options-only fields (WHERE expression = None) ────────────────────────
+    # These populate a dropdown but are NEVER injected into {where}. They drive
+    # a query's own period logic through the `{f:<field>}` placeholder instead,
+    # so a panel can *move* its window (e.g. show a different month) rather than
+    # AND itself down to nothing inside a hard-coded range.
+    "month": ("Attendance_Data", "FORMAT_DATE('%Y-%m', attendance_date)", None),
+    "year":  ("Attendance_Data", "CAST(EXTRACT(YEAR FROM attendance_date) AS STRING)", None),
     # timesheet
     "project_label":          ("Timesheet_Data", "TICKET_PROJECT_LABEL", "TICKET_PROJECT_LABEL"),
     "ticket_project_label":   ("Timesheet_Data", "TICKET_PROJECT_LABEL", "TICKET_PROJECT_LABEL"),
@@ -8021,13 +8055,48 @@ _FILTER_REGISTRY = {
 _FILTER_FALLBACK_TABLES = ("Employee_Data", "Attendance_Data", "Timesheet_Data")
 # Date-ish fields can't be a value dropdown (high cardinality / range semantics).
 # We skip option-probing them; the prompt also tells the AI not to add them.
+# A field that IS in the registry is exempt — `month`/`year` are registered with
+# an explicit low-cardinality distinct expression, so they get a real dropdown.
 import re as _re_filt
 def _is_date_filter_field(field: str) -> bool:
+    if (field or "").lower() in _FILTER_REGISTRY:
+        return False
     return bool(_re_filt.search(r"date|range|month|year|period|day", (field or ""), _re_filt.IGNORECASE))
 
 # Backward-compatible WHERE map derived from the registry (case-insensitive
-# lookup happens in _substitute_where).
-_FILTER_FIELD_MAP = {k: v[2] for k, v in _FILTER_REGISTRY.items()}
+# lookup happens in _substitute_where). Options-only fields (WHERE expr None)
+# are excluded here and skipped during substitution.
+_FILTER_FIELD_MAP = {k: v[2] for k, v in _FILTER_REGISTRY.items() if v[2] is not None}
+_FILTER_OPTIONS_ONLY = {k for k, v in _FILTER_REGISTRY.items() if v[2] is None}
+
+
+def _substitute_params(sql: str, user_filters: dict) -> str:
+    """Substitute `{f:<field>}` placeholders with the selected filter value.
+
+    Unlike `{where}` (which ANDs a predicate onto a query), this hands the raw
+    selection to the SQL so a panel can build its own logic around it — the
+    attendance dashboard uses `{f:month}` to *move* its reporting window:
+
+        DATE_TRUNC(COALESCE(SAFE.PARSE_DATE('%Y-%m-%d', CONCAT(NULLIF('{f:month}',''),'-01')),
+                            <latest month in the warehouse>), MONTH)
+
+    An unselected field collapses to the empty string, so every placeholder has
+    a well-defined value and the query stays valid with no filters at all.
+    """
+    if not sql or "{f:" not in sql:
+        return sql
+    import re as _re
+    lower = {str(k).lower(): v for k, v in (user_filters or {}).items()}
+
+    def _repl(m):
+        val = lower.get(m.group(1).lower())
+        if val is None:
+            return ""
+        # Single quotes are the only escape that matters — the placeholder is
+        # always written inside a string literal in the SQL.
+        return str(val).replace("\\", "\\\\").replace("'", "\\'")
+
+    return _re.sub(r"\{f:([A-Za-z0-9_]+)\}", _repl, sql)
 
 
 def _substitute_where(sql: str, user_filters: dict) -> str:
@@ -8056,6 +8125,10 @@ def _substitute_where(sql: str, user_filters: dict) -> str:
     parts = []
     for f, v in (user_filters or {}).items():
         if v is None or str(v).strip() == "":
+            continue
+        # Options-only fields (month/year) drive the query's own period logic
+        # via {f:...}; ANDing them on here would fight that window.
+        if (f or "").lower() in _FILTER_OPTIONS_ONLY:
             continue
         safe_v = str(v).replace("'", "\\'")
         col_expr = _FILTER_FIELD_MAP.get((f or "").lower(), _FILTER_FIELD_MAP.get(f, f))
@@ -8130,7 +8203,8 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         kind = widget_meta.get("kind") or ""
 
         def _run_template(tpl):
-            s = _substitute_where(tpl, user_filters)
+            s = _substitute_params(tpl, user_filters)
+            s = _substitute_where(s, user_filters)
             s = normalize_bq_project(s)
             s = _autofix_dashboard_sql(s)
             rr = bq_run_query(s, max_rows=200)
@@ -8259,7 +8333,10 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         kpis_out.append(card)
 
     charts_out = []
-    for i, c in enumerate((config.get("charts") or [])[:4]):
+    # 8, not 4: the AI-authored dashboards still top out at 4 (the generation
+    # prompt caps them there), but the prebuilts lay out a full analytic
+    # surface — map + status mix + ranking + trend + times + detail table.
+    for i, c in enumerate((config.get("charts") or [])[:8]):
         cid = c.get("id") or f"chart{i}"
         r = _exec(c.get("sql"), f"chart[{cid}]", {"kind": "chart", "title": c.get("title"), "type": c.get("type")})
         rows = r.get("rows") or []
@@ -8268,6 +8345,7 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         card = {
             "id":        cid,
             "title":     c.get("title") or cid,
+            "subtitle":  c.get("subtitle"),
             "type":      c.get("type") or "bar",
             "variant":   c.get("variant"),
             "labelKey":  label_key,
@@ -8275,6 +8353,22 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
             "data":      rows,
             "columns":   cols,
             "sql":       r.get("sql", ""),
+            # Presentation + interaction extras used by the richer panel types
+            # (map / table). All optional — absent on AI-authored charts.
+            "span":        c.get("span"),         # "full" → panel spans the grid
+            "latKey":      c.get("latKey"),       # map: latitude column
+            "lonKey":      c.get("lonKey"),       # map: longitude column
+            "groupKey":    c.get("groupKey"),     # map: point-layer column
+            "columnLabels": c.get("columnLabels"),  # table: pretty header names
+            "columnRules": c.get("columnRules"),  # table: conditional formatting
+            # A deterministic drill query (with a {label} placeholder) beats
+            # asking Gemini to reverse-engineer one from the parent SQL.
+            # The active filter selection is baked in here (the {label}
+            # placeholder is left for the click), so a drill always inherits
+            # the same scope the user is looking at.
+            "drillSql":    (_substitute_where(_substitute_params(c.get("drillSql") or "", user_filters),
+                                              user_filters) or None) if c.get("drillSql") else None,
+            "drillTitle":  c.get("drillTitle"),
         }
         if "error" in r:
             card["error"] = r["error"]
@@ -8378,7 +8472,23 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         if not filter_options[field]:
             print(f"[dashboard] filter '{field}' produced no options (skipped/failed)")
 
-    return {"kpis": kpis_out, "charts": charts_out, "filterOptions": filter_options}
+    # ── Resolved reporting period ───────────────────────────────────────────
+    # A dashboard whose window is data-driven (the attendance prebuilt defaults
+    # to the latest month that HAS rows) has to say which window it settled on,
+    # otherwise every number on screen is unlabelled. One cheap scalar query.
+    period = None
+    period_sql = (config.get("periodSql") or "").strip()
+    if period_sql:
+        try:
+            ps = normalize_bq_project(_substitute_params(period_sql, user_filters))
+            pr = bq_run_query(ps, max_rows=1)
+            if "error" not in pr and (pr.get("rows") or []):
+                period = pr["rows"][0]
+        except Exception as e:
+            print(f"[dashboard] period resolve failed (non-fatal): {e}")
+
+    return {"kpis": kpis_out, "charts": charts_out, "filterOptions": filter_options,
+            "period": period}
 
 
 @app.get("/api/dashboards")
@@ -8515,11 +8625,32 @@ _PB_DATEKEY = ("COALESCE(SAFE_CAST(CAST(t.DATE_KEY AS STRING) AS DATE), "
                "SAFE.PARSE_DATE('%Y%m%d', CAST(t.DATE_KEY AS STRING)))")
 
 
-def _pb_avg_time_sql(expr_time: str) -> str:
-    """Canonical avg-of-clock-time: average seconds-since-midnight, rebuild."""
-    return ("FORMAT_TIME('%H:%M', TIME(TIMESTAMP_SECONDS(CAST(AVG("
+def _pb_avg_time_sql(expr_time: str, fmt: str = "%H:%M") -> str:
+    """Canonical avg-of-clock-time: average seconds-since-midnight, rebuild.
+    `fmt` is a FORMAT_TIME pattern — '%H:%M' for anything a chart axis has to
+    parse back into a number, '%I:%M %p' for a KPI a human reads."""
+    return (f"FORMAT_TIME('{fmt}', TIME(TIMESTAMP_SECONDS(CAST(AVG("
             f"EXTRACT(HOUR FROM {expr_time}) * 3600 + EXTRACT(MINUTE FROM {expr_time}) * 60"
             ") AS INT64))))")
+
+
+# Seconds actually worked between the two punches — the basis for "Avg Duration".
+_PB_CIN_TS = "SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', a.checkin_time)"
+_PB_COUT_TS = "SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', a.checkout_time)"
+_PB_WORKED_SECS = f"TIMESTAMP_DIFF({_PB_COUT_TS}, {_PB_CIN_TS}, SECOND)"
+
+
+def _pb_avg_duration_sql(secs_expr: str = _PB_WORKED_SECS) -> str:
+    """Average worked span as 'H:MM' (Qlik's "Avg Duration" reads 8:35, not 08:35)."""
+    return ("FORMAT('%d:%02d', "
+            f"DIV(CAST(AVG({secs_expr}) AS INT64), 3600), "
+            f"MOD(DIV(CAST(AVG({secs_expr}) AS INT64), 60), 60))")
+
+
+def _pb_permitted_sql(col: str) -> str:
+    """Qlik's PunchIn/PunchOutLocationStatus — must match _FILTER_REGISTRY exactly
+    so the dropdown value and the WHERE predicate can never drift apart."""
+    return f"IF(SAFE_CAST({col} AS INT64) = 1, 'Permitted', 'Not Permitted')"
 
 
 def _pb_scope(user):
@@ -8567,42 +8698,254 @@ def _pb_dashboard_defs(user) -> list:
     # present + remote), and summing pushed some departments past 100%.
     attended = "GREATEST(a.is_present, a.is_remote, a.is_missing_punch)"
 
+    # ═══════════════════════════════════════════════════════════════════════
+    #  ATTENDANCE PULSE  —  the selection-driven attendance surface
+    #  ---------------------------------------------------------------------
+    #  Modelled on the Qlik "Attendance Overview" sheet it replaces: a punch
+    #  location map, the status mix, a department ranking, the daily trend and
+    #  the two register tables (average times + day-by-day punches), all
+    #  driven by one filter row.
+    #
+    #  PERIOD. Everything hangs off a `per` CTE rather than a hard-coded
+    #  DATE_TRUNC(CURRENT_DATE()). Two reasons:
+    #    • the Month dropdown MOVES the window (via the {f:month} placeholder)
+    #      instead of ANDing itself onto a fixed range and matching nothing;
+    #    • the default is the latest month that actually HAS attendance rows,
+    #      not today's month — the Drive→BigQuery reload runs on its own
+    #      cadence, and a dashboard that renders empty on the 1st is broken.
+    #
+    #  FILTER CONTRACT. The `emp` CTE deliberately re-exposes the columns the
+    #  filter registry targets under their warehouse names
+    #  (EmployeeHierarchyNode, emp_competency) so an injected `{where}`
+    #  predicate resolves against the CTE without every panel needing a second
+    #  join. employee_name / attendance_status_text / the punch-location
+    #  columns already live on Attendance_Data.
+    # ═══════════════════════════════════════════════════════════════════════
+    # d1 is capped at the newest REAL day (not just LAST_DAY) so the current
+    # month never reports a window that runs past the data — and the cap uses
+    # the same `<= CURRENT_DATE()` guard as the default, so a stray future-dated
+    # row can't stretch the window either.
+    per_cte = (
+        "per AS (SELECT d0, LEAST(LAST_DAY(d0), "
+        f"(SELECT MAX(attendance_date) FROM {A} WHERE attendance_date <= CURRENT_DATE())) AS d1 FROM ("
+        "SELECT DATE_TRUNC(COALESCE("
+        # empty selection → CONCAT(NULL,'-01') → NULL → fall through to latest
+        "SAFE.PARSE_DATE('%Y-%m-%d', CONCAT(NULLIF('{f:month}', ''), '-01')), "
+        f"(SELECT MAX(attendance_date) FROM {A} WHERE attendance_date <= CURRENT_DATE())"
+        "), MONTH) AS d0))"
+    )
+    att_emp_cte = (
+        f"emp AS (SELECT {_PB_NORM('e.Employee_Code')} AS nid, e.Employee_Code AS code, "
+        "COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified') AS EmployeeHierarchyNode, "
+        "cmp.emp_competency AS emp_competency "
+        # Competency comes from each person's OWN most recent allocation row
+        # (ANY_VALUE ... HAVING MAX Date), not from a fixed snapshot date —
+        # anyone missing from the latest snapshot would otherwise lose their
+        # competency and drop out of a competency-filtered view entirely.
+        f"FROM {E} e LEFT JOIN (SELECT {_PB_NORM('al.employee_id')} AS nid, "
+        f"ANY_VALUE(al.emp_competency HAVING MAX al.Date) AS emp_competency FROM {AL} al "
+        f"WHERE al.emp_competency IS NOT NULL GROUP BY nid) cmp ON cmp.nid = {_PB_NORM('e.Employee_Code')} "
+        f"WHERE {_PB_ACTIVE}{scope('e')})"
+    )
+    W = f"WITH {per_cte}, {att_emp_cte} "
+    D0, D1 = "(SELECT d0 FROM per)", "(SELECT d1 FROM per)"
+    ab = f"a.attendance_date BETWEEN {D0} AND {D1}"
+    aw = "a.is_weekend = 0 AND a.is_holiday = 0"
+    aj = att_join
+    punch_in_expr = _pb_permitted_sql("a.checkin_is_permitted_location")
+    punch_out_expr = _pb_permitted_sql("a.checkout_is_permitted_location")
+
+    def _geo_layer(kind: str, latc: str, lonc: str, permc: str) -> str:
+        """One point layer for the map — punches rolled up to a ~11 km cell so a
+        month of traffic reads as places, not 90,000 overlapping dots."""
+        lat = f"ROUND(SAFE_CAST(a.{latc} AS FLOAT64), 1)"
+        lon = f"ROUND(SAFE_CAST(a.{lonc} AS FLOAT64), 1)"
+        return (
+            f"SELECT '{kind}' AS layer, "
+            # `zone` doubles as the drill key — the drill query rebuilds this
+            # exact expression, so a click maps back to its rows with no
+            # guesswork (and no LLM round-trip).
+            f"FORMAT('{kind} @ %.1f, %.1f', {lat}, {lon}) AS zone, "
+            f"{lat} AS lat, {lon} AS lon, COUNT(*) AS punches, "
+            "COUNT(DISTINCT a.employee_name) AS people, "
+            f"ROUND(100.0 * COUNTIF(SAFE_CAST(a.{permc} AS INT64) = 1) / COUNT(*), 0) AS permitted_pct "
+            # Same worked-day filter as every other panel — a map whose punch
+            # counts include weekends wouldn't tie back to the KPIs above it.
+            f"FROM {A} a {aj} WHERE {ab} AND {aw} "
+            f"AND SAFE_CAST(a.{latc} AS FLOAT64) BETWEEN -85 AND 85 "
+            f"AND SAFE_CAST(a.{lonc} AS FLOAT64) BETWEEN -180 AND 180 "
+            f"AND NOT (SAFE_CAST(a.{latc} AS FLOAT64) = 0 AND SAFE_CAST(a.{lonc} AS FLOAT64) = 0) "
+            "{where} GROUP BY layer, zone, lat, lon"
+        )
+
+    map_sql = (W + "SELECT * FROM ("
+               + _geo_layer("Check-in", "checkin_latitude", "checkin_longitude", "checkin_is_permitted_location")
+               + " UNION ALL "
+               + _geo_layer("Check-out", "checkout_latitude", "checkout_longitude", "checkout_is_permitted_location")
+               + ") ORDER BY punches DESC LIMIT 200")
+
+    map_drill_sql = (
+        W + "SELECT a.employee_name AS resource_name, e.EmployeeHierarchyNode AS department, "
+        "CAST(a.attendance_date AS STRING) AS date, "
+        f"FORMAT_TIME('%I:%M %p', {_PB_CIN}) AS check_in_time, "
+        f"FORMAT_TIME('%I:%M %p', {_PB_COUT}) AS check_out_time, "
+        "a.attendance_status_text AS attendance_status, "
+        f"{punch_in_expr} AS punch_in_location, {punch_out_expr} AS punch_out_location "
+        f"FROM {A} a {aj} WHERE {ab} AND ("
+        "FORMAT('Check-in @ %.1f, %.1f', ROUND(SAFE_CAST(a.checkin_latitude AS FLOAT64), 1), "
+        "ROUND(SAFE_CAST(a.checkin_longitude AS FLOAT64), 1)) = '{label}' OR "
+        "FORMAT('Check-out @ %.1f, %.1f', ROUND(SAFE_CAST(a.checkout_latitude AS FLOAT64), 1), "
+        "ROUND(SAFE_CAST(a.checkout_longitude AS FLOAT64), 1)) = '{label}') "
+        "{where} ORDER BY a.attendance_date DESC, resource_name LIMIT 200"
+    )
+
+    # Row click on either register table → that person's punch history for the
+    # selected period. Deterministic, so it opens instantly.
+    person_drill_sql = (
+        W + "SELECT CAST(a.attendance_date AS STRING) AS date, "
+        f"FORMAT_TIME('%I:%M %p', {_PB_CIN}) AS check_in_time, "
+        f"FORMAT_TIME('%I:%M %p', {_PB_COUT}) AS check_out_time, "
+        f"{_pb_avg_duration_sql()} AS duration, "
+        "a.attendance_status_text AS attendance_status, "
+        f"{punch_in_expr} AS punch_in_location, {punch_out_expr} AS punch_out_location "
+        f"FROM {A} a {aj} WHERE {ab} AND a.employee_name = '{{label}}' {{where}} "
+        "GROUP BY date, check_in_time, check_out_time, attendance_status, "
+        "punch_in_location, punch_out_location ORDER BY date DESC LIMIT 200"
+    )
+
+    period_note = "the selected month (latest month in the warehouse by default)"
     dash_attendance = {
         "title": "Attendance Pulse",
-        "description": f"This month's attendance for {label} — auto-updating.",
+        "description": (f"Punch locations, clock times and the day-by-day register for {label} — "
+                        f"pick a month and any filter; every panel follows the selection."),
         "kpis": [
-            {"id": "pb_att_rate", "title": "Attendance Rate (This Month)", "format": "percent", "icon": "TrendingUp",
-             "sql": f"{emp_cte} SELECT ROUND(100.0 * SUM({attended}) / NULLIF(COUNT(*), 0), 1) AS value "
-                    f"FROM {A} a {att_join} WHERE {att_where}"},
-            {"id": "pb_att_late", "title": "Late Arrivals (This Month)", "format": "number", "icon": "Clock",
-             "sql": f"{emp_cte} SELECT COUNTIF(a.checkin_time IS NOT NULL AND {_PB_CIN} > TIME '09:30:00') AS value "
-                    f"FROM {A} a {att_join} WHERE {att_where}"},
-            {"id": "pb_att_cin", "title": "Avg Check-in (This Month)", "format": "number", "icon": "Clock",
-             "sql": f"{emp_cte} SELECT {_pb_avg_time_sql(_PB_CIN)} AS value FROM {A} a {att_join} "
-                    f"WHERE {att_where} AND a.checkin_time IS NOT NULL"},
-            {"id": "pb_att_abs", "title": "Absences (This Month)", "format": "number", "icon": "Users",
-             "sql": f"{emp_cte} SELECT SUM(a.is_absent) AS value FROM {A} a {att_join} WHERE {att_where}"},
+            {"id": "pb_att_rate", "title": "Attendance Rate", "format": "percent", "icon": "TrendingUp",
+             "sql": f"{W}SELECT ROUND(100.0 * SUM({attended}) / NULLIF(COUNT(*), 0), 1) AS value "
+                    f"FROM {A} a {aj} WHERE {ab} AND {aw} {{where}}"},
+            {"id": "pb_att_cin", "title": "Avg Check-In Time", "format": "text", "icon": "Clock",
+             "sql": f"{W}SELECT {_pb_avg_time_sql(_PB_CIN, '%I:%M %p')} AS value "
+                    f"FROM {A} a {aj} WHERE {ab} AND {aw} AND a.checkin_time IS NOT NULL {{where}}"},
+            {"id": "pb_att_cout", "title": "Avg Check-Out Time", "format": "text", "icon": "Clock",
+             "sql": f"{W}SELECT {_pb_avg_time_sql(_PB_COUT, '%I:%M %p')} AS value "
+                    f"FROM {A} a {aj} WHERE {ab} AND {aw} AND a.checkout_time IS NOT NULL {{where}}"},
+            {"id": "pb_att_dur", "title": "Avg Duration", "format": "text", "icon": "Clock",
+             "sql": f"{W}SELECT {_pb_avg_duration_sql()} AS value FROM {A} a {aj} "
+                    f"WHERE {ab} AND {aw} AND a.checkin_time IS NOT NULL AND a.checkout_time IS NOT NULL "
+                    f"AND {_PB_WORKED_SECS} BETWEEN 0 AND 86399 {{where}}"},
+            {"id": "pb_att_late", "title": "Late Arrivals", "format": "number", "icon": "AlertTriangle",
+             "sql": f"{W}SELECT COUNTIF(a.checkin_time IS NOT NULL AND {_PB_CIN} > TIME '09:30:00') AS value "
+                    f"FROM {A} a {aj} WHERE {ab} AND {aw} {{where}}"},
+            {"id": "pb_att_abs", "title": "Absences", "format": "number", "icon": "Users",
+             "sql": f"{W}SELECT SUM(a.is_absent) AS value FROM {A} a {aj} WHERE {ab} AND {aw} {{where}}"},
         ],
         "charts": [
+            {"id": "pb_att_map", "type": "map", "span": "full",
+             "title": "Where People Punch In & Out",
+             "subtitle": "Punches rolled up to ~11 km cells. Toggle a layer, scroll to zoom, click a point for the rows behind it.",
+             "labelKey": "zone", "valueKeys": ["punches"],
+             "latKey": "lat", "lonKey": "lon", "groupKey": "layer",
+             "sql": map_sql,
+             "drillSql": map_drill_sql,
+             "drillTitle": "Punches at {label}",
+             "columnLabels": {"resource_name": "Resource Name", "department": "Department", "date": "Date",
+                              "check_in_time": "Check In Time", "check_out_time": "Check Out Time",
+                              "attendance_status": "AttendanceStatus",
+                              "punch_in_location": "Punch-In Location",
+                              "punch_out_location": "Punch-Out Location"}},
+            {"id": "pb_att_mix", "type": "donut", "title": "Attendance Status Mix",
+             "labelKey": "status", "valueKeys": ["days"],
+             "sql": f"{W}SELECT a.attendance_status_text AS status, COUNT(*) AS days "
+                    f"FROM {A} a {aj} WHERE {ab} AND {aw} {{where}} "
+                    f"GROUP BY status ORDER BY days DESC LIMIT 12"},
             {"id": "pb_att_bydim", "type": "bar",
              "title": ("Attendance % by Employee" if scoped else "Attendance % by Department"),
-             "sql": (f"{emp_cte} SELECT e.name AS employee, "
+             "labelKey": ("employee" if scoped else "department"), "valueKeys": ["attendance_pct"],
+             "sql": (f"{W}SELECT a.employee_name AS employee, "
                      f"ROUND(100.0 * SUM({attended}) / NULLIF(COUNT(*), 0), 1) AS attendance_pct "
-                     f"FROM {A} a {att_join} WHERE {att_where} "
+                     f"FROM {A} a {aj} WHERE {ab} AND {aw} {{where}} "
                      f"GROUP BY employee ORDER BY attendance_pct DESC LIMIT 50")
              if scoped else
-             (f"{emp_cte} SELECT e.dept AS department, "
+             (f"{W}SELECT e.EmployeeHierarchyNode AS department, "
               f"ROUND(100.0 * SUM({attended}) / NULLIF(COUNT(*), 0), 1) AS attendance_pct "
-              f"FROM {A} a {att_join} WHERE {att_where} "
+              f"FROM {A} a {aj} WHERE {ab} AND {aw} {{where}} "
               f"GROUP BY department ORDER BY attendance_pct DESC LIMIT 50")},
-            {"id": "pb_att_trend", "type": "line", "title": "Daily Attendance Trend (Last 30 Days)",
-             "sql": f"{emp_cte} SELECT CAST(a.attendance_date AS STRING) AS date, SUM({attended}) AS attended "
-                    f"FROM {A} a {att_join} "
-                    f"WHERE a.attendance_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE() "
-                    f"AND a.is_weekend = 0 AND a.is_holiday = 0 "
-                    f"GROUP BY date ORDER BY date LIMIT 50"},
+            {"id": "pb_att_trend", "type": "area", "span": "full",
+             "title": "Daily Attendance Trend",
+             "labelKey": "date", "valueKeys": ["attended", "absent"],
+             "sql": f"{W}SELECT CAST(a.attendance_date AS STRING) AS date, SUM({attended}) AS attended, "
+                    f"SUM(a.is_absent) AS absent FROM {A} a {aj} WHERE {ab} AND {aw} {{where}} "
+                    f"GROUP BY date ORDER BY date LIMIT 62"},
+            {"id": "pb_att_avgtimes", "type": "table", "span": "full",
+             "title": "Average Time Report",
+             "subtitle": "Per-person clock averages for the selected period. Click a row for that person's punches.",
+             "labelKey": "resource_name", "valueKeys": ["late_days"],
+             "sql": f"{W}SELECT a.employee_name AS resource_name, e.EmployeeHierarchyNode AS department, "
+                    f"COUNT(*) AS days, {_pb_avg_time_sql(_PB_CIN, '%I:%M %p')} AS avg_check_in, "
+                    f"{_pb_avg_time_sql(_PB_COUT, '%I:%M %p')} AS avg_check_out, "
+                    f"{_pb_avg_duration_sql()} AS avg_duration, "
+                    f"COUNTIF({_PB_CIN} > TIME '09:30:00') AS late_days "
+                    f"FROM {A} a {aj} WHERE {ab} AND {aw} AND a.checkin_time IS NOT NULL {{where}} "
+                    f"GROUP BY resource_name, department ORDER BY late_days DESC, resource_name LIMIT 200",
+             "drillSql": person_drill_sql,
+             "drillTitle": "{label} — punch history",
+             "columnLabels": {"resource_name": "Resource Name", "department": "Department", "days": "Days",
+                              "avg_check_in": "Avg Check In", "avg_check_out": "Avg Check Out",
+                              "avg_duration": "Avg Duration", "late_days": "Late Days",
+                              "date": "Date", "check_in_time": "Check In Time",
+                              "check_out_time": "Check Out Time", "duration": "Duration",
+                              "attendance_status": "AttendanceStatus",
+                              "punch_in_location": "Punch-In Location",
+                              "punch_out_location": "Punch-Out Location"},
+             "columnRules": {"avg_check_in": {"kind": "clockEarly", "good": "09:00", "warn": "09:30"},
+                             "avg_check_out": {"kind": "clockLate", "good": "18:00", "warn": "17:30"},
+                             "late_days": {"kind": "countBad", "warn": 1, "bad": 5},
+                             "attendance_status": {"kind": "status"},
+                             "punch_in_location": {"kind": "permitted"},
+                             "punch_out_location": {"kind": "permitted"},
+                             "check_in_time": {"kind": "clockEarly", "good": "09:00", "warn": "09:30"},
+                             "check_out_time": {"kind": "clockLate", "good": "18:00", "warn": "17:30"}}},
+            {"id": "pb_att_daily", "type": "table", "span": "full",
+             "title": "Daily Report",
+             "subtitle": "Every punch in the selected period. Click a row for that person's full history.",
+             "labelKey": "resource_name", "valueKeys": ["employee_code"],
+             "sql": f"{W}SELECT e.code AS employee_code, a.employee_name AS resource_name, "
+                    f"CAST(a.attendance_date AS STRING) AS date, "
+                    f"FORMAT_TIME('%I:%M %p', {_PB_CIN}) AS check_in_time, "
+                    f"FORMAT_TIME('%I:%M %p', {_PB_COUT}) AS check_out_time, "
+                    f"a.attendance_status_text AS attendance_status, "
+                    f"{punch_in_expr} AS punch_in_location "
+                    f"FROM {A} a {aj} WHERE {ab} AND {aw} {{where}} "
+                    f"ORDER BY a.attendance_date DESC, resource_name LIMIT 200",
+             "drillSql": person_drill_sql,
+             "drillTitle": "{label} — punch history",
+             "columnLabels": {"employee_code": "Employee Code", "resource_name": "Resource Name",
+                              "date": "Date", "check_in_time": "Check In Time",
+                              "check_out_time": "Check Out Time", "attendance_status": "AttendanceStatus",
+                              "punch_in_location": "Punch-In Location",
+                              "punch_out_location": "Punch-Out Location", "duration": "Duration"},
+             "columnRules": {"check_in_time": {"kind": "clockEarly", "good": "09:00", "warn": "09:30"},
+                             "check_out_time": {"kind": "clockLate", "good": "18:00", "warn": "17:30"},
+                             "attendance_status": {"kind": "status"},
+                             "punch_in_location": {"kind": "permitted"},
+                             "punch_out_location": {"kind": "permitted"}}},
         ],
-        "filters": [],
+        # Qlik's filter row, minus the two dimensions this warehouse doesn't
+        # carry (Dated / DeviceLoginType). Department is dropped for scoped
+        # users — their scope already pins it, and offering the others would
+        # just hand them dropdown entries that can only ever return nothing.
+        "filters": ([{"field": "month", "label": "Month"},
+                     {"field": "status", "label": "Status"}]
+                    + ([] if scoped else [{"field": "department", "label": "Department"}])
+                    + [{"field": "employee_name", "label": "Resource Name"},
+                       {"field": "competency", "label": "Competency"},
+                       {"field": "punch_in_status", "label": "Punch-In Location"},
+                       {"field": "punch_out_status", "label": "Punch-Out Location"}]),
+        # Resolved server-side and echoed back so the header can name the window
+        # the panels actually used — the default is data-driven, so "latest
+        # month" has to be spelled out rather than assumed.
+        "periodSql": (f"WITH {per_cte} SELECT FORMAT_DATE('%B %Y', d0) AS label, "
+                      "CAST(d0 AS STRING) AS start_date, CAST(d1 AS STRING) AS end_date FROM per"),
+        "periodNote": period_note,
     }
 
     alloc_ctes = (
@@ -11307,7 +11650,7 @@ def availability_suggest_work(body: SuggestWorkBody, user: dict = Depends(get_cu
                f"Tagged skills: {', '.join(skills) if skills else 'NONE tagged'}\n"
                f"Current / ending projects: {', '.join(cur_proj) if cur_proj else 'unknown'}")
         resp = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
             contents=ctx,
             config=genai.types.GenerateContentConfig(
                 system_instruction=(
@@ -12244,7 +12587,7 @@ def get_briefing(user: dict = Depends(get_current_user)):
     try:
         client = get_genai_client()
         resp = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
             contents=(f"Listener's first name: {first_name}. Today is {today_label}.\n"
                       f"FINDINGS (already verified — use ONLY these, do not invent numbers or names):\n{findings}"),
             config=genai.types.GenerateContentConfig(
@@ -12285,7 +12628,7 @@ def _resolve_tts_model() -> str:
     if env:
         _TTS_MODEL_CACHE["model"] = env
         return env
-    preferred = ["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"]
+    preferred = ["gemini-3.1-flash-tts-preview"]
     chosen = preferred[0]
     try:
         import requests as _rq
@@ -12738,7 +13081,7 @@ def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user
     )
     try:
         resp = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
             contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
             config=genai.types.GenerateContentConfig(
                 system_instruction=system_instruction,
@@ -13340,7 +13683,7 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
     _lessons = _sql_lessons_block()
     try:
         resp = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
             contents=contents,
             config=genai.types.GenerateContentConfig(
                 system_instruction=(
