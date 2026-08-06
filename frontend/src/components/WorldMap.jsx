@@ -93,8 +93,8 @@ export default function WorldMap({
   const framedRef = useRef(false);
   useEffect(() => {
     const el = outerRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => {
+    if (!el) return;
+    const measure = () => {
       const w = el.clientWidth || 0;
       if (!w) return;
       const a = boxHeightFor(w, height) / w;
@@ -105,8 +105,15 @@ export default function WorldMap({
         framedRef.current = true;
         setView(homeWith(a));
       }
-    });
-    ro.observe(el);   // fires once immediately with the initial size
+    };
+    // Microtask, not just the observer: ResizeObserver delivery is part of the
+    // frame-production loop, so in any context that isn't painting (a
+    // background tab, a headless check) it never fires and the map would sit
+    // forever on its unmeasured 2:1 fallback. The microtask always runs.
+    queueMicrotask(measure);
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
     return () => ro.disconnect();
   }, [height]);
 
@@ -187,6 +194,16 @@ export default function WorldMap({
     const w = Math.max(boxW, boxH / (aspect || 1));
     setView(clampView({ x: minX - (w - boxW) / 2, y: minY - (w * aspect - boxH) / 2, w }));
   }, [visible, clampView, homeView, aspect]);
+
+  // Hover position only needs container-relative pixels, so it reads the
+  // element rect directly rather than going through toWorld — that keeps this
+  // callback stable across pans, which is what lets pointsLayer stay memoised.
+  const hoverAt = useCallback((point, e) => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setHover({ point, x: e.clientX - r.left, y: e.clientY - r.top });
+  }, []);
 
   // Screen px → viewBox units.
   const toWorld = useCallback((clientX, clientY) => {
@@ -269,6 +286,37 @@ export default function WorldMap({
   const zoomPct = Math.round((WORLD_W / view.w) * 100);
   const isZoomed = Math.abs(view.w - WORLD_W) > 0.5;
 
+  // A month of punches can be ~2000 location cells. Panning changes view.x/y
+  // on every pointermove, which would otherwise re-render every one of those
+  // circles 60 times a second. The points only actually depend on the ZOOM
+  // level (through `unit`, which keeps their on-screen size constant), so memo
+  // them on that and let the browser handle panning with a viewBox change
+  // alone. Hover is deliberately NOT a dependency — highlighting in place
+  // would invalidate the whole layer on every mouse move, so the hovered point
+  // is redrawn as a small overlay on top instead.
+  const pointsLayer = useMemo(() => visible.map((p, i) => {
+    const r = radiusOf(p.value);
+    const col = colorOf(p.layer);
+    return (
+      <circle
+        key={`${p.layer}-${p.label}-${i}`}
+        cx={p.cx} cy={p.cy} r={r}
+        fill={col} fillOpacity={0.72}
+        stroke="#fff" strokeWidth={0.9 * unit}
+        style={{ cursor: onPointClick ? "pointer" : "default" }}
+        onMouseEnter={(e) => hoverAt(p, e)}
+        onMouseMove={(e) => hoverAt(p, e)}
+        onMouseLeave={() => setHover(null)}
+        onClick={() => {
+          // A pan that ends over a point must not read as a click.
+          if (Date.now() - lastDragRef.current < 150) return;
+          onPointClick?.(p.label, p.row);
+        }}
+      />
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [visible, unit, maxValue, colorOf, onPointClick, hoverAt]);
+
   if (!points.length) {
     return (
       <div style={{
@@ -331,38 +379,19 @@ export default function WorldMap({
             strokeLinejoin="round"
           />
 
-          {visible.map((p, i) => {
-            const r = radiusOf(p.value);
-            const col = colorOf(p.layer);
-            const isHot = hover?.point === p;
-            return (
-              <g key={`${p.label}-${i}`}>
-                <circle cx={p.cx} cy={p.cy} r={r * 1.8} fill={col} opacity={isHot ? 0.2 : 0.07} />
-                <circle
-                  cx={p.cx} cy={p.cy} r={r}
-                  fill={col}
-                  fillOpacity={isHot ? 0.95 : 0.72}
-                  stroke="#fff"
-                  strokeWidth={(isHot ? 1.6 : 0.9) * unit}
-                  style={{ cursor: onPointClick ? "pointer" : "default" }}
-                  onMouseEnter={(e) => {
-                    const w = toWorld(e.clientX, e.clientY);
-                    if (w) setHover({ point: p, x: w.px, y: w.py });
-                  }}
-                  onMouseMove={(e) => {
-                    const w = toWorld(e.clientX, e.clientY);
-                    if (w) setHover({ point: p, x: w.px, y: w.py });
-                  }}
-                  onMouseLeave={() => setHover(null)}
-                  onClick={() => {
-                    // A pan that ends over a point must not read as a click.
-                    if (Date.now() - lastDragRef.current < 150) return;
-                    onPointClick?.(p.label, p.row);
-                  }}
-                />
-              </g>
-            );
-          })}
+          {pointsLayer}
+
+          {/* The hovered point is drawn as an overlay rather than by
+              re-styling it in place — see pointsLayer's memo note. */}
+          {hover?.point && (
+            <g pointerEvents="none">
+              <circle cx={hover.point.cx} cy={hover.point.cy} r={radiusOf(hover.point.value) * 1.8}
+                      fill={colorOf(hover.point.layer)} opacity={0.2} />
+              <circle cx={hover.point.cx} cy={hover.point.cy} r={radiusOf(hover.point.value)}
+                      fill={colorOf(hover.point.layer)} fillOpacity={0.95}
+                      stroke="#fff" strokeWidth={1.8 * unit} />
+            </g>
+          )}
         </svg>
 
         {/* Navigation controls — top-right, mirroring the Qlik sheet's cluster */}
