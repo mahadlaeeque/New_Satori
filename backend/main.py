@@ -8811,10 +8811,18 @@ def _pb_dashboard_defs(user) -> list:
         f"WHERE al.emp_competency IS NOT NULL GROUP BY nid) cmp ON cmp.nid = {_PB_NORM('e.Employee_Code')} "
         f"WHERE {_PB_ACTIVE}{scope('e')})"
     )
-    W = f"WITH {per_cte}, {att_emp_cte} "
+    # Working days come from the COMPANY calendar (majority vote per date), not
+    # from each row's own is_weekend/is_holiday flags. Those flags are not
+    # reliable per row: on Sat 2026-08-01, 1,482 of 1,548 rows say weekend and
+    # 66 do not, so a per-row filter let 66 phantom "attendances" through and
+    # drew a bogus point on the daily trend. Memory of that same disagreement
+    # is why the majority vote is the documented canonical rule.
+    cal_cte = (f"cal AS (SELECT attendance_date AS d FROM {A} GROUP BY attendance_date "
+               "HAVING COUNTIF(is_weekend = 1 OR is_holiday = 1) < COUNT(*) / 2)")
+    W = f"WITH {per_cte}, {cal_cte}, {att_emp_cte} "
     D0, D1 = "(SELECT d0 FROM per)", "(SELECT d1 FROM per)"
     ab = f"a.attendance_date BETWEEN {D0} AND {D1}"
-    aw = "a.is_weekend = 0 AND a.is_holiday = 0"
+    aw = "a.attendance_date IN (SELECT d FROM cal)"
     aj = att_join
     punch_in_expr = _pb_permitted_sql("a.checkin_is_permitted_location")
     punch_out_expr = _pb_permitted_sql("a.checkout_is_permitted_location")
@@ -8866,6 +8874,7 @@ def _pb_dashboard_defs(user) -> list:
         "ROUND(SAFE_CAST(a.checkin_longitude AS FLOAT64), 2)) = '{label}' OR "
         "FORMAT('Check-out @ %.2f, %.2f', ROUND(SAFE_CAST(a.checkout_latitude AS FLOAT64), 2), "
         "ROUND(SAFE_CAST(a.checkout_longitude AS FLOAT64), 2)) = '{label}') "
+        f"AND {aw} "
         "{where} ORDER BY a.attendance_date DESC, resource_name LIMIT 200"
     )
 
@@ -8878,7 +8887,7 @@ def _pb_dashboard_defs(user) -> list:
         f"{_pb_avg_duration_sql()} AS duration, "
         "a.attendance_status_text AS attendance_status, "
         f"{punch_in_expr} AS punch_in_location, {punch_out_expr} AS punch_out_location "
-        f"FROM {A} a {aj} WHERE {ab} AND a.employee_name = '{{label}}' {{where}} "
+        f"FROM {A} a {aj} WHERE {ab} AND {aw} AND a.employee_name = '{{label}}' {{where}} "
         "GROUP BY date, check_in_time, check_out_time, attendance_status, "
         "punch_in_location, punch_out_location ORDER BY date DESC LIMIT 200"
     )
