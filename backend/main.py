@@ -8401,6 +8401,10 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
             "groupKey":    c.get("groupKey"),     # map: point-layer column
             "columnLabels": c.get("columnLabels"),  # table: pretty header names
             "columnRules": c.get("columnRules"),  # table: conditional formatting
+            "tableHeight": c.get("tableHeight"),  # table: scroll height override
+            "summaryRowPrefix": c.get("summaryRowPrefix"),  # table: grand-total row
+            # So the table can say honestly whether it hit the query's cap.
+            "maxRows":     c.get("maxRows"),
             # A deterministic drill query (with a {label} placeholder) beats
             # asking Gemini to reverse-engineer one from the parent SQL.
             # The active filter selection is baked in here (the {label}
@@ -9070,37 +9074,188 @@ def _pb_dashboard_defs(user) -> list:
         "filters": [],
     }
 
-    ts_join = f"JOIN emp e ON {_PB_NORM('t.EMPLOYEE_CODE')} = e.nid"
-    ts_where = f"{_PB_DATEKEY} BETWEEN DATE_TRUNC(CURRENT_DATE(), MONTH) AND CURRENT_DATE()"
+    # ═══════════════════════════════════════════════════════════════════════
+    #  DELIVERY DASHBOARD  —  the Qlik "Delivery Dashboard / Monthly" sheet
+    #  ---------------------------------------------------------------------
+    #  A resource x month utilisation pivot, where 1.0 = 100% of capacity.
+    #
+    #  THE MEASURE. Capacity is 8 hours per working day, so a person who is
+    #  fully occupied for a whole month scores 1.0 — one man-month. Values
+    #  above 1.0 are real and are the point of the sheet: allocation_percent is
+    #  0-100 PER PROJECT ROW, so someone booked on three projects at 100% sums
+    #  to 3.0 and needs to be seen (Qlik carried a whole "Over Allocation" tab
+    #  for exactly this).
+    #
+    #  ACTUAL vs PLAN. Weeks that have already passed are taken from the
+    #  timesheet — what people really logged. The current week and everything
+    #  after it come from the allocation plan, which runs years forward. The
+    #  cutover is the Monday of the current week, so a part-elapsed month
+    #  blends both, weighted by working days either side of it.
+    #
+    #  THE CALENDAR. Working days come from the company attendance calendar
+    #  (majority vote per date) wherever the warehouse has reached; beyond that
+    #  there are no attendance rows to vote with, so future dates fall back to
+    #  Mon-Fri. That fallback is confined to dates in the future — it never
+    #  competes with the attendance calendar over a period that has one.
+    # ═══════════════════════════════════════════════════════════════════════
+    MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+    MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    DKY = _PB_DATEKEY  # timesheet DATE_KEY -> DATE, type-agnostic
+
+    dw = (
+        "WITH yr AS (SELECT COALESCE(SAFE_CAST(NULLIF('{f:year}', '') AS INT64), "
+        f"EXTRACT(YEAR FROM (SELECT MAX(attendance_date) FROM {A} WHERE attendance_date <= CURRENT_DATE()))) AS y), "
+        # Monday of the current week — everything before it is history.
+        "cut AS (SELECT DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY)) AS c), "
+        "cm AS (SELECT IF((SELECT y FROM yr) = EXTRACT(YEAR FROM CURRENT_DATE()), "
+        "EXTRACT(MONTH FROM CURRENT_DATE()), 12) AS m), "
+        "acal AS (SELECT attendance_date AS d, "
+        "IF(COUNTIF(is_weekend = 1 OR is_holiday = 1) < COUNT(*) / 2, 1, 0) AS working "
+        f"FROM {A} GROUP BY attendance_date), "
+        "days AS (SELECT dd AS d, EXTRACT(MONTH FROM dd) AS m, "
+        "COALESCE(acal.working, IF(EXTRACT(DAYOFWEEK FROM dd) IN (1, 7), 0, 1)) AS working, "
+        "IF(dd < (SELECT c FROM cut), 1, 0) AS past "
+        "FROM yr, UNNEST(GENERATE_DATE_ARRAY(DATE(yr.y, 1, 1), DATE(yr.y, 12, 31))) AS dd "
+        "LEFT JOIN acal ON acal.d = dd), "
+        "mcap AS (SELECT m, SUM(working) AS wdays, SUM(IF(past = 0, working, 0)) AS plandays "
+        "FROM days GROUP BY m), "
+        f"emp AS (SELECT {_PB_NORM('e.Employee_Code')} AS nid, "
+        # "E-599 Nauman Zia Qazi" -> "E-599 - Nauman Zia Qazi", matching Qlik.
+        "REGEXP_REPLACE(e.Resource_Name, r'^(\\S+)\\s+', r'\\1 - ') AS person, "
+        "e.Resource_Name AS Resource_Name, "
+        "COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified') AS EmployeeHierarchyNode, "
+        "cmp.emp_competency AS emp_competency "
+        f"FROM {E} e LEFT JOIN (SELECT {_PB_NORM('al.employee_id')} AS nid, "
+        f"ANY_VALUE(al.emp_competency HAVING MAX al.Date) AS emp_competency FROM {AL} al "
+        f"WHERE al.emp_competency IS NOT NULL GROUP BY nid) cmp ON cmp.nid = {_PB_NORM('e.Employee_Code')} "
+        f"WHERE {_PB_ACTIVE}{scope('e')} {{where}}), "
+        # One row per person per WEEK: their total booking across every project.
+        # Summed, not averaged — being on three projects at 100% is a 300% week.
+        f"aw AS (SELECT {_PB_NORM('al.employee_id')} AS nid, SAFE_CAST(al.Month AS INT64) AS m, "
+        "al.Date AS wk, SUM(SAFE_CAST(al.allocation_percent AS FLOAT64)) AS pct "
+        f"FROM {AL} al WHERE SAFE_CAST(al.Year AS INT64) = (SELECT y FROM yr) GROUP BY nid, m, wk), "
+        "am AS (SELECT nid, m, AVG(pct) / 100 AS frac FROM aw GROUP BY nid, m), "
+        f"act AS (SELECT {_PB_NORM('t.EMPLOYEE_CODE')} AS nid, EXTRACT(MONTH FROM {DKY}) AS m, "
+        "SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)) AS hours "
+        f"FROM {T} t WHERE EXTRACT(YEAR FROM {DKY}) = (SELECT y FROM yr) "
+        f"AND {DKY} < (SELECT c FROM cut) GROUP BY nid, m), "
+        # Man-days delivered (logged) + man-days still planned, over capacity.
+        "val AS (SELECT e.person, e.emp_competency, e.EmployeeHierarchyNode AS dept, c.m, c.wdays, "
+        "COALESCE(a.hours, 0) / 8 AS actual_days, "
+        "COALESCE(am.frac, 0) * c.plandays AS planned_days, "
+        "SAFE_DIVIDE(COALESCE(a.hours, 0) / 8 + COALESCE(am.frac, 0) * c.plandays, "
+        "NULLIF(c.wdays, 0)) AS util "
+        "FROM emp e CROSS JOIN mcap c "
+        "LEFT JOIN act a ON a.nid = e.nid AND a.m = c.m "
+        "LEFT JOIN am ON am.nid = e.nid AND am.m = c.m) "
+    )
+
+    piv_cols = ", ".join(f"ROUND(SUM(IF(m = {i + 1}, util, 0)), 1) AS {mo}"
+                         for i, mo in enumerate(MONTHS))
+    tot_cols = ", ".join(f"ROUND(SUM({mo}), 1) AS {mo}" for mo in MONTHS)
+    all_cols = ", ".join(MONTHS)
+    resource_expr = ("CONCAT(person, IF(emp_competency IS NULL, '', "
+                     "CONCAT(' - ', emp_competency)))")
+
+    monthly_pivot_sql = (
+        dw + f", piv AS (SELECT {resource_expr} AS resource, "
+        f"ROUND(SUM(util), 1) AS total, {piv_cols} FROM val GROUP BY resource) "
+        f"SELECT resource, total, {all_cols} FROM ("
+        f"SELECT 0 AS ord, 'TOTALS — all resources' AS resource, ROUND(SUM(total), 1) AS total, {tot_cols} FROM piv "
+        f"UNION ALL SELECT 1 AS ord, resource, total, {all_cols} FROM piv) "
+        "ORDER BY ord, total DESC LIMIT 1000"
+    )
+
+    # Row click -> that person's month-by-month working days, hours, booking and
+    # resulting utilisation. The totals row drills to the company view.
+    person_month_drill = (
+        dw + "SELECT c.m AS month_no, FORMAT_DATE('%b', DATE((SELECT y FROM yr), c.m, 1)) AS month, "
+        "MAX(c.wdays) AS working_days, MAX(c.wdays) * 8 AS capacity_hours, "
+        "ROUND(SUM(COALESCE(a.hours, 0)), 1) AS hours_logged, "
+        "ROUND(AVG(COALESCE(am.frac, 0)) * 100, 0) AS allocation_pct, "
+        "ROUND(SUM(SAFE_DIVIDE(COALESCE(a.hours, 0) / 8 + COALESCE(am.frac, 0) * c.plandays, "
+        "NULLIF(c.wdays, 0))), 2) AS utilisation "
+        "FROM emp e CROSS JOIN mcap c "
+        "LEFT JOIN act a ON a.nid = e.nid AND a.m = c.m "
+        "LEFT JOIN am ON am.nid = e.nid AND am.m = c.m "
+        f"WHERE STARTS_WITH('{{label}}', 'TOTALS') OR {resource_expr} = '{{label}}' "
+        "GROUP BY month_no ORDER BY month_no LIMIT 12"
+    )
+
+    month_name = "FORMAT_DATE('%b', DATE((SELECT y FROM yr), m, 1))"
     dash_delivery = {
-        "title": "Delivery & Timesheets",
-        "description": f"This month's logged effort for {label} — auto-updating.",
+        "title": "Delivery Dashboard",
+        "description": (f"Resource utilisation by month for {label} — 1.0 = 100% of capacity at "
+                        f"8 hours a working day. Logged hours up to last week, the allocation plan from this week on."),
         "kpis": [
-            {"id": "pb_ts_hours", "title": "Hours Logged (This Month)", "format": "number", "icon": "FileText",
-             "sql": f"{emp_cte} SELECT ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)), 0) AS value "
-                    f"FROM {T} t {ts_join} WHERE {ts_where}"},
-            {"id": "pb_ts_people", "title": "People Logging Time", "format": "number", "icon": "Users",
-             "sql": f"{emp_cte} SELECT COUNT(DISTINCT e.nid) AS value "
-                    f"FROM {T} t {ts_join} WHERE {ts_where}"},
-            {"id": "pb_ts_avg", "title": "Avg Hours / Person", "format": "number", "icon": "TrendingUp",
-             "sql": f"{emp_cte} SELECT ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)) "
-                    f"/ NULLIF(COUNT(DISTINCT e.nid), 0), 1) AS value "
-                    f"FROM {T} t {ts_join} WHERE {ts_where}"},
+            {"id": "pb_dl_util", "title": "Avg Utilisation (Elapsed)", "format": "percent", "icon": "TrendingUp",
+             "sql": dw + "SELECT ROUND(AVG(util) * 100, 1) AS value FROM val "
+                         "WHERE m <= (SELECT m FROM cm)"},
+            {"id": "pb_dl_mm", "title": "Man-Months (Elapsed)", "format": "number", "icon": "Layers",
+             "sql": dw + "SELECT ROUND(SUM(util), 0) AS value FROM val WHERE m <= (SELECT m FROM cm)"},
+            {"id": "pb_dl_plan", "title": "Man-Months Planned (Rest of Year)", "format": "number", "icon": "Calendar",
+             "sql": dw + "SELECT ROUND(SUM(util), 0) AS value FROM val WHERE m > (SELECT m FROM cm)"},
+            {"id": "pb_dl_hours", "title": "Hours Logged (Year to Date)", "format": "number", "icon": "FileText",
+             "sql": dw + "SELECT ROUND(SUM(actual_days) * 8, 0) AS value FROM val"},
+            {"id": "pb_dl_under", "title": "Under 70% This Month", "format": "number", "icon": "AlertTriangle",
+             "sql": dw + "SELECT COUNTIF(util < 0.7) AS value FROM val WHERE m = (SELECT m FROM cm)"},
+            {"id": "pb_dl_over", "title": "Over-Allocated This Month", "format": "number", "icon": "Users",
+             "sql": dw + "SELECT COUNTIF(util > 1.5) AS value FROM val WHERE m = (SELECT m FROM cm)"},
         ],
         "charts": [
-            {"id": "pb_ts_proj", "type": "bar", "title": "Top Projects by Hours (This Month)",
-             "sql": f"{emp_cte} SELECT t.TICKET_PROJECT_LABEL AS project, "
-                    f"ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)), 0) AS hours "
-                    f"FROM {T} t {ts_join} WHERE {ts_where} "
-                    f"GROUP BY project ORDER BY hours DESC LIMIT 10"},
-            {"id": "pb_ts_trend", "type": "line", "title": "Daily Hours Trend (Last 30 Days)",
-             "sql": f"{emp_cte} SELECT CAST({_PB_DATEKEY} AS STRING) AS date, "
-                    f"ROUND(SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)), 0) AS hours "
-                    f"FROM {T} t {ts_join} "
-                    f"WHERE {_PB_DATEKEY} BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND CURRENT_DATE() "
-                    f"GROUP BY date ORDER BY date LIMIT 50"},
+            {"id": "pb_dl_trend", "type": "bar", "span": "full",
+             "title": "Man-Months by Month — Logged vs Planned",
+             "subtitle": "Logged is what came off the timesheet up to last week; planned is the allocation book from this week on.",
+             "labelKey": "month", "valueKeys": ["logged", "planned"],
+             "sql": dw + f"SELECT {month_name} AS month, m AS mno, "
+                         "ROUND(SUM(actual_days) / NULLIF(MAX(wdays), 0), 1) AS logged, "
+                         "ROUND(SUM(planned_days) / NULLIF(MAX(wdays), 0), 1) AS planned "
+                         "FROM val GROUP BY month, mno ORDER BY mno LIMIT 12"},
+            {"id": "pb_dl_monthly", "type": "table", "span": "full",
+             "title": "Monthly Utilisation by Resource",
+             "subtitle": "1.0 = fully utilised. Red is idle capacity, rose is booked past 150% — click a row for the month-by-month working.",
+             "labelKey": "resource", "valueKeys": ["total"],
+             "maxRows": 1000,
+             "tableHeight": 620,
+             "summaryRowPrefix": "TOTALS",
+             "sql": monthly_pivot_sql,
+             "drillSql": person_month_drill,
+             "drillTitle": "{label}",
+             "columnLabels": dict(
+                 [("resource", "Resource"), ("total", "Totals"),
+                  ("month_no", "#"), ("month", "Month"), ("working_days", "Working Days"),
+                  ("capacity_hours", "Capacity (hrs)"), ("hours_logged", "Hours Logged"),
+                  ("allocation_pct", "Allocation %"), ("utilisation", "Utilisation")]
+                 + list(zip(MONTHS, MONTH_LABELS))),
+             "columnRules": dict(
+                 [(mo, {"kind": "ratio", "warn": 0.7, "good": 0.95, "over": 1.5}) for mo in MONTHS]
+                 + [("utilisation", {"kind": "ratio", "warn": 0.7, "good": 0.95, "over": 1.5})])},
+            {"id": "pb_dl_comp", "type": "bar",
+             "title": "Avg Utilisation by Competency",
+             "labelKey": "competency", "valueKeys": ["avg_utilisation_pct"],
+             "sql": dw + "SELECT COALESCE(emp_competency, 'Unspecified') AS competency, "
+                         "ROUND(AVG(util) * 100, 1) AS avg_utilisation_pct FROM val "
+                         "GROUP BY competency ORDER BY avg_utilisation_pct DESC LIMIT 25"},
+            {"id": "pb_dl_bands", "type": "donut",
+             "title": "Utilisation Bands (Resource-Months)",
+             "labelKey": "band", "valueKeys": ["resource_months"],
+             "sql": dw + "SELECT CASE WHEN COALESCE(util, 0) < 0.7 THEN 'Under 70%' "
+                         "WHEN util < 0.95 THEN '70-95%' WHEN util <= 1.5 THEN '95-150% (on plan)' "
+                         "ELSE 'Over 150%' END AS band, COUNT(*) AS resource_months "
+                         "FROM val GROUP BY band ORDER BY resource_months DESC LIMIT 6"},
         ],
-        "filters": [],
+        # Qlik's Project filter is deliberately absent: it would narrow the
+        # timesheet side (TICKET_PROJECT_LABEL) without narrowing the allocation
+        # side (project_id is a code, not the same label), so every blended cell
+        # would silently mix one project's actuals with every project's plan.
+        "filters": ([{"field": "year", "label": "Year"}]
+                    + ([] if scoped else [{"field": "department", "label": "Department"}])
+                    + [{"field": "resource_name", "label": "Resource"},
+                       {"field": "competency", "label": "Competency"},
+                       {"field": "employee_type", "label": "Employee Type"}]),
+        "periodSql": (dw + "SELECT CAST((SELECT y FROM yr) AS STRING) AS label, "
+                           "CAST(DATE((SELECT y FROM yr), 1, 1) AS STRING) AS start_date, "
+                           "CAST(DATE((SELECT y FROM yr), 12, 31) AS STRING) AS end_date FROM yr"),
     }
 
     defs = [

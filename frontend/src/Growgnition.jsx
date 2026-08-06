@@ -6709,6 +6709,9 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
             rows={chartData}
             columnLabels={chart.columnLabels}
             columnRules={chart.columnRules}
+            maxHeight={chart.tableHeight || 440}
+            rowCap={chart.maxRows || 200}
+            summaryRowPrefix={chart.summaryRowPrefix}
             exportName={title}
             onRowClick={chart.drillSql ? (row) => openDrill(chart, row?.[labelKey]) : null}
           />

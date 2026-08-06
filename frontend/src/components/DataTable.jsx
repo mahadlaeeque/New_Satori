@@ -8,7 +8,7 @@
 // so the same component serves the dashboard surface and the drill modal, and
 // so the rules below can be exercised in isolation.
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { Search, Download } from "lucide-react";
 
 const COLORS = {
@@ -41,6 +41,9 @@ const CELL_TONES = {
   bad:   { bg: "var(--sem-danger-bg)", fg: "var(--sem-danger-fg)" },
   info:  { bg: "var(--sem-info-bg)",   fg: "var(--sem-info-fg)" },
   muted: { bg: "var(--c-surface-alt)", fg: "var(--c-text-muted)" },
+  // Over-allocation is not "good, but more" — a resource booked past capacity
+  // is a delivery risk, so it gets its own tone rather than a deeper green.
+  over:  { bg: "var(--sem-rose-bg)",   fg: "var(--sem-rose-fg)" },
 };
 
 // Attendance statuses come straight from the warehouse text column, so match
@@ -66,6 +69,17 @@ const cellTone = (value, rule) => {
     if (n >= (rule.bad ?? Infinity)) return "bad";
     if (n >= (rule.warn ?? Infinity)) return "warn";
     return n === 0 ? "good" : null;
+  }
+  // Utilisation / allocation expressed as a fraction of capacity, where
+  // 1.0 = 100% of an 8-hour day. Both ends are bad: idle capacity below the
+  // floor, and a resource booked past `over` who cannot actually deliver it.
+  if (kind === "ratio") {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return null;
+    if (n > (rule.over ?? 1.5)) return "over";
+    if (n >= (rule.good ?? 0.95)) return "good";
+    if (n >= (rule.warn ?? 0.7)) return "warn";
+    return "bad";
   }
   if (kind === "clockEarly" || kind === "clockLate") {
     const t = parseClockMinutes(value);
@@ -111,6 +125,11 @@ export const DataTablePanel = ({
   // The backend caps every panel query at 200 rows. A register that silently
   // stops at the cap reads as "that's all of it" — say so instead.
   rowCap = 200,
+  // First-column prefix marking a grand-total row. Such a row is pinned above
+  // the sort, styled apart, and — importantly — exempt from conditional
+  // colouring: a company-wide sum of 1,182 man-months is not a resource booked
+  // at 118,200% of capacity, and painting it red says exactly that.
+  summaryRowPrefix,
 }) => {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState(null); // { col, dir: 1 | -1 }
@@ -120,16 +139,27 @@ export const DataTablePanel = ({
     [columns, rows],
   );
 
+  const isSummary = useCallback(
+    (r) => !!summaryRowPrefix && String(r?.[cols[0]] ?? "").startsWith(summaryRowPrefix),
+    [summaryRowPrefix, cols],
+  );
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
+    // A grand total that ignores the search would describe a set the user
+    // isn't looking at, so it drops out as soon as they narrow the table.
     if (!q) return rows || [];
-    return (rows || []).filter((r) => cols.some((c) => String(r?.[c] ?? "").toLowerCase().includes(q)));
-  }, [rows, cols, query]);
+    return (rows || []).filter(
+      (r) => !isSummary(r) && cols.some((c) => String(r?.[c] ?? "").toLowerCase().includes(q)),
+    );
+  }, [rows, cols, query, isSummary]);
 
   const sorted = useMemo(() => {
-    if (!sort) return filtered;
+    const body = filtered.filter((r) => !isSummary(r));
+    const head = filtered.filter(isSummary);   // pinned above any sort
+    if (!sort) return [...head, ...body];
     const { col, dir } = sort;
-    return [...filtered].sort((a, b) => {
+    const s = [...body].sort((a, b) => {
       const av = a?.[col], bv = b?.[col];
       if (av == null && bv == null) return 0;
       if (av == null) return 1;   // nulls always sink, whichever way we're sorting
@@ -142,7 +172,8 @@ export const DataTablePanel = ({
       if (Number.isFinite(an) && Number.isFinite(bn)) return (an - bn) * dir;
       return String(av).localeCompare(String(bv)) * dir;
     });
-  }, [filtered, sort]);
+    return [...head, ...s];
+  }, [filtered, sort, isSummary]);
 
   const toggleSort = (col) =>
     setSort((prev) => (prev?.col === col ? (prev.dir === 1 ? { col, dir: -1 } : null) : { col, dir: 1 }));
@@ -204,33 +235,36 @@ export const DataTablePanel = ({
             </tr>
           </thead>
           <tbody>
-            {sorted.map((r, ri) => (
-              <tr
-                key={ri}
-                onClick={onRowClick ? () => onRowClick(r) : undefined}
-                style={{
-                  cursor: onRowClick ? "pointer" : "default",
-                  background: ri % 2 ? COLORS.surfaceAlt : "transparent",
-                }}
-                onMouseEnter={(e) => { if (onRowClick) e.currentTarget.style.background = `${COLORS.accent}14`; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = ri % 2 ? COLORS.surfaceAlt : "transparent"; }}
-              >
-                {cols.map((c) => {
-                  const val = r?.[c];
-                  const tone = cellTone(val, columnRules?.[c]);
-                  const t = tone ? CELL_TONES[tone] : null;
-                  return (
-                    <td key={c} style={{
-                      padding: "7px 12px", borderBottom: `1px solid ${COLORS.border}`,
-                      whiteSpace: "nowrap", color: t ? t.fg : COLORS.textPrimary,
-                      background: t ? t.bg : undefined, fontWeight: t ? 600 : 400,
-                    }}>
-                      {val == null || val === "" ? "—" : String(val)}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
+            {sorted.map((r, ri) => {
+              const summary = isSummary(r);
+              const base = summary ? COLORS.surfaceAlt : (ri % 2 ? COLORS.surfaceAlt : "transparent");
+              return (
+                <tr
+                  key={ri}
+                  onClick={onRowClick ? () => onRowClick(r) : undefined}
+                  style={{ cursor: onRowClick ? "pointer" : "default", background: base }}
+                  onMouseEnter={(e) => { if (onRowClick) e.currentTarget.style.background = `${COLORS.accent}14`; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = base; }}
+                >
+                  {cols.map((c) => {
+                    const val = r?.[c];
+                    const tone = summary ? null : cellTone(val, columnRules?.[c]);
+                    const t = tone ? CELL_TONES[tone] : null;
+                    return (
+                      <td key={c} style={{
+                        padding: "7px 12px", whiteSpace: "nowrap",
+                        borderBottom: summary ? `2px solid ${COLORS.border}` : `1px solid ${COLORS.border}`,
+                        color: t ? t.fg : COLORS.textPrimary,
+                        background: t ? t.bg : undefined,
+                        fontWeight: summary ? 700 : (t ? 600 : 400),
+                      }}>
+                        {val == null || val === "" ? "—" : String(val)}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
             {sorted.length === 0 && (
               <tr>
                 <td colSpan={cols.length} style={{ padding: 20, textAlign: "center", color: COLORS.textMuted, fontSize: 12.5 }}>
