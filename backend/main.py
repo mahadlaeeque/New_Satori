@@ -235,6 +235,7 @@ _SUPERADMIN_EMAILS = {
     "numair.mazhar@tmcltd.com",
     "mahad.laeeque@tmcltd.com",
     "muhammad.fawwaz@tmcltd.com",
+    "abdullah.faiz@tmcltd.com",
 }
 
 

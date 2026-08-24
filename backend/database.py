@@ -406,6 +406,7 @@ _SEED_ADMIN_USERS = [
     ("anas.wahab@tmcltd.com",    "Anas Wahab"),
     # Superadmin (email IS in main.py _SUPERADMIN_EMAILS): full Admin tab.
     ("muhammad.fawwaz@tmcltd.com", "Muhammad Fawwaz Wattoo"),
+    ("abdullah.faiz@tmcltd.com",   "Abdullah Faiz"),
 ]
 
 
@@ -455,7 +456,7 @@ def _migrate_seed_admin_users():
     # Promote-if-existing: superadmin gating in main.py requires role='admin',
     # so an account that already existed as a regular user must be lifted.
     # Idempotent (only touches non-admin rows for these specific emails).
-    for email in ("muhammad.fawwaz@tmcltd.com",):
+    for email in ("muhammad.fawwaz@tmcltd.com", "abdullah.faiz@tmcltd.com"):
         try:
             conn = get_db(); cur = conn.cursor()
             # SELECT-then-UPDATE (not rowcount) so a cursor-API difference
