@@ -70,6 +70,129 @@ const TMCLogo = ({ height = 40, light = false }) => (
   />
 );
 
+// ─── Dashboard progressive loader ───────────────────────────────────────────
+// The old loader was a bare spinner: it looked identical at 2 seconds and at
+// 50, so a slow dashboard was indistinguishable from a hung one and there was
+// nothing to tell the user what the wait was for. The backend now streams one
+// progress event per panel (POST /api/dashboard/run/stream), so this shows a
+// real percentage, names the panel currently being fetched, and animates the
+// TMC mark while it waits.
+const DASH_LOAD_STAGES = {
+  start:   "Warming up · opening a BigQuery session",
+  filters: "Collecting filter options",
+  period:  "Resolving the reporting period",
+  done:    "Rendering your dashboard",
+};
+
+const DashboardLoader = ({ progress }) => {
+  const total = progress?.total || 0;
+  // Two counters, and the difference matters. `done` is how many panels the
+  // server has assembled in *definition* order, so it names the panel actually
+  // being waited on — right for the caption. `ready` is how many queries have
+  // finished in *completion* order, so it starts climbing seconds earlier —
+  // right for the number. Driving both from `done` made the bar sit at 0% for
+  // four seconds while six queries had in fact already come back.
+  const done  = progress?.done  || 0;
+  const ready = Math.max(progress?.ready || 0, done);
+  const phase = progress?.phase || "start";
+
+  // Truth from the stream. The panels are only most of the job — filter
+  // options and the period label land after them — so panels are scaled into
+  // 0–88% and the tail owns the rest. A percentage that hit 100% and then sat
+  // there would be its own kind of lie.
+  const truth = phase === "done"    ? 100
+              : phase === "period"  ? 96
+              : phase === "filters" ? 92
+              : total ? Math.round((ready / total) * 88) : 0;
+
+  // A number that only moves when a panel lands sits still for seconds at a
+  // time and reads as frozen. `shown` eases upward continuously but is capped
+  // by `ceiling` — the share of the panel in flight — so it can never claim
+  // progress that hasn't happened.
+  const ceiling = phase === "done" ? 100
+                : Math.min(97, truth + (total ? Math.round(88 / total) : 12));
+  const [shown, setShown] = useState(0);
+  useEffect(() => {
+    if (phase === "done") { setShown(100); return; }
+    const id = setInterval(() => {
+      setShown((s) => (s >= ceiling ? ceiling : Math.min(ceiling, s + Math.max(0.25, (ceiling - s) * 0.08))));
+    }, 110);
+    return () => clearInterval(id);
+  }, [ceiling, phase]);
+  // A finished panel is hard evidence — jump straight to it rather than easing.
+  useEffect(() => { setShown((s) => Math.max(s, truth)); }, [truth]);
+
+  const pct = Math.min(100, Math.round(shown));
+
+  // `panels` from the meta event is ordered kpis-then-charts and `done` counts
+  // completions in that same order, so panels[done] is genuinely the one being
+  // waited on — which is more useful to read than the one just finished.
+  const nextPanel = progress?.panels?.[done];
+  const message = phase === "panels" || phase === "start"
+    ? (nextPanel?.title ? `Fetching ${nextPanel.title}`
+       : progress?.label ? `Loaded ${progress.label}`
+       : DASH_LOAD_STAGES.start)
+    : (DASH_LOAD_STAGES[phase] || "Loading");
+
+  const R = 34, C = 2 * Math.PI * R;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "26px 24px 34px", minHeight: 260 }}>
+      <style>{`
+        @keyframes dashload-ring   { 0% { transform: scale(0.9); opacity: 0.5; } 70% { opacity: 0; } 100% { transform: scale(1.55); opacity: 0; } }
+        @keyframes dashload-float  { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+        @keyframes dashload-sweep  { 0% { transform: translateX(-100%); } 100% { transform: translateX(320%); } }
+        @keyframes dashload-fade   { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+      `}</style>
+
+      {/* Progress ring wrapped around the TMC mark */}
+      <div style={{ position: "relative", width: 96, height: 96, display: "grid", placeItems: "center" }}>
+        <div style={{ position: "absolute", inset: 6, borderRadius: "50%", border: `1px solid ${COLORS.accent}55`, animation: "dashload-ring 2.2s ease-out infinite" }} />
+        <div style={{ position: "absolute", inset: 6, borderRadius: "50%", border: `1px solid ${COLORS.accent}55`, animation: "dashload-ring 2.2s ease-out 1.1s infinite" }} />
+        <svg width={96} height={96} style={{ position: "absolute", inset: 0, transform: "rotate(-90deg)" }}>
+          <circle cx={48} cy={48} r={R} fill="none" stroke={COLORS.border} strokeWidth={5} />
+          <circle
+            cx={48} cy={48} r={R} fill="none"
+            stroke={COLORS.accent} strokeWidth={5} strokeLinecap="round"
+            strokeDasharray={C}
+            strokeDashoffset={C * (1 - pct / 100)}
+            style={{ transition: "stroke-dashoffset 0.35s ease" }}
+          />
+        </svg>
+        <img
+          src="/tmc-monogram.png"
+          alt=""
+          onError={(e) => { e.currentTarget.style.display = "none"; }}
+          style={{ height: 34, width: "auto", objectFit: "contain", animation: "dashload-float 2.4s ease-in-out infinite" }}
+        />
+      </div>
+
+      {/* Percentage */}
+      <div style={{ marginTop: 14, fontSize: 27, fontWeight: 700, letterSpacing: "-1px", color: COLORS.textPrimary, fontVariantNumeric: "tabular-nums" }}>
+        {pct}<span style={{ fontSize: 17, fontWeight: 600, color: COLORS.textMuted }}>%</span>
+      </div>
+
+      {/* Live message — keyed so each new one fades in rather than swapping */}
+      <div key={message} style={{ marginTop: 6, fontSize: 13.5, fontWeight: 500, color: COLORS.textSecondary, textAlign: "center", maxWidth: 380, animation: "dashload-fade 0.3s ease both" }}>
+        {message}
+        <span style={{ color: COLORS.accent }}>…</span>
+      </div>
+
+      {/* Determinate bar with a shimmer, so it still moves between panels */}
+      <div style={{ marginTop: 16, width: 260, height: 4, borderRadius: 4, background: COLORS.surfaceAlt, overflow: "hidden", position: "relative" }}>
+        <div style={{ width: `${pct}%`, height: "100%", borderRadius: 4, background: `linear-gradient(90deg, ${COLORS.accentDark}, ${COLORS.accent})`, transition: "width 0.35s ease" }} />
+        <div style={{ position: "absolute", top: 0, left: 0, width: "30%", height: "100%", background: `linear-gradient(90deg, transparent, ${COLORS.accent}66, transparent)`, animation: "dashload-sweep 1.6s linear infinite" }} />
+      </div>
+
+      {total > 0 && (
+        <div style={{ marginTop: 10, fontSize: 11.5, color: COLORS.textMuted, letterSpacing: "0.3px" }}>
+          {Math.min(ready, total)} of {total} panels ready
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── Utility Components ───
 const KPICard = ({ title, value, change, changeType, icon: Icon, color, subtitle }) => (
   <div style={{
@@ -6482,6 +6605,10 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState({ kpis: [], charts: [], filterOptions: {} });
   const [filterValues, setFilterValues] = useState({});
+  // Live load progress fed by the /api/dashboard/run/stream SSE events, so the
+  // loader can show a real percentage and name what it is waiting for.
+  // { done, total, label, panels: [{id,title,kind}], phase }
+  const [progress, setProgress] = useState(null);
   // Drill-down modal state. `drill` is null when closed; otherwise carries the
   // chart metadata + clicked value + (eventually) fetched rows/columns.
   const [drill, setDrill] = useState(null);
@@ -6588,13 +6715,97 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
 
   const fetchData = useCallback(async () => {
     setLoading(true);
+    setProgress({ done: 0, total: 0, label: "", panels: [], phase: "start" });
     const token = localStorage.getItem("token");
     const base = import.meta.env.VITE_API_BASE || "";
+    const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+    const payload = JSON.stringify({ config: spec, filters: filterValues, dashboard_id: dashboardId || null });
+
+    // ── Preferred path: the streaming endpoint ───────────────────────────────
+    // A dashboard is ~20 BigQuery jobs. They run concurrently server-side, so
+    // the wall clock is the slowest one, but a single JSON response still means
+    // the user watches a spinner for all of it. /run/stream sends one event per
+    // panel as it lands, which is what makes the progress percentage honest
+    // instead of a timer pretending to be one.
+    //
+    // `softFail` marks the failures worth retrying on the old endpoint — an
+    // older backend that has no /stream route, or a proxy that ate the body.
+    // A real query failure arrives as an `error` event and must NOT trigger a
+    // fallback: re-running the whole dashboard would just fail again, slowly.
+    let softFail = null;
+    try {
+      const res = await fetch(`${base}/api/dashboard/run/stream`, { method: "POST", headers, body: payload });
+      if (res.status === 404 || res.status === 405 || res.status === 501) {
+        softFail = new Error(`stream endpoint unavailable (${res.status})`);
+      } else if (!res.ok) {
+        throw new Error(`Failed to load dashboard (${res.status})`);
+      } else if (!res.body || typeof res.body.getReader !== "function") {
+        softFail = new Error("streaming not supported by this browser");
+      } else {
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "", final = null, streamErr = null, frames = 0;
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          // SSE frames are separated by a blank line. A frame can straddle two
+          // chunks, so only whole frames are consumed and the remainder stays
+          // in the buffer.
+          let cut;
+          while ((cut = buf.indexOf("\n\n")) !== -1) {
+            const frame = buf.slice(0, cut);
+            buf = buf.slice(cut + 2);
+            const line = frame.split("\n").find((l) => l.startsWith("data:"));
+            if (!line) continue;
+            let ev;
+            try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
+            frames += 1;
+            if (ev.type === "meta") {
+              setProgress((p) => ({ ...p, total: ev.total || 0, panels: ev.panels || [], phase: "panels" }));
+            } else if (ev.type === "panel") {
+              setProgress((p) => ({ ...p, done: ev.done, total: ev.total, label: ev.label, phase: "panels" }));
+            } else if (ev.type === "tick") {
+              // Completion order — drives the percentage. See `ready` vs `done`
+              // in DashboardLoader.
+              setProgress((p) => ({ ...p, ready: Math.max(p?.ready || 0, ev.ready), total: ev.total, phase: "panels" }));
+            } else if (ev.type === "filters") {
+              setProgress((p) => ({ ...p, phase: "filters" }));
+            } else if (ev.type === "period") {
+              setProgress((p) => ({ ...p, phase: "period" }));
+            } else if (ev.type === "result") {
+              final = ev.data;
+            } else if (ev.type === "error") {
+              streamErr = ev.error;
+            }
+          }
+        }
+        if (streamErr) throw new Error(streamErr);
+        if (final) {
+          setProgress((p) => ({ ...p, phase: "done" }));
+          setData(final);
+          setLoading(false);
+          return;
+        }
+        // Connected but produced nothing parseable — worth one retry on the
+        // non-streaming route rather than showing the user an empty dashboard.
+        softFail = new Error(frames ? "stream ended without a result" : "stream produced no events");
+      }
+    } catch (err) {
+      if (!softFail) {
+        console.error("DashboardRenderer stream error:", err);
+        setLoading(false);
+        return;
+      }
+    }
+    if (softFail) console.warn("Dashboard stream unavailable, falling back:", softFail.message);
+
+    // ── Fallback: the original single-shot endpoint ──────────────────────────
     try {
       const res = await fetch(`${base}/api/dashboard/run`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ config: spec, filters: filterValues, dashboard_id: dashboardId || null }),
+        headers,
+        body: payload,
       });
       if (!res.ok) throw new Error("Failed to load dashboard");
       const result = await res.json();
@@ -6604,7 +6815,7 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
     } finally {
       setLoading(false);
     }
-  }, [spec, filterValues]);
+  }, [spec, filterValues, dashboardId]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -7108,12 +7319,7 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
         );
       })()}
 
-      {loading && (
-        <div style={{ textAlign: "center", padding: 40, color: COLORS.textSecondary }}>
-          <Activity size={24} style={{ animation: "spin 1s linear infinite" }} />
-          <div style={{ marginTop: 8, fontSize: 13 }}>Loading dashboard...</div>
-        </div>
-      )}
+      {loading && <DashboardLoader progress={progress} />}
 
       {!loading && (
         <>
