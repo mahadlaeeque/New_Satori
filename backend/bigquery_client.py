@@ -11,22 +11,70 @@ Dataset: capability-agent-prod.Satori_Project (10 tables)
              Sales_Dormant_Accounts, Sales_Workload_Feasibility
 """
 import os
+import threading
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
 # ── Configuration (read lazily after dotenv loads) ──
 _client = None
+# The dashboard endpoint now fans its queries out across a thread pool, so
+# first use can be concurrent. Without the lock two threads could each
+# build a Client and one would be discarded — the same discarded-client
+# pattern that breaks the genai transport elsewhere in this app.
+_client_lock = threading.Lock()
 
 # These defaults match TMC's production data layout. Override via env vars in
 # non-prod / dev environments.
 DEFAULT_PROJECT = "capability-agent-prod"
 DEFAULT_DATASET = "Satori_Project"
 
+# The BigQuery project this app reads. Historically it was read from
+# VERTEX_PROJECT, which is a misleading name: Vertex AI is no longer the AI
+# backend (see get_genai_client — AI Studio via GEMINI_API_KEY is preferred),
+# but that same variable still selected the WAREHOUSE. A stale
+# VERTEX_PROJECT=ai-vertex-mahad in one shell therefore pointed every query at
+# a project the caller has no bigquery.jobs.create on, and the only clue was a
+# 403 naming a project nobody thought was still in play.
+#
+# BQ_PROJECT / GCP_PROJECT are the clear names and win. VERTEX_PROJECT still
+# works so existing deployments keep running.
+#
+# LEGACY_PROJECTS is the important part: normalize_bq_project() in main.py
+# already rewrites `ai-vertex-mahad.Satori_Project` OUT of every query as a
+# dead legacy reference. Honouring it as a project SETTING contradicts that, so
+# it is ignored here and the default is used instead.
+LEGACY_PROJECTS = {"ai-vertex-mahad"}
+_PROJECT_ENV_VARS = ("BQ_PROJECT", "GCP_PROJECT", "VERTEX_PROJECT")
+
+
+def resolve_project() -> str:
+    """The BigQuery project to query, in precedence order, skipping dead names."""
+    for var in _PROJECT_ENV_VARS:
+        val = (os.environ.get(var) or "").strip()
+        if val and val not in LEGACY_PROJECTS:
+            return val
+        if val in LEGACY_PROJECTS:
+            print(f"[BQ] ignoring {var}={val} — retired project; "
+                  f"using {DEFAULT_PROJECT}. Unset {var} to silence this.")
+    return DEFAULT_PROJECT
+
+
+def resolve_dataset() -> str:
+    for var in ("BQ_DATASET", "VERTEX_DATASET"):
+        val = (os.environ.get(var) or "").strip()
+        if val:
+            return val
+    return DEFAULT_DATASET
+
 
 def get_bq_client():
     global _client
-    if _client is None:
-        project_id = os.environ.get("VERTEX_PROJECT", DEFAULT_PROJECT)
+    if _client is not None:
+        return _client
+    with _client_lock:
+        if _client is not None:
+            return _client
+        project_id = resolve_project()
         sa_key_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
         print(f"[BQ] Initializing client: project={project_id}, "
               f"sa_key={sa_key_path}, exists={os.path.exists(sa_key_path) if sa_key_path else False}")
@@ -40,11 +88,11 @@ def get_bq_client():
 
 
 def _project() -> str:
-    return os.environ.get("VERTEX_PROJECT", DEFAULT_PROJECT)
+    return resolve_project()
 
 
 def _dataset() -> str:
-    return os.environ.get("VERTEX_DATASET", DEFAULT_DATASET)
+    return resolve_dataset()
 
 
 def discover_tables(dataset: str = None) -> list[dict]:

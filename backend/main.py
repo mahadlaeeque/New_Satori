@@ -19,15 +19,28 @@ from report_generator import generate_report
 from google import genai
 from dotenv import load_dotenv
 import os, json, asyncio, base64, re
+from concurrent.futures import ThreadPoolExecutor
+import threading, queue as _queue
 from datetime import datetime, timedelta
+
+# .env must be loaded BEFORE anything below reads os.environ. It used to run
+# ~30 lines further down, which meant a .env file could never influence the
+# BigQuery target — that was already resolved. Anyone trying to fix a wrong
+# project by writing a .env would have seen no effect and no error.
+load_dotenv()
 
 # ─── BigQuery target (project + dataset) ──────────────────────────────────────
 # Single source of truth for which warehouse we're querying. Defaults preserve
 # the original TMC dataset so the existing deploy keeps working; overriding
 # either env var lets us point the same code at the migrated capability-agent-
 # prod project without touching prompts or autofix patterns.
-BQ_PROJECT  = os.environ.get("VERTEX_PROJECT",  "capability-agent-prod")
-BQ_DATASET  = os.environ.get("VERTEX_DATASET",  "Satori_Project")
+# Resolved by bigquery_client so the app and the BQ client can never disagree
+# about which project they are talking to — they did, and the symptom was a 403
+# on a retired project while live_schema happily queried the right one.
+from bigquery_client import resolve_project as _resolve_bq_project, \
+    resolve_dataset as _resolve_bq_dataset
+BQ_PROJECT  = _resolve_bq_project()
+BQ_DATASET  = _resolve_bq_dataset()
 BQ_FULL     = f"{BQ_PROJECT}.{BQ_DATASET}"          # 'capability-agent-prod.Satori_Project'
 BQ_BACKTICK = f"`{BQ_FULL}`"                         # for SQL embedding
 
@@ -55,7 +68,6 @@ def sql_table(table_name: str) -> str:
     return f"`{BQ_FULL}.{table_name}`"
 
 # ── Initialise ──
-load_dotenv()
 init_db()
 
 app = FastAPI(title="Satori API", version="1.0.0")
@@ -8055,6 +8067,20 @@ _FILTER_REGISTRY = {
     "punch_out_status": ("Attendance_Data",
                          "IF(SAFE_CAST(checkout_is_permitted_location AS INT64) = 1, 'Permitted', 'Not Permitted')",
                          "IF(SAFE_CAST(checkout_is_permitted_location AS INT64) = 1, 'Permitted', 'Not Permitted')"),
+    # Day-level date — Qlik's "Dated" filter. ~280 distinct days in the
+    # warehouse, so it still makes a usable dropdown; registered as a real
+    # WHERE field (not options-only) so picking one day narrows every panel
+    # instead of moving the reporting window the way month/year do.
+    "date":            ("Attendance_Data", "CAST(attendance_date AS STRING)", "CAST(attendance_date AS STRING)"),
+    "dated":           ("Attendance_Data", "CAST(attendance_date AS STRING)", "CAST(attendance_date AS STRING)"),
+    # Leave category behind an "On Leave" / "Submitted Leave Request" day.
+    "leave_type":      ("Attendance_Data", "COALESCE(NULLIF(TRIM(leave_type_name),''),'Unspecified')",
+                        "COALESCE(NULLIF(TRIM(leave_type_name),''),'Unspecified')"),
+    "leave_type_name": ("Attendance_Data", "COALESCE(NULLIF(TRIM(leave_type_name),''),'Unspecified')",
+                        "COALESCE(NULLIF(TRIM(leave_type_name),''),'Unspecified')"),
+    # Employment status (Active / Resigned). Employee_Data sits inside the
+    # delivery dashboard's emp CTE, where a bare column still resolves.
+    "employee_status": ("Employee_Data", "employee_status", "LOWER(employee_status)"),
     # ── Options-only fields (WHERE expression = None) ────────────────────────
     # These populate a dropdown but are NEVER injected into {where}. They drive
     # a query's own period logic through the `{f:<field>}` placeholder instead,
@@ -8199,9 +8225,129 @@ def _substitute_where(sql: str, user_filters: dict) -> str:
     return sql.replace("{where}", clause)
 
 
+def _is_infra_error(err: str) -> bool:
+    """True when a query failed because of the environment, not the SQL.
+
+    Self-healing only makes sense for SQL the warehouse rejected on its merits.
+    An expired credential, a denied permission or a quota ceiling fails EVERY
+    panel identically, and handing that error to the repair model asks it to fix
+    SQL that was never wrong — which it duly does, by inventing a different
+    query. A real run against stale ADC produced repairs that dropped
+    is_missing_punch from the attendance definition, flattened away the period
+    and working-day CTEs, and turned a scope-enforcing INNER JOIN into a LEFT
+    JOIN. Any one of those silently changes what a panel means.
+
+    It is also expensive: one Gemini call per panel per render, all of them
+    guaranteed to fail, when a single banner would have told the user to run
+    `gcloud auth application-default login`.
+
+    Worst case is durable — a rewrite that happens to succeed is written to
+    ai_sql_lessons and teaches the generator the degraded shape for good.
+
+    Matching is phrase-based on purpose: bare status codes like "403" appear
+    inside legitimate error text and table names, so they are not used.
+    """
+    e = (err or "").lower()
+    return any(k in e for k in (
+        # credentials
+        "reauthentication is needed", "invalid_grant", "default credentials",
+        "could not automatically determine credentials", "credentials were not found",
+        "unauthorized", "invalid authentication", "token has been expired",
+        # authorisation
+        "access denied", "accessdenied", "permission denied", "permission_denied",
+        "does not have permission", "forbidden", "caller does not have",
+        # capacity / availability
+        "quota exceeded", "ratelimitexceeded", "rate limit", "too many requests",
+        "service unavailable", "backend error", "deadline exceeded",
+        "connection reset", "connection aborted", "failed to connect",
+        # project / API configuration
+        "billing", "has not been used in project", "api is not enabled",
+        "is disabled", "project not found",
+    ))
+
+
 @app.post("/api/dashboard/run")
 def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
+    """Run every panel and return the finished dashboard in one response."""
+    return _dashboard_run_impl(body, user)
+
+
+@app.post("/api/dashboard/run/stream")
+def dashboard_run_stream(body: dict, user: dict = Depends(get_current_user)):
+    """Same work as /api/dashboard/run, but streamed panel by panel.
+
+    The panels already run concurrently, so the total wait is roughly the
+    slowest query — but a single response still means the user stares at a
+    spinner for all of it and then everything appears at once. Streaming lets
+    the UI name what it is waiting for and show real progress, because the
+    percentage comes from panels actually finishing rather than a timer.
+
+    Server-Sent Events, one JSON object per `data:` line:
+      {"type":"meta",   "total":n, "panels":[{id,title,kind}], "title":...}
+      {"type":"panel",  "kind":"kpi"|"chart", "index":i, "card":{...},
+                        "done":k, "total":n, "label":"Average Time Report"}
+      {"type":"tick",   "ready":k, "total":n}   # completion order, droppable
+      {"type":"filters","filterOptions":{...}}
+      {"type":"period", "period":{...}}
+      {"type":"result", "data":{...}}      # the whole payload, for the store
+      {"type":"error",  "error":"..."}
+      {"type":"done"}
+
+    `result` is deliberately sent as well as the individual panels: the client
+    keeps one authoritative object and never has to reassemble it from events.
+    """
+    q: "_queue.Queue" = _queue.Queue(maxsize=64)
+
+    def emit(ev):
+        # Bounded queue — if a client stops reading we block here rather than
+        # buffering an entire dashboard's rows in memory. `tick` is the one
+        # exception: it is emitted from a pool worker's completion callback, so
+        # blocking on it would stall the very queries the client is waiting
+        # for. A dropped tick costs a little animation smoothness and nothing
+        # else, because the authoritative counts ride on `panel` and `result`.
+        if ev.get("type") == "tick":
+            try:
+                q.put_nowait(ev)
+            except Exception:
+                pass
+            return
+        q.put(ev)
+
+    def work():
+        try:
+            result = _dashboard_run_impl(body, user, emit=emit)
+            q.put({"type": "result", "data": result})
+        except HTTPException as e:
+            q.put({"type": "error", "error": str(e.detail)})
+        except Exception as e:
+            print(f"[dashboard/stream] failed: {e}")
+            q.put({"type": "error", "error": str(e)})
+        finally:
+            q.put({"type": "done"})
+            q.put(None)
+
+    threading.Thread(target=work, name="dash-stream", daemon=True).start()
+
+    def gen():
+        while True:
+            ev = q.get()
+            if ev is None:
+                break
+            yield f"data: {json.dumps(ev, default=str)}" + "\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        # nginx (frontend/nginx.conf) buffers proxied responses by default,
+        # which would hold the whole stream back and defeat the point.
+        "X-Accel-Buffering": "no",
+    })
+
+
+def _dashboard_run_impl(body: dict, user: dict, emit=None):
     """Execute a dashboard config against TMC BigQuery.
+
+    `emit`, when given, is called with a progress event as each panel lands.
     Body: { config: {kpis, charts}, filters: {field: value} }.
     Returns { kpis: [{id, value, format, title, icon, color, error?}],
               charts: [{id, title, type, variant, labelKey, valueKeys,
@@ -8260,7 +8406,12 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         r = _run_template(sql_template)
         sql = r["sql"]
         print(f"[dashboard] {tag}: {sql[:300]}{'...' if len(sql) > 300 else ''}")
-        if "error" in r:
+        if "error" in r and _is_infra_error(r["error"]):
+            # Nothing about the SQL is wrong — every panel is failing for the
+            # same environmental reason. Surface it and stop, rather than
+            # spending a repair call per panel to rewrite correct queries.
+            print(f"[dashboard]   {tag} ENVIRONMENT ERROR (no self-heal): {r['error']}")
+        elif "error" in r:
             err = r["error"]
             print(f"[dashboard]   {tag} ERROR: {err}")
             # Self-heal step 1 — deterministic repair (no LLM, instant). Handles
@@ -8280,7 +8431,7 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
                     # deterministic fix didn't fully work — hand the coerced SQL
                     # to the LLM repair so it builds on the partial fix.
                     sql, err = det, rd.get("error", err)
-            if "error" in r:
+            if "error" in r and not _is_infra_error(err):
                 # Self-heal step 2 — ask Gemini to rewrite the failing SQL given
                 # the BQ error message. Cheap, scoped to one widget.
                 repaired = _repair_widget_sql(sql, err, widget_meta)
@@ -8346,10 +8497,190 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
 
     healed_templates = {}  # (section, index) -> repaired SQL template to persist
 
+    # 3000, not 500: "Resource Name" resolves to ~1,200 distinct people and the
+    # probe sorts alphabetically, so a 500 cap silently truncated the list
+    # partway through the K's — searching for anyone later in the alphabet
+    # returned "No matches" even though their attendance was right there in the
+    # panels. The dropdown has a type-ahead, so a long list costs nothing.
+    _FILTER_OPTION_CAP = 3000
+
+    def _probe_distinct(table: str, expr: str):
+        sql = (f"SELECT DISTINCT {expr} AS v FROM {sql_table(table)} "
+               f"WHERE {expr} IS NOT NULL AND TRIM(CAST({expr} AS STRING)) != '' "
+               f"ORDER BY v LIMIT {_FILTER_OPTION_CAP}")
+        sql = normalize_bq_project(sql)
+        res = bq_run_query(sql, max_rows=_FILTER_OPTION_CAP)
+        if "error" in res:
+            return None  # signal failure so callers can try the next candidate
+        return [row.get("v") for row in (res.get("rows") or []) if row.get("v") not in (None, "")]
+
+    # Computed once. It used to be rebuilt inside the filter loop, which meant
+    # json.dumps() over a config carrying a dozen multi-kilobyte SQL strings,
+    # once per dropdown.
+    _config_json_lower = json.dumps(config).lower()
+
+    def _filter_options_for(f):
+        """Resolve one filter's dropdown values. Returns (field, list) or None."""
+        field = f.get("field") if isinstance(f, dict) else None
+        if not field:
+            return None
+        if _is_date_filter_field(field):
+            return (field, [])          # date filters aren't value dropdowns
+        # An options-only field (month/year) has no WHERE expression — it only
+        # does anything if the config actually reads it through a {f:<field>}
+        # placeholder. Offering it otherwise would render a dropdown that
+        # silently changes nothing, which is worse than not showing it.
+        if (field.lower() in _FILTER_OPTIONS_ONLY
+                and f"{{f:{field.lower()}}}" not in _config_json_lower):
+            return (field, [])
+        vals = None
+        reg = _FILTER_REGISTRY.get(field.lower())
+        if reg:
+            table, distinct_expr, _unused = reg
+            try:
+                vals = _probe_distinct(table, distinct_expr)
+            except Exception as e:
+                print(f"[dashboard] filter probe {field} ({table}) exception: {e}")
+        if vals is None:
+            # Unregistered field — try the bare column across candidate tables.
+            safe_col = re.sub(r"[^A-Za-z0-9_]", "", field)
+            if safe_col:
+                for table in _FILTER_FALLBACK_TABLES:
+                    try:
+                        got = _probe_distinct(table, safe_col)
+                    except Exception:
+                        got = None
+                    if got is not None:
+                        vals = got
+                        break
+        if not vals:
+            print(f"[dashboard] filter '{field}' produced no options (skipped/failed)")
+        return (field, vals or [])
+
+    def _resolve_period():
+        """The window the panels actually used, so the header can name it."""
+        period_sql = (config.get("periodSql") or "").strip()
+        if not period_sql:
+            return None
+        try:
+            # The SAME pipeline the panels use. It previously ran only
+            # _substitute_params, so a periodSql built on a CTE chain that
+            # carries {where} — the delivery one is — sent a literal "{where}"
+            # to BigQuery. The broad except then swallowed the syntax error and
+            # the header silently rendered no period at all.
+            ps = _substitute_params(period_sql, user_filters)
+            ps = _substitute_where(ps, user_filters)
+            ps = _autofix_dashboard_sql(normalize_bq_project(ps))
+            pr = bq_run_query(ps, max_rows=1)
+            if "error" in pr:
+                print(f"[dashboard] period resolve error (non-fatal): {pr['error']}")
+                return None
+            if pr.get("rows"):
+                return pr["rows"][0]
+        except Exception as e:
+            print(f"[dashboard] period resolve failed (non-fatal): {e}")
+        return None
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  FAN-OUT — every query for this dashboard at once
+    #  ---------------------------------------------------------------------
+    #  Panels, filter dropdowns and the period label are all independent,
+    #  I/O-bound BigQuery round trips. Run one after another they simply added
+    #  up: the delivery prebuilt issues ~23 jobs and the attendance one 35s of
+    #  wall clock, none of it CPU. Submitting them together collapses the wait
+    #  to roughly the slowest single query.
+    #
+    #  Threads rather than asyncio because bq_run_query and the whole
+    #  self-heal path are synchronous, and the BigQuery client caches one
+    #  thread-safe HTTP session — a pool sharing it is the intended usage.
+    #
+    #  The pool is capped on purpose. A dashboard can ask for 8 KPIs + 8
+    #  charts + 8 filters + a period query; firing all 25 at once courts the
+    #  per-project concurrent-query limit, and the goal here is latency, not
+    #  saturation.
+    # ═══════════════════════════════════════════════════════════════════════
+    _kpi_defs    = (config.get("kpis") or [])[:8]
+    _chart_defs  = (config.get("charts") or [])[:8]
+    _filter_defs = (config.get("filters") or [])[:8]
+
+    def _say(ev):
+        """Publish a progress event, if anyone is listening."""
+        if emit is not None:
+            try:
+                emit(ev)
+            except Exception as e:      # a dead client must not kill the run
+                print(f"[dashboard] emit failed (ignored): {e}")
+
+    _total_panels = len(_kpi_defs) + len(_chart_defs)
+    _say({"type": "meta", "total": _total_panels, "title": config.get("title") or "",
+          "panels": ([{"id": k.get("id"), "title": k.get("title"), "kind": "kpi"}
+                      for k in _kpi_defs]
+                     + [{"id": c.get("id"), "title": c.get("title"), "kind": "chart"}
+                        for c in _chart_defs])})
+
+    # ── Two progress counters, deliberately ────────────────────────────────
+    # `panel` events come from the assembly loops below, which walk the panels
+    # in *definition* order — so a slow first KPI holds the count at zero even
+    # though six others have already returned. That order is what the UI needs
+    # for naming ("Fetching Daily Report…"), but it makes a poor percentage.
+    # `tick` is emitted from each future's own completion callback, so it moves
+    # in *completion* order and starts climbing as soon as the fastest query
+    # lands. The client drives the number from `tick` and the caption from
+    # `panel`, which is why both are sent.
+    _tick_lock = threading.Lock()
+    _ticks = {"n": 0}
+
+    def _tick(_fut):
+        with _tick_lock:
+            _ticks["n"] += 1
+            n = _ticks["n"]
+        _say({"type": "tick", "ready": n, "total": _total_panels})
+
+    _panel, _filter_futs, _period_fut = {}, [], None
+    # NOT a `with` block. Exiting one calls shutdown(wait=True), which blocks
+    # until every future is finished — so the card-building loops below would
+    # not start until the whole dashboard was done, and the progress stream
+    # would fire all of its events in the same millisecond at the very end.
+    # shutdown(wait=False) stops new submissions but lets the queued work run,
+    # so each fut.result() below returns the moment that panel is ready.
+    _pool = ThreadPoolExecutor(max_workers=10, thread_name_prefix="dash")
+    try:
+        for _i, _k in enumerate(_kpi_defs):
+            _kid = _k.get("id") or f"kpi{_i}"
+            _panel[("kpis", _i)] = _pool.submit(
+                _exec, _k.get("sql"), f"kpi[{_kid}]",
+                {"kind": "kpi", "title": _k.get("title")})
+            _panel[("kpis", _i)].add_done_callback(_tick)
+        for _i, _c in enumerate(_chart_defs):
+            _cid = _c.get("id") or f"chart{_i}"
+            _panel[("charts", _i)] = _pool.submit(
+                _exec, _c.get("sql"), f"chart[{_cid}]",
+                {"kind": "chart", "title": _c.get("title"),
+                 "type": _c.get("type"), "max_rows": _c.get("maxRows")})
+            _panel[("charts", _i)].add_done_callback(_tick)
+        _filter_futs = [_pool.submit(_filter_options_for, _f) for _f in _filter_defs]
+        _period_fut = _pool.submit(_resolve_period)
+    finally:
+        _pool.shutdown(wait=False)
+
+    _done_panels = 0
+
+    def _panel_result(section, i):
+        """A panel's result, with a thread crash surfaced as a panel error
+        rather than taking the whole dashboard down with it."""
+        fut = _panel.get((section, i))
+        if fut is None:
+            return {"error": "No SQL was saved for this widget.", "sql": ""}
+        try:
+            return fut.result()
+        except Exception as e:
+            print(f"[dashboard] {section}[{i}] raised: {e}")
+            return {"error": f"Panel failed: {e}", "sql": ""}
+
     kpis_out = []
-    for i, k in enumerate((config.get("kpis") or [])[:6]):
+    for i, k in enumerate(_kpi_defs):
         kid = k.get("id") or f"kpi{i}"
-        r = _exec(k.get("sql"), f"kpi[{kid}]", {"kind": "kpi", "title": k.get("title")})
+        r = _panel_result("kpis", i)
         card = {
             "id":       kid,
             "title":    k.get("title") or kid,
@@ -8371,15 +8702,18 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         if r.get("healed_template"):
             healed_templates[("kpis", i)] = (r.get("original_template") or "", r["healed_template"])
         kpis_out.append(card)
+        _done_panels += 1
+        _say({"type": "panel", "kind": "kpi", "index": i, "card": card,
+              "done": _done_panels, "total": _total_panels,
+              "label": k.get("title") or kid})
 
     charts_out = []
     # 8, not 4: the AI-authored dashboards still top out at 4 (the generation
     # prompt caps them there), but the prebuilts lay out a full analytic
     # surface — map + status mix + ranking + trend + times + detail table.
-    for i, c in enumerate((config.get("charts") or [])[:8]):
+    for i, c in enumerate(_chart_defs):
         cid = c.get("id") or f"chart{i}"
-        r = _exec(c.get("sql"), f"chart[{cid}]", {"kind": "chart", "title": c.get("title"),
-                                                  "type": c.get("type"), "max_rows": c.get("maxRows")})
+        r = _panel_result("charts", i)
         rows = r.get("rows") or []
         cols = r.get("columns") or []
         label_key, value_keys = _infer_chart_keys(cols, rows, c)
@@ -8424,6 +8758,10 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         if r.get("healed_template"):
             healed_templates[("charts", i)] = (r.get("original_template") or "", r["healed_template"])
         charts_out.append(card)
+        _done_panels += 1
+        _say({"type": "panel", "kind": "chart", "index": i, "card": card,
+              "done": _done_panels, "total": _total_panels,
+              "label": c.get("title") or cid})
 
     # ── Persist true repairs back into the saved dashboard ──────────────────
     # A healed panel would otherwise re-pay the whole diagnose→repair loop on
@@ -8465,86 +8803,29 @@ def dashboard_run(body: dict, user: dict = Depends(get_current_user)):
         except Exception as e:
             print(f"[dashboard] persisting healed SQL failed (non-fatal): {e}")
 
-    # ── Populate filter dropdown options ──
-    # The frontend reads data.filterOptions[field] to render dropdown choices.
-    # We resolve each filter to (table, distinct_expr) via _FILTER_REGISTRY and
-    # probe distinct values; if the field isn't registered we try the bare
-    # column across a few candidate tables. Date-range-style fields are skipped
-    # (can't be a value dropdown). A probe that returns no usable values yields
-    # an empty list, and the frontend hides empty filters so users never see a
-    # blank dropdown.
-    import re as _re
-
-    # 3000, not 500: "Resource Name" resolves to ~1,200 distinct people and the
-    # probe sorts alphabetically, so a 500 cap silently truncated the list
-    # partway through the K's — searching for anyone later in the alphabet
-    # returned "No matches" even though their attendance was right there in the
-    # panels. The dropdown has a type-ahead, so a long list costs nothing.
-    _FILTER_OPTION_CAP = 3000
-
-    def _probe_distinct(table: str, expr: str):
-        sql = (f"SELECT DISTINCT {expr} AS v FROM {sql_table(table)} "
-               f"WHERE {expr} IS NOT NULL AND TRIM(CAST({expr} AS STRING)) != '' "
-               f"ORDER BY v LIMIT {_FILTER_OPTION_CAP}")
-        sql = normalize_bq_project(sql)
-        res = bq_run_query(sql, max_rows=_FILTER_OPTION_CAP)
-        if "error" in res:
-            return None  # signal failure so callers can try the next candidate
-        return [row.get("v") for row in (res.get("rows") or []) if row.get("v") not in (None, "")]
-
+    # ── Collect the fan-out ──
+    # The dropdown probes and the period query were submitted alongside the
+    # panels, so by the time the cards are built these are already done (or
+    # very nearly). The frontend reads filterOptions[field]; a probe that
+    # found nothing yields an empty list and the frontend hides that filter,
+    # so users never see a blank dropdown.
     filter_options = {}
-    for f in (config.get("filters") or [])[:8]:
-        field = f.get("field") if isinstance(f, dict) else None
-        if not field:
-            continue
-        if _is_date_filter_field(field):
-            filter_options[field] = []   # date filters aren't value dropdowns
-            continue
-        # An options-only field (month/year) has no WHERE expression — it only
-        # does anything if the config actually reads it through a {f:<field>}
-        # placeholder. Offering it otherwise would render a dropdown that
-        # silently changes nothing, which is worse than not showing it.
-        if field.lower() in _FILTER_OPTIONS_ONLY and f"{{f:{field.lower()}}}" not in json.dumps(config).lower():
-            filter_options[field] = []
-            continue
-        vals = None
-        reg = _FILTER_REGISTRY.get(field.lower())
-        if reg:
-            table, distinct_expr, _ = reg
-            try:
-                vals = _probe_distinct(table, distinct_expr)
-            except Exception as e:
-                print(f"[dashboard] filter probe {field} ({table}) exception: {e}")
-        if vals is None:
-            # Unregistered field — try the bare column across candidate tables.
-            safe_col = _re.sub(r"[^A-Za-z0-9_]", "", field)
-            if safe_col:
-                for table in _FILTER_FALLBACK_TABLES:
-                    try:
-                        got = _probe_distinct(table, safe_col)
-                    except Exception:
-                        got = None
-                    if got is not None:
-                        vals = got
-                        break
-        filter_options[field] = vals or []
-        if not filter_options[field]:
-            print(f"[dashboard] filter '{field}' produced no options (skipped/failed)")
-
-    # ── Resolved reporting period ───────────────────────────────────────────
-    # A dashboard whose window is data-driven (the attendance prebuilt defaults
-    # to the latest month that HAS rows) has to say which window it settled on,
-    # otherwise every number on screen is unlabelled. One cheap scalar query.
-    period = None
-    period_sql = (config.get("periodSql") or "").strip()
-    if period_sql:
+    for _fut in _filter_futs:
         try:
-            ps = normalize_bq_project(_substitute_params(period_sql, user_filters))
-            pr = bq_run_query(ps, max_rows=1)
-            if "error" not in pr and (pr.get("rows") or []):
-                period = pr["rows"][0]
+            got = _fut.result()
         except Exception as e:
-            print(f"[dashboard] period resolve failed (non-fatal): {e}")
+            print(f"[dashboard] filter probe raised: {e}")
+            continue
+        if got:
+            filter_options[got[0]] = got[1]
+    _say({"type": "filters", "filterOptions": filter_options})
+
+    try:
+        period = _period_fut.result() if _period_fut else None
+    except Exception as e:
+        print(f"[dashboard] period resolve raised (non-fatal): {e}")
+        period = None
+    _say({"type": "period", "period": period})
 
     return {"kpis": kpis_out, "charts": charts_out, "filterOptions": filter_options,
             "period": period}
@@ -8706,6 +8987,21 @@ def _pb_avg_duration_sql(secs_expr: str = _PB_WORKED_SECS) -> str:
             f"MOD(DIV(CAST(AVG({secs_expr}) AS INT64), 60), 60))")
 
 
+def _pb_duration_row_sql(secs_expr: str = _PB_WORKED_SECS) -> str:
+    """Row-level worked span as 'H:MM' — the non-aggregate twin of
+    _pb_avg_duration_sql, for register rows where there is nothing to average.
+    Spans outside 0..24h are punch errors, not 30-hour days, so they blank out
+    rather than poisoning the column."""
+    return ("IF(" + secs_expr + " BETWEEN 0 AND 86399, "
+            "FORMAT('%d:%02d', DIV(" + secs_expr + ", 3600), "
+            "MOD(DIV(" + secs_expr + ", 60), 60)), NULL)")
+
+
+# Worked seconds, guarded — a null-out for impossible spans so an AVG over a
+# register column matches the KPI that already applies this range.
+_PB_WORKED_SECS_OK = (f"IF({_PB_WORKED_SECS} BETWEEN 0 AND 86399, {_PB_WORKED_SECS}, NULL)")
+
+
 def _pb_permitted_sql(col: str) -> str:
     """Qlik's PunchIn/PunchOutLocationStatus — must match _FILTER_REGISTRY exactly
     so the dropdown value and the WHERE predicate can never drift apart."""
@@ -8742,6 +9038,10 @@ def _pb_dashboard_defs(user) -> list:
     A = f"`{BQ_FULL}.Attendance_Data`"
     AL = f"`{BQ_FULL}.Allocation_Data`"
     T = f"`{BQ_FULL}.Timesheet_Data`"
+    # Project reference — client, type, status and name for the delivery
+    # project panel. Joined on Project_Code, the only key the timesheet and
+    # allocation feeds share with it.
+    PM = f"`{BQ_FULL}.Project_Master`"
     # Scoped-employee CTE: filter Employee_Data FIRST (a dept scope is ~25
     # people), then join attendance to the small set. Also keeps the autofix
     # join-rewriter away from these hand-tuned joins (it only rewrites joins
@@ -8893,6 +9193,61 @@ def _pb_dashboard_defs(user) -> list:
         "punch_in_location, punch_out_location ORDER BY date DESC LIMIT 200"
     )
 
+    # ── FR-A16: Department Report ───────────────────────────────────────
+    # The three clock metrics rolled up one level above the per-person
+    # report, plus the headcount/absence/leave context a department manager
+    # reads them against. Same period, calendar and {where} as every other
+    # panel, so a department row reconciles to the KPI band above it.
+    dept_report_sql = (
+        W + "SELECT e.EmployeeHierarchyNode AS department, "
+        "COUNT(DISTINCT a.employee_name) AS people, COUNT(*) AS days, "
+        f"ROUND(100.0 * SUM({attended}) / NULLIF(COUNT(*), 0), 1) AS attendance_pct, "
+        f"{_pb_avg_time_sql(_PB_CIN, '%I:%M %p')} AS avg_check_in, "
+        f"{_pb_avg_time_sql(_PB_COUT, '%I:%M %p')} AS avg_check_out, "
+        f"{_pb_avg_duration_sql(_PB_WORKED_SECS_OK)} AS avg_duration, "
+        f"COUNTIF({_PB_CIN} > TIME '09:30:00') AS late_days, "
+        "SUM(a.is_absent) AS absences, SUM(a.is_on_leave) AS leave_days "
+        f"FROM {A} a {aj} WHERE {ab} AND {aw} "
+        "{where} GROUP BY department ORDER BY attendance_pct DESC LIMIT 100"
+    )
+    dept_drill_sql = (
+        W + "SELECT a.employee_name AS resource_name, COUNT(*) AS days, "
+        f"ROUND(100.0 * SUM({attended}) / NULLIF(COUNT(*), 0), 1) AS attendance_pct, "
+        f"{_pb_avg_time_sql(_PB_CIN, '%I:%M %p')} AS avg_check_in, "
+        f"{_pb_avg_time_sql(_PB_COUT, '%I:%M %p')} AS avg_check_out, "
+        f"{_pb_avg_duration_sql(_PB_WORKED_SECS_OK)} AS avg_duration, "
+        f"COUNTIF({_PB_CIN} > TIME '09:30:00') AS late_days "
+        f"FROM {A} a {aj} WHERE {ab} AND {aw} "
+        "AND e.EmployeeHierarchyNode = '{label}' {where} "
+        "GROUP BY resource_name ORDER BY late_days DESC, resource_name LIMIT 200"
+    )
+
+    # ── FR-A17: Leave & Requests Report ─────────────────────────────────
+    # One row per person per leave day, with the leave category and a pinned
+    # totals row. Approved leave and a not-yet-approved request are both in
+    # scope (Qlik counted "On Leave" and "Submitted Leave Request" together),
+    # which is why the predicate is a status LIKE and not just is_on_leave.
+    # Weekends and holidays stay excluded by the shared calendar filter — a
+    # leave day that falls on a Sunday is not a day off anybody took.
+    leave_report_sql = (
+        W + ", lv AS (SELECT e.code AS employee_code, a.employee_name AS resource_name, "
+        "e.EmployeeHierarchyNode AS department, "
+        "CAST(a.attendance_date AS STRING) AS leave_date, "
+        "COALESCE(NULLIF(TRIM(a.leave_type_name), ''), 'Unspecified') AS leave_type, "
+        "a.attendance_status_text AS attendance_status, 1 AS days "
+        f"FROM {A} a {aj} WHERE {ab} AND {aw} "
+        "AND (a.is_on_leave = 1 OR LOWER(a.attendance_status_text) LIKE '%leave%') "
+        "{where}) "
+        "SELECT employee_code, resource_name, department, leave_date, leave_type, "
+        "attendance_status, days FROM ("
+        "SELECT 0 AS ord, 'TOTALS \u2014 leave days in period' AS employee_code, "
+        "'' AS resource_name, '' AS department, '' AS leave_date, '' AS leave_type, "
+        "'' AS attendance_status, SUM(days) AS days FROM lv "
+        "UNION ALL SELECT 1 AS ord, employee_code, resource_name, department, leave_date, "
+        "leave_type, attendance_status, days FROM lv) "
+        "ORDER BY ord, leave_date DESC, resource_name LIMIT 500"
+    )
+
     period_note = "the selected month (latest month in the warehouse by default)"
     dash_attendance = {
         "title": "Attendance Pulse",
@@ -8921,7 +9276,7 @@ def _pb_dashboard_defs(user) -> list:
         "charts": [
             {"id": "pb_att_map", "type": "map", "span": "full",
              "title": "Where People Punch In & Out",
-             "subtitle": "Punches rolled up to ~11 km cells. Toggle a layer, scroll to zoom, click a point for the rows behind it.",
+             "subtitle": "Punches rolled up to ~1 km cells, so individual offices and client sites stay apart. Toggle a layer, scroll to zoom, click a point for the rows behind it.",
              "labelKey": "zone", "valueKeys": ["punches"],
              "latKey": "lat", "lonKey": "lon", "groupKey": "layer",
              "maxRows": 2000,   # geo cells, not aggregate rows — see _exec
@@ -8989,19 +9344,34 @@ def _pb_dashboard_defs(user) -> list:
              "title": "Daily Report",
              "subtitle": "Every punch in the selected period. Click a row for that person's full history.",
              "labelKey": "resource_name", "valueKeys": ["employee_code"],
+             # The runner caps a panel at 200 rows unless it says otherwise,
+             # so the SQL LIMIT alone was being truncated below what the
+             # register is for — a whole-company day-by-day view.
+             "maxRows": 400,
+             # FR-A13 wants 14 columns. Eleven of them exist in this
+             # warehouse and are all here now; the remaining three (device
+             # brand, IP address, device login type) have no column in
+             # Attendance_Data at all — they need a source change, not a
+             # dashboard change, and are tracked as such rather than faked.
              "sql": f"{W}SELECT e.code AS employee_code, a.employee_name AS resource_name, "
+                    f"e.EmployeeHierarchyNode AS department, "
                     f"CAST(a.attendance_date AS STRING) AS date, "
                     f"FORMAT_TIME('%I:%M %p', {_PB_CIN}) AS check_in_time, "
                     f"FORMAT_TIME('%I:%M %p', {_PB_COUT}) AS check_out_time, "
+                    f"{_pb_duration_row_sql()} AS duration, "
                     f"a.attendance_status_text AS attendance_status, "
-                    f"{punch_in_expr} AS punch_in_location "
+                    f"COALESCE(NULLIF(TRIM(a.leave_type_name), ''), '') AS leave_type, "
+                    f"{punch_in_expr} AS punch_in_location, "
+                    f"{punch_out_expr} AS punch_out_location "
                     f"FROM {A} a {aj} WHERE {ab} AND {aw} {{where}} "
-                    f"ORDER BY a.attendance_date DESC, resource_name LIMIT 200",
+                    f"ORDER BY a.attendance_date DESC, resource_name LIMIT 400",
              "drillSql": person_drill_sql,
              "drillTitle": "{label} — punch history",
              "columnLabels": {"employee_code": "Employee Code", "resource_name": "Resource Name",
-                              "date": "Date", "check_in_time": "Check In Time",
+                              "department": "Department", "date": "Date",
+                              "check_in_time": "Check In Time",
                               "check_out_time": "Check Out Time", "attendance_status": "AttendanceStatus",
+                              "leave_type": "Leave Type",
                               "punch_in_location": "Punch-In Location",
                               "punch_out_location": "Punch-Out Location", "duration": "Duration"},
              "columnRules": {"check_in_time": {"kind": "clockEarly", "good": "09:00", "warn": "09:30"},
@@ -9009,27 +9379,65 @@ def _pb_dashboard_defs(user) -> list:
                              "attendance_status": {"kind": "status"},
                              "punch_in_location": {"kind": "permitted"},
                              "punch_out_location": {"kind": "permitted"}}},
+            # ── FR-A16 ──────────────────────────────────────────────────
+            {"id": "pb_att_deptreport", "type": "table", "span": "full",
+             "title": "Department Report",
+             "subtitle": "The same clock metrics one level up from the person. Click a row for the people behind it.",
+             "labelKey": "department", "valueKeys": ["attendance_pct"],
+             "sql": dept_report_sql,
+             "drillSql": dept_drill_sql,
+             "drillTitle": "{label} \u2014 people",
+             "columnLabels": {"department": "Department", "people": "People", "days": "Days",
+                              "attendance_pct": "Attendance %", "avg_check_in": "Avg Check In",
+                              "avg_check_out": "Avg Check Out", "avg_duration": "Avg Duration",
+                              "late_days": "Late Days", "absences": "Absences",
+                              "leave_days": "Leave Days", "resource_name": "Resource Name"},
+             "columnRules": {"avg_check_in": {"kind": "clockEarly", "good": "09:00", "warn": "09:30"},
+                             "avg_check_out": {"kind": "clockLate", "good": "18:00", "warn": "17:30"},
+                             "late_days": {"kind": "countBad", "warn": 1, "bad": 5}}},
+            # ── FR-A17 ──────────────────────────────────────────────────
+            {"id": "pb_att_leave", "type": "table", "span": "full",
+             "title": "Leave & Requests Report",
+             "subtitle": "Approved leave and still-pending requests for the selected period, with the period total pinned on top.",
+             "labelKey": "resource_name", "valueKeys": ["days"],
+             "maxRows": 500,
+             "summaryRowPrefix": "TOTALS",
+             "sql": leave_report_sql,
+             "columnLabels": {"employee_code": "Emp Code", "resource_name": "Resource Name",
+                              "department": "Department", "leave_date": "Leave Date",
+                              "leave_type": "Leave Type", "attendance_status": "Status",
+                              "days": "Days"},
+             "columnRules": {"attendance_status": {"kind": "status"}}},
         ],
-        # Qlik's filter row, minus the two dimensions this warehouse doesn't
-        # carry (Dated / DeviceLoginType). Department is dropped for scoped
-        # users — their scope already pins it, and offering the others would
-        # just hand them dropdown entries that can only ever return nothing.
+        # Qlik's filter row. Dated and Leave Type are now carried; the one
+        # Qlik dimension still missing is DeviceLoginType, which has no column
+        # in this warehouse. Department is dropped for scoped users — their
+        # scope already pins it, and offering it would just hand them dropdown
+        # entries that can only ever return nothing.
         "filters": ([{"field": "year", "label": "Year"},
                      {"field": "month", "label": "Month"},
+                     {"field": "date", "label": "Date"},
                      {"field": "status", "label": "Status"}]
                     + ([] if scoped else [{"field": "department", "label": "Department"}])
                     + [{"field": "employee_name", "label": "Resource Name"},
                        {"field": "competency", "label": "Competency"},
                        {"field": "punch_in_status", "label": "Punch-In Location"},
-                       {"field": "punch_out_status", "label": "Punch-Out Location"}]),
+                       {"field": "punch_out_status", "label": "Punch-Out Location"},
+                       {"field": "leave_type", "label": "Leave Type"}]),
         # Resolved server-side and echoed back so the header can name the window
         # the panels actually used — the default is data-driven, so "latest
         # month" has to be spelled out rather than assumed.
         # A whole-year window mustn't label itself "January 2026" — say what it
         # actually spans.
-        "periodSql": (f"WITH {per_cte} SELECT IF(DATE_TRUNC(d0, MONTH) = DATE_TRUNC(d1, MONTH), "
+        # A window that runs to today is a PART month: check-outs for the
+        # current day have not happened yet, so durations look empty and every
+        # open day reads as a missing punch. Say so in the header instead of
+        # letting the register look like a company-wide attendance failure.
+        "periodSql": (f"WITH {per_cte} SELECT CONCAT("
+                      "IF(DATE_TRUNC(d0, MONTH) = DATE_TRUNC(d1, MONTH), "
                       "FORMAT_DATE('%B %Y', d0), "
-                      "CONCAT(FORMAT_DATE('%b %Y', d0), ' – ', FORMAT_DATE('%b %Y', d1))) AS label, "
+                      "CONCAT(FORMAT_DATE('%b %Y', d0), ' – ', FORMAT_DATE('%b %Y', d1))), "
+                      "IF(d1 >= CURRENT_DATE(), ' \u00b7 month still in progress', '')) AS label, "
                       "CAST(d0 AS STRING) AS start_date, CAST(d1 AS STRING) AS end_date FROM per"),
         "periodNote": period_note,
     }
@@ -9134,6 +9542,10 @@ def _pb_dashboard_defs(user) -> list:
         "REGEXP_REPLACE(e.Resource_Name, r'^(\\S+)\\s+', r'\\1 - ') AS person, "
         "e.Resource_Name AS Resource_Name, "
         "COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified') AS EmployeeHierarchyNode, "
+        # Seniority band and job title, so utilisation can be read by grade
+        # rather than only by person and competency (FR-D8).
+        "COALESCE(NULLIF(TRIM(e.Employee_GL), ''), 'Unspecified') AS growth_level, "
+        "COALESCE(NULLIF(TRIM(e.EmployeePosition), ''), 'Unspecified') AS position, "
         "cmp.emp_competency AS emp_competency "
         f"FROM {E} e LEFT JOIN (SELECT {_PB_NORM('al.employee_id')} AS nid, "
         f"ANY_VALUE(al.emp_competency HAVING MAX al.Date) AS emp_competency FROM {AL} al "
@@ -9150,7 +9562,8 @@ def _pb_dashboard_defs(user) -> list:
         f"FROM {T} t WHERE EXTRACT(YEAR FROM {DKY}) = (SELECT y FROM yr) "
         f"AND {DKY} < (SELECT c FROM cut) GROUP BY nid, m), "
         # Man-days delivered (logged) + man-days still planned, over capacity.
-        "val AS (SELECT e.person, e.emp_competency, e.EmployeeHierarchyNode AS dept, c.m, c.wdays, "
+        "val AS (SELECT e.nid, e.person, e.emp_competency, e.growth_level, e.position, "
+        "e.EmployeeHierarchyNode AS dept, c.m, c.wdays, "
         "COALESCE(a.hours, 0) / 8 AS actual_days, "
         "COALESCE(am.frac, 0) * c.plandays AS planned_days, "
         "SAFE_DIVIDE(COALESCE(a.hours, 0) / 8 + COALESCE(am.frac, 0) * c.plandays, "
@@ -9160,6 +9573,116 @@ def _pb_dashboard_defs(user) -> list:
         "LEFT JOIN am ON am.nid = e.nid AND am.m = c.m) "
     )
 
+    # ═══════════════════════════════════════════════════════════════════════
+    #  FR-D6  CAPACITY RECONCILIATION
+    #  ---------------------------------------------------------------------
+    #  The view every other utilisation number on this dashboard is checked
+    #  against. The pivot above shows a ratio; this shows the two sides that
+    #  make it — how many days a person could have worked, how many of those
+    #  they were on leave, the hours that capacity converts to, and the hours
+    #  the timesheet actually carries.
+    #
+    #  Leave comes from the attendance feed, not the allocation book, because
+    #  the allocation book has no concept of leave — a week off still reads as
+    #  100% allocated. Only leave on a COMPANY working day counts (the same
+    #  majority-vote calendar the rest of the dashboard uses), since a leave
+    #  row dated on a Sunday is not a day anybody took off.
+    #
+    #  DATA CHECK. The last column is deliberately not a metric. A handful of
+    #  people carry timesheet hours that no working month can contain (the
+    #  worst is ~2,270 hours in one month across 900+ distinct tickets), which
+    #  is an attribution problem in the source feed, not a utilisation figure.
+    #  Flagging those rows keeps them visible as data faults instead of
+    #  rendering them as if somebody worked thirteen months in April.
+    # ═══════════════════════════════════════════════════════════════════════
+    recon_cte = (
+        ", bw AS (SELECT " + _PB_NORM('al.employee_id') + " AS nid, "
+        "SAFE_CAST(al.Month AS INT64) AS m, al.Date AS wk, "
+        "SUM(IF(al.Flag = 'Bench', SAFE_CAST(al.allocation_percent AS FLOAT64), 0)) AS pct "
+        f"FROM {AL} al WHERE SAFE_CAST(al.Year AS INT64) = (SELECT y FROM yr) "
+        "GROUP BY nid, m, wk), "
+        "bm AS (SELECT nid, m, AVG(pct) / 100 AS frac FROM bw GROUP BY nid, m), "
+        "elapsed AS (SELECT SUM(wdays) AS wdays FROM mcap WHERE m <= (SELECT m FROM cm)), "
+        f"lvd AS (SELECT {_PB_NORM('l.personal_no')} AS nid, "
+        "COUNTIF(l.is_on_leave = 1) AS leave_days "
+        f"FROM {A} l WHERE EXTRACT(YEAR FROM l.attendance_date) = (SELECT y FROM yr) "
+        "AND l.attendance_date < (SELECT c FROM cut) "
+        "AND l.attendance_date IN (SELECT d FROM acal WHERE working = 1) GROUP BY nid), "
+        "recon AS (SELECT e.person, e.EmployeeHierarchyNode AS dept, "
+        "(SELECT wdays FROM elapsed) AS working_days, "
+        "COALESCE(lvd.leave_days, 0) AS leave_days, "
+        "(SELECT wdays FROM elapsed) - COALESCE(lvd.leave_days, 0) AS net_available_days, "
+        "((SELECT wdays FROM elapsed) - COALESCE(lvd.leave_days, 0)) * 8 AS capacity_hours, "
+        "ROUND(COALESCE(h.hours, 0), 1) AS hours_logged, "
+        "ROUND(COALESCE(b.bench_days, 0), 1) AS bench_days, "
+        "ROUND(100 * SAFE_DIVIDE(COALESCE(h.hours, 0), NULLIF("
+        "((SELECT wdays FROM elapsed) - COALESCE(lvd.leave_days, 0)) * 8, 0)), 0) AS utilisation_pct "
+        "FROM emp e "
+        "LEFT JOIN (SELECT nid, SUM(hours) AS hours FROM act "
+        "WHERE m <= (SELECT m FROM cm) GROUP BY nid) h ON h.nid = e.nid "
+        "LEFT JOIN (SELECT bm.nid, SUM(bm.frac * c.wdays) AS bench_days FROM bm "
+        "JOIN mcap c ON c.m = bm.m WHERE bm.m <= (SELECT m FROM cm) GROUP BY bm.nid) b "
+        "ON b.nid = e.nid "
+        "LEFT JOIN lvd ON lvd.nid = e.nid) "
+    )
+
+    recon_sql = (
+        dw + recon_cte
+        + "SELECT resource, dept, working_days, leave_days, net_available_days, "
+        "capacity_hours, hours_logged, bench_days, utilisation_pct, data_check FROM ("
+        "SELECT 0 AS ord, 'TOTALS \u2014 all resources' AS resource, '' AS dept, "
+        "MAX(working_days) AS working_days, SUM(leave_days) AS leave_days, "
+        "SUM(net_available_days) AS net_available_days, SUM(capacity_hours) AS capacity_hours, "
+        "ROUND(SUM(hours_logged), 0) AS hours_logged, ROUND(SUM(bench_days), 0) AS bench_days, "
+        "ROUND(100 * SAFE_DIVIDE(SUM(hours_logged), NULLIF(SUM(capacity_hours), 0)), 0) AS utilisation_pct, "
+        "CONCAT(CAST(COUNTIF(hours_logged > capacity_hours * 2) AS STRING), ' to check') AS data_check "
+        "FROM recon "
+        "UNION ALL SELECT 1 AS ord, person AS resource, dept, working_days, leave_days, "
+        "net_available_days, capacity_hours, hours_logged, bench_days, utilisation_pct, "
+        "IF(hours_logged > capacity_hours * 2, 'Hours exceed 2x capacity', '') AS data_check "
+        "FROM recon) ORDER BY ord, hours_logged DESC LIMIT 1000"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  FR-D1 / FR-D10  PROJECT DELIVERY — PLANNED vs LOGGED
+    #  ---------------------------------------------------------------------
+    #  The third view the Delivery design rests on. There is no budget-hours
+    #  feed in this warehouse, so the baseline is the timesheet's own
+    #  TICKET_PLANNED_HOURS (1.71M planned against 1.57M logged company-wide)
+    #  — a per-ticket estimate rather than a sold budget. It answers the same
+    #  question at project level and is labelled as planned, not budget, so
+    #  nobody reads it as a commercial figure.
+    #
+    #  Project_Code is the only key the timesheet and the project master share
+    #  (261 of 306 timesheet codes resolve). Unmatched codes still appear, as
+    #  "Project <code>", rather than being dropped and quietly shrinking the
+    #  hours total.
+    # ═══════════════════════════════════════════════════════════════════════
+    project_sql = (
+        dw + ", pjt AS (SELECT CAST(t.TICKET_PROJECT_CODE AS STRING) AS pcode, "
+        "SUM(SAFE_CAST(t.TICKET_HOURS AS FLOAT64)) AS actual_hours, "
+        "SUM(SAFE_CAST(t.TICKET_PLANNED_HOURS AS FLOAT64)) AS planned_hours, "
+        "COUNT(DISTINCT t.TICKET_ID) AS tickets, "
+        f"COUNT(DISTINCT {_PB_NORM('t.EMPLOYEE_CODE')}) AS people "
+        f"FROM {T} t JOIN emp e ON {_PB_NORM('t.EMPLOYEE_CODE')} = e.nid "
+        f"WHERE EXTRACT(YEAR FROM {DKY}) = (SELECT y FROM yr) GROUP BY pcode) "
+        "SELECT COALESCE(NULLIF(TRIM(pm.Project_Name), ''), CONCAT('Project ', pjt.pcode)) AS project, "
+        "COALESCE(NULLIF(TRIM(pm.Client_Name), ''), 'Unspecified') AS client, "
+        "COALESCE(NULLIF(TRIM(pm.Project_Type), ''), 'Unspecified') AS project_type, "
+        "COALESCE(NULLIF(TRIM(pm.Project_Status), ''), 'Unspecified') AS project_status, "
+        "pjt.people AS people, pjt.tickets AS tickets, "
+        "ROUND(pjt.planned_hours, 0) AS planned_hours, "
+        "ROUND(pjt.actual_hours, 0) AS logged_hours, "
+        # No estimate means no variance. Subtracting zero would report the whole
+        # logged total as an overrun, which reads as a runaway project when the
+        # truth is simply that nobody estimated it — 20 of the ~260 projects
+        # here carry hours with no planned figure at all.
+        "IF(pjt.planned_hours > 0, ROUND(pjt.actual_hours - pjt.planned_hours, 0), NULL) AS variance_hours, "
+        "IF(pjt.planned_hours > 0, ROUND(100 * SAFE_DIVIDE("
+        "pjt.actual_hours - pjt.planned_hours, pjt.planned_hours), 0), NULL) AS variance_pct "
+        f"FROM pjt LEFT JOIN {PM} pm ON CAST(pm.Project_Code AS STRING) = pjt.pcode "
+        "ORDER BY pjt.actual_hours DESC LIMIT 300"
+    )
     piv_cols = ", ".join(f"ROUND(SUM(IF(m = {i + 1}, util, 0)), 1) AS {mo}"
                          for i, mo in enumerate(MONTHS))
     tot_cols = ", ".join(f"ROUND(SUM({mo}), 1) AS {mo}" for mo in MONTHS)
@@ -9211,6 +9734,14 @@ def _pb_dashboard_defs(user) -> list:
              "sql": dw + "SELECT COUNTIF(util < 0.7) AS value FROM val WHERE m = (SELECT m FROM cm)"},
             {"id": "pb_dl_over", "title": "Over-Allocated This Month", "format": "number", "icon": "Users",
              "sql": dw + "SELECT COUNTIF(util > 1.5) AS value FROM val WHERE m = (SELECT m FROM cm)"},
+            # Not a delivery metric — a data-quality one. Counts the people
+            # whose logged hours exceed twice their available capacity, which
+            # no amount of overtime explains. Company-wide the median person
+            # -month is 20 man-days against a ~21-day month, so the measure
+            # itself is sound; this tile keeps the ~1% that isn't in view.
+            {"id": "pb_dl_dq", "title": "Rows Failing the Hours Check", "format": "number",
+             "icon": "AlertTriangle",
+             "sql": dw + recon_cte + "SELECT COUNTIF(hours_logged > capacity_hours * 2) AS value FROM recon"},
         ],
         "charts": [
             {"id": "pb_dl_trend", "type": "bar", "span": "full",
@@ -9253,6 +9784,49 @@ def _pb_dashboard_defs(user) -> list:
                          "WHEN util < 0.95 THEN '70-95%' WHEN util <= 1.5 THEN '95-150% (on plan)' "
                          "ELSE 'Over 150%' END AS band, COUNT(*) AS resource_months "
                          "FROM val GROUP BY band ORDER BY resource_months DESC LIMIT 6"},
+            # ── FR-D8 ───────────────────────────────────────────────────────
+            {"id": "pb_dl_gl", "type": "bar",
+             "title": "Avg Utilisation by Growth Level",
+             "subtitle": "GL 01 is the most senior band. Elapsed months only.",
+             "labelKey": "growth_level", "valueKeys": ["avg_utilisation_pct"],
+             "sql": dw + "SELECT growth_level, ROUND(AVG(util) * 100, 1) AS avg_utilisation_pct "
+                         "FROM val WHERE m <= (SELECT m FROM cm) GROUP BY growth_level "
+                         "ORDER BY SAFE_CAST(REGEXP_EXTRACT(growth_level, r'([0-9]+)') AS INT64) "
+                         "LIMIT 20"},
+            # ── FR-D6 ───────────────────────────────────────────────────────
+            {"id": "pb_dl_recon", "type": "table", "span": "full",
+             "title": "Capacity & Hours Reconciliation",
+             "subtitle": ("Working days less leave gives the capacity every utilisation figure on this "
+                          "dashboard divides by. The last column flags rows whose logged hours no "
+                          "working month can contain \u2014 a source-feed fault, not a utilisation."),
+             "labelKey": "resource", "valueKeys": ["hours_logged"],
+             "maxRows": 1000,
+             "tableHeight": 560,
+             "summaryRowPrefix": "TOTALS",
+             "sql": recon_sql,
+             "columnLabels": {"resource": "Resource", "dept": "Department",
+                              "working_days": "Working Days", "leave_days": "Leave Days",
+                              "net_available_days": "Net Available Days",
+                              "capacity_hours": "Capacity (hrs)", "hours_logged": "Hours Logged",
+                              "bench_days": "Bench Days", "utilisation_pct": "Utilisation %",
+                              "data_check": "Data Check"},
+             "columnRules": {"utilisation_pct": {"kind": "ratio", "warn": 70, "good": 95, "over": 150}}},
+            # ── FR-D1 / FR-D10 ──────────────────────────────────────────────
+            {"id": "pb_dl_project", "type": "table", "span": "full",
+             "title": "Project Delivery \u2014 Planned vs Logged Hours",
+             "subtitle": ("Per project for the selected year. Planned is the timesheet's own per-ticket "
+                          "estimate, not a sold budget \u2014 there is no budget-hours feed in this "
+                          "warehouse yet."),
+             "labelKey": "project", "valueKeys": ["logged_hours"],
+             "maxRows": 300,
+             "tableHeight": 520,
+             "sql": project_sql,
+             "columnLabels": {"project": "Project", "client": "Client",
+                              "project_type": "Type", "project_status": "Status",
+                              "people": "People", "tickets": "Tickets",
+                              "planned_hours": "Planned (hrs)", "logged_hours": "Logged (hrs)",
+                              "variance_hours": "Variance (hrs)", "variance_pct": "Variance %"},
+             "columnRules": {"variance_pct": {"kind": "countBad", "warn": 10, "bad": 25}}},
         ],
         # Qlik's Project filter is deliberately absent: it would narrow the
         # timesheet side (TICKET_PROJECT_LABEL) without narrowing the allocation
@@ -9262,8 +9836,15 @@ def _pb_dashboard_defs(user) -> list:
                     + ([] if scoped else [{"field": "department", "label": "Department"}])
                     + [{"field": "resource_name", "label": "Resource"},
                        {"field": "competency", "label": "Competency"},
-                       {"field": "employee_type", "label": "Employee Type"}]),
-        "periodSql": (dw + "SELECT CAST((SELECT y FROM yr) AS STRING) AS label, "
+                       {"field": "employee_type", "label": "Employee Type"},
+                       {"field": "growth_level", "label": "Growth Level"},
+                       {"field": "employee_status", "label": "Employee Status"}]),
+        # The header says which year AND how far the actuals actually reach, so
+        # a failed timesheet load reads as stale data rather than a quiet month.
+        "periodSql": (dw + "SELECT CONCAT(CAST((SELECT y FROM yr) AS STRING), "
+                           f"' \u00b7 logged hours to ', COALESCE(FORMAT_DATE('%d %b', "
+                           f"(SELECT MAX({DKY}) FROM {T} t WHERE {DKY} < (SELECT c FROM cut))), "
+                           "'no data')) AS label, "
                            "CAST(DATE((SELECT y FROM yr), 1, 1) AS STRING) AS start_date, "
                            "CAST(DATE((SELECT y FROM yr), 12, 31) AS STRING) AS end_date FROM yr"),
     }
