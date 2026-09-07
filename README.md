@@ -21,7 +21,7 @@ After running `HOSTING.md` bootstrap: `https://satori-v2-<hash>-uc.a.run.app`
 # Backend
 cd backend
 pip install -r requirements.txt
-export VERTEX_PROJECT=ai-vertex-mahad VERTEX_DATASET=Satori_Project GEMINI_API_KEY=AIzaSyCkU7C1RiRHPkA4rR0P9H4OTGbZhBz1cvI
+export VERTEX_PROJECT=ai-vertex-mahad VERTEX_DATASET=Satori_Project GEMINI_API_KEY=...
 uvicorn main:app --reload --port 8080
 
 # Frontend
