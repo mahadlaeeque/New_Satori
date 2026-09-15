@@ -26,6 +26,12 @@ FILTER_SETS = {
     "delivery":   [{}, {"year": None, "employee_type": "permanent"}],
     "workforce":  [{}],
     "sales":      [{}],
+    # Three passes: bare, then one exercising a fact-table filter and one a
+    # month narrowing, because the timesheet board injects {where} into a CTE
+    # that has to resolve BOTH employee and ticket columns.
+    "timesheet":  [{},
+                   {"ts_year": None, "assignment_type": "Un-Assigned"},
+                   {"ts_month": None, "ticket_closed_status": "Closed"}],
 }
 
 MAX_SQL_ECHO = 1400
@@ -34,7 +40,7 @@ MAX_SQL_ECHO = 1400
 def resolve_dynamic(defs_key, filters):
     """Fill in filter values that depend on what's actually in the warehouse."""
     out = dict(filters)
-    for field in ("month", "year"):
+    for field in ("month", "year", "ts_month", "ts_year"):
         if field in out and out[field] is None:
             reg = main._FILTER_REGISTRY.get(field)
             table, expr, _ = reg
