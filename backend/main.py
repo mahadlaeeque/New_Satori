@@ -8031,6 +8031,12 @@ def _heal_empty_widget(template_sql: str, run_template, widget_meta: dict,
 # This is the single source of truth for BOTH the dropdown-options probe and the
 # WHERE injection, so they can never drift (the old code mapped the WHERE side
 # but probed options from the wrong table → empty dropdowns).
+# "E-001 - Abdul Haseeb" and "E-001   Abdul Haseeb" are the same person. Strip
+# the optional dash separator and collapse ragged whitespace so a name compares
+# equal whichever way the master happens to spell it.
+_PB_CANON_NAME = (r"TRIM(REGEXP_REPLACE(REGEXP_REPLACE(Resource_Name, r'\s+-\s+', ' '), "
+                  r"r'\s+', ' '))")
+
 _FILTER_REGISTRY = {
     "department":             ("Employee_Data", "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified')", "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified')"),
     "employeehierarchynode":  ("Employee_Data", "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified')", "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified')"),
@@ -8052,7 +8058,14 @@ _FILTER_REGISTRY = {
     # raw column because _autofix Fix 21 rewrites a name literal into a
     # token-AND LIKE group, so spacing never has to match.
     "employee_name":          ("Attendance_Data", r"REGEXP_REPLACE(TRIM(employee_name), r'\s+', ' ')", "employee_name"),
-    "resource_name":          ("Employee_Data", "Resource_Name", "Resource_Name"),
+    # Employee_Data stores seven people under BOTH "E-001 - Abdul Haseeb" and
+    # "E-001 Abdul Haseeb". Raw, the dropdown lists the same person twice and
+    # one of the two entries matches nothing, because any CTE that dedupes the
+    # master keeps only one spelling — a filter that silently returns an empty
+    # dashboard half the time. Canonicalising on BOTH sides collapses the pair
+    # into one working option. (Delivery uses this field too; it had the same
+    # latent bug.)
+    "resource_name":          ("Employee_Data", _PB_CANON_NAME, _PB_CANON_NAME),
     "employee":               ("Attendance_Data", "employee_name", "employee_name"),
     # attendance
     "attendance_status_text": ("Attendance_Data", "attendance_status_text", "LOWER(attendance_status_text)"),
@@ -8093,6 +8106,29 @@ _FILTER_REGISTRY = {
     "ticket_project_label":   ("Timesheet_Data", "TICKET_PROJECT_LABEL", "TICKET_PROJECT_LABEL"),
     "project":                ("Timesheet_Data", "TICKET_PROJECT_LABEL", "TICKET_PROJECT_LABEL"),
     "ticket_status":          ("Timesheet_Data", "TICKET_STATUS", "TICKET_STATUS"),
+    # ── Timesheet dashboard ──────────────────────────────────────────────────
+    # Qlik's "Ticket Status" listbox is TICKET_CLOSED_STATUS, NOT the
+    # TICKET_STATUS above (which is the Save/Submitted/Approved/Reject
+    # workflow state). Stored '0'/'1'/NULL; surfaced as words in both the
+    # dropdown and the WHERE so the two always agree, and NULL reads as Open
+    # rather than vanishing from the list.
+    "ticket_closed_status": ("Timesheet_Data",
+                             "IF(SAFE_CAST(TICKET_CLOSED_STATUS AS INT64) = 1, 'Closed', 'Open')",
+                             "IF(SAFE_CAST(TICKET_CLOSED_STATUS AS INT64) = 1, 'Closed', 'Open')"),
+    # Assigned = a ticket off the timesheet request; Un-Assigned = an adhoc
+    # ticket. In Qlik this is the FLAG field every measure on the sheet splits
+    # by, so it earns a filter of its own.
+    "assignment_type":  ("Timesheet_Data", "FLAG", "FLAG"),
+    # Timesheet's own week/day fields. Deliberately NOT reusing "date"/"dated"
+    # — those are registered against Attendance_Data.attendance_date, and a
+    # shared key would resolve to the wrong column on whichever dashboard lost
+    # the coin toss.
+    "ts_week":  ("Timesheet_Data", "TICKET_WEEK_NO", "TICKET_WEEK_NO"),
+    "ts_date":  ("Timesheet_Data", "CAST(DATE_KEY AS STRING)", "CAST(DATE_KEY AS STRING)"),
+    # Options-only: these move the timesheet window via {f:ts_month}/{f:ts_year}
+    # instead of ANDing themselves onto it.
+    "ts_month": ("Timesheet_Data", "FORMAT_DATE('%Y-%m', DATE_KEY)", None),
+    "ts_year":  ("Timesheet_Data", "CAST(EXTRACT(YEAR FROM DATE_KEY) AS STRING)", None),
     # allocation
     "competency":             ("Allocation_Data", "emp_competency", "emp_competency"),
     "emp_competency":         ("Allocation_Data", "emp_competency", "emp_competency"),
@@ -9849,10 +9885,234 @@ def _pb_dashboard_defs(user) -> list:
                            "CAST(DATE((SELECT y FROM yr), 12, 31) AS STRING) AS end_date FROM yr"),
     }
 
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  PROJECT FLOW TIMESHEET  —  replication of the Qlik "Project Flow
+    #  Timesheet" app (47d13770), sheet "Project Flow Dashboard"
+    #  ---------------------------------------------------------------------
+    #  THE MODEL. Qlik's fact is two loads stacked: TMC_TIMESHEET_V2 tagged
+    #  FLAG='Assigned' (hours against a requested timesheet ticket) and
+    #  TMC_TIMESHEET_ADHOC_TICKET tagged FLAG='Un-Assigned' (adhoc hours).
+    #  Timesheet_Data in BigQuery is that same stacked fact, FLAG included, so
+    #  every measure on the sheet is a SUM(TICKET_HOURS) sliced by FLAG.
+    #
+    #  JOIN DIRECTION MATTERS HERE. 36,317 of 297,195 rows (238,507 hours,
+    #  279 people) belong to employee codes that are NOT in Employee_Data
+    #  under an active employment type — leavers, contractors, interns. An
+    #  INNER JOIN would silently delete 15% of the company's logged hours and
+    #  make this dashboard disagree with Qlik for no stated reason, so the
+    #  join is LEFT and the attributes fall back to 'Unspecified'. The
+    #  pb_ts_dq tile below counts exactly those hours rather than hiding them.
+    #  For a DEPARTMENT-SCOPED user the same leniency would leak hours the
+    #  user may not see, so for them — and only them — the join is tightened
+    #  back to matched employees via `ts_scope`.
+    #
+    #  PERIOD. Qlik opens on the whole fact (no selection). A 17-month trend
+    #  is unreadable in a 12-bar chart, so the default window here is the
+    #  latest year that has rows; {f:ts_year} moves it and {f:ts_month}
+    #  narrows it to one month, Qlik-style.
+    # ═══════════════════════════════════════════════════════════════════════
+    TDK = _PB_DATEKEY                      # t.DATE_KEY -> DATE, type-agnostic
+    # Scoped users get INNER-JOIN semantics; admins keep every fact row.
+    ts_scope = " AND e.nid IS NOT NULL" if scoped else ""
+    tw = (
+        "WITH yr AS (SELECT COALESCE(SAFE_CAST(NULLIF('{f:ts_year}', '') AS INT64), "
+        f"EXTRACT(YEAR FROM (SELECT MAX({TDK}) FROM {T} t "
+        f"WHERE {TDK} <= CURRENT_DATE()))) AS y), "
+        "mo AS (SELECT NULLIF('{f:ts_month}', '') AS ym), "
+        # One CTE owns the window so every panel agrees on it. Month wins over
+        # year when both are set, matching the delivery/attendance behaviour.
+        "per AS (SELECT IF((SELECT ym FROM mo) IS NOT NULL, "
+        "PARSE_DATE('%Y-%m-%d', CONCAT((SELECT ym FROM mo), '-01')), "
+        "DATE((SELECT y FROM yr), 1, 1)) AS d0, "
+        "IF((SELECT ym FROM mo) IS NOT NULL, "
+        "LAST_DAY(PARSE_DATE('%Y-%m-%d', CONCAT((SELECT ym FROM mo), '-01'))), "
+        "DATE((SELECT y FROM yr), 12, 31)) AS d1), "
+        # ONE ROW PER PERSON, deliberately. Employee_Data carries duplicate
+        # records for 7 codes (E-1898 three times), some differing only in how
+        # the name is spelled — "E-1474 - Hussain Ahmed" vs
+        # "E-1474 Hussain Ahmed". Joined raw, those people's timesheet rows
+        # come back two or three times and their hours are double-counted:
+        # the 2026 window returned 198,287 rows against a fact holding 198,010.
+        # The dedupe keeps the most complete record (most of department /
+        # position / email populated), breaking ties on the name so the choice
+        # is stable between runs rather than whatever BigQuery scanned first.
+        f"empsrc AS (SELECT {_PB_NORM('e.Employee_Code')} AS nid, "
+        "e.Resource_Name, e.EmployeeHierarchyNode, e.EmployeePosition, "
+        "e.EmployeeEmail, e.EmployeeLocation, "
+        "(IF(COALESCE(TRIM(e.EmployeeHierarchyNode), '') != '', 1, 0) "
+        "+ IF(COALESCE(TRIM(e.EmployeePosition), '') != '', 1, 0) "
+        "+ IF(COALESCE(TRIM(e.EmployeeEmail), '') != '', 1, 0)) AS q "
+        f"FROM {E} e WHERE {_PB_ACTIVE}{scope('e')}), "
+        "emp AS (SELECT nid, r.Resource_Name AS Resource_Name, "
+        "r.EmployeeHierarchyNode AS EmployeeHierarchyNode, "
+        "r.EmployeePosition AS EmployeePosition, r.EmployeeEmail AS EmployeeEmail, "
+        "r.EmployeeLocation AS EmployeeLocation FROM ("
+        "SELECT nid, ARRAY_AGG(STRUCT(Resource_Name, EmployeeHierarchyNode, "
+        "EmployeePosition, EmployeeEmail, EmployeeLocation) "
+        "ORDER BY q DESC, Resource_Name DESC LIMIT 1)[OFFSET(0)] AS r "
+        "FROM empsrc GROUP BY nid)), "
+        # The one CTE every panel reads. It re-exposes each filterable column
+        # under the exact name the filter registry targets, so an injected
+        # {where} resolves here without any panel needing a second join.
+        f"ts AS (SELECT {TDK} AS d, "
+        "SAFE_CAST(t.TICKET_HOURS AS FLOAT64) AS hours, "
+        "t.FLAG AS FLAG, t.TICKET_STATUS AS TICKET_STATUS, "
+        "t.TICKET_CLOSED_STATUS AS TICKET_CLOSED_STATUS, "
+        "t.TICKET_WEEK_NO AS TICKET_WEEK_NO, t.TICKET_ID AS TICKET_ID, "
+        "t.TICKET_USER_ID AS TICKET_USER_ID, "
+        "t.TICKET_PROJECT_CODE AS TICKET_PROJECT_CODE, "
+        "COALESCE(NULLIF(TRIM(t.TICKET_PROJECT_LABEL), ''), 'Unspecified') AS TICKET_PROJECT_LABEL, "
+        "e.nid AS nid, e.Resource_Name AS Resource_Name, "
+        "e.EmployeeHierarchyNode AS EmployeeHierarchyNode, "
+        "e.EmployeePosition AS EmployeePosition, e.EmployeeEmail AS EmployeeEmail, "
+        "e.EmployeeLocation AS EmployeeLocation, "
+        # Qlik shows "E-599 - Nauman Zia Qazi"; the master mostly stores
+        # "E-599 Nauman Zia Qazi". The guard matters: a few rows ALREADY carry
+        # the dash, and reshaping those unconditionally yields "E-1474 - -
+        # Hussain Ahmed", which then reads as a different person from the same
+        # person's other rows and splits them across two lines of every report.
+        "COALESCE(IF(REGEXP_CONTAINS(e.Resource_Name, r'^\\S+\\s+-\\s'), e.Resource_Name, "
+        "REGEXP_REPLACE(e.Resource_Name, r'^(\\S+)\\s+', r'\\1 - ')), "
+        "CONCAT('(unmatched) ', COALESCE(t.EMPLOYEE_CODE, t.TICKET_USER_ID, '?'))) AS person "
+        f"FROM {T} t LEFT JOIN emp e ON {_PB_NORM('t.EMPLOYEE_CODE')} = e.nid "
+        f"WHERE {TDK} BETWEEN (SELECT d0 FROM per) AND (SELECT d1 FROM per)"
+        f"{ts_scope} {{where}}) "
+    )
+    ts_month_lbl = "FORMAT_DATE('%b', DATE_TRUNC(d, MONTH))"
+    # Assigned / Un-Assigned are the only two FLAG values Qlik emits, and every
+    # combo chart on the sheet is these two measures side by side.
+    ts_split = ("ROUND(SUM(IF(FLAG = 'Assigned', hours, 0)), 0) AS assigned, "
+                "ROUND(SUM(IF(FLAG = 'Un-Assigned', hours, 0)), 0) AS unassigned")
+
+    dash_timesheet = {
+        "title": "Project Flow Timesheet",
+        "description": (f"Logged timesheet hours for {label} — assigned tickets and adhoc work, "
+                        f"by project, month and person. Mirrors the Qlik Project Flow dashboard."),
+        "kpis": [
+            {"id": "pb_ts_projects", "title": "Total Projects", "format": "number", "icon": "Layers",
+             "sql": tw + "SELECT COUNT(DISTINCT TICKET_PROJECT_CODE) AS value FROM ts"},
+            {"id": "pb_ts_people", "title": "Total Employees", "format": "number", "icon": "Users",
+             "sql": tw + "SELECT COUNT(DISTINCT TICKET_USER_ID) AS value FROM ts"},
+            {"id": "pb_ts_hours", "title": "Actual Hours", "format": "number", "icon": "Clock",
+             "sql": tw + "SELECT ROUND(SUM(hours), 0) AS value FROM ts"},
+            {"id": "pb_ts_submitted", "title": "Employees Submitted", "format": "number", "icon": "CheckCircle",
+             "sql": tw + "SELECT COUNT(DISTINCT TICKET_USER_ID) AS value FROM ts "
+                         "WHERE FLAG IN ('Assigned', 'Un-Assigned')"},
+            # Qlik's "# of Zero Employee". Its version counts users in the USER
+            # table with no ticket rows at all; the equivalent here is the
+            # scoped employee master minus everyone who logged anything in the
+            # window, which is the number a manager actually chases.
+            {"id": "pb_ts_zero", "title": "Employees With No Logs", "format": "number", "icon": "AlertTriangle",
+             "sql": tw + "SELECT COUNT(*) AS value FROM emp "
+                         "WHERE nid NOT IN (SELECT nid FROM ts WHERE nid IS NOT NULL)"},
+            # Data quality, not a timesheet metric: hours whose employee code
+            # has no active record in the master. Left in the totals on
+            # purpose (Qlik counts them too) — this tile keeps them visible.
+            {"id": "pb_ts_dq", "title": "Hours Not Matched to an Employee", "format": "number",
+             "icon": "AlertTriangle",
+             "sql": tw + "SELECT ROUND(SUM(IF(nid IS NULL, hours, 0)), 0) AS value FROM ts"},
+        ],
+        "charts": [
+            {"id": "pb_ts_trend", "type": "bar", "span": "full",
+             "title": "Monthly Trend",
+             "subtitle": "Hours logged each month, split by assigned tickets and adhoc work.",
+             "labelKey": "month", "valueKeys": ["assigned", "unassigned"],
+             "sql": tw + f"SELECT {ts_month_lbl} AS month, EXTRACT(MONTH FROM d) AS mno, "
+                         + ts_split + " FROM ts GROUP BY month, mno ORDER BY mno LIMIT 12"},
+            # Qlik titles this "Planned vs. Actual Hours by Project", but both
+            # of its measures are SUM(TICKET_HOURS) split by FLAG — there is no
+            # planned measure anywhere on the sheet. Same numbers, honest title.
+            {"id": "pb_ts_project", "type": "bar", "span": "full",
+             "title": "Assigned vs Un-Assigned Hours by Project",
+             "subtitle": "Top 20 projects by total logged hours.",
+             "labelKey": "project", "valueKeys": ["assigned", "unassigned"],
+             "sql": tw + "SELECT TICKET_PROJECT_LABEL AS project, " + ts_split
+                       + ", ROUND(SUM(hours), 0) AS total FROM ts GROUP BY project "
+                         "ORDER BY total DESC LIMIT 20"},
+            {"id": "pb_ts_status", "type": "donut",
+             "title": "Timesheet Status",
+             "subtitle": "Hours by approval state of the ticket they were logged against.",
+             "labelKey": "status", "valueKeys": ["hours"],
+             "sql": tw + "SELECT COALESCE(NULLIF(TRIM(TICKET_STATUS), ''), 'Unspecified') AS status, "
+                         "ROUND(SUM(hours), 0) AS hours FROM ts GROUP BY status "
+                         "ORDER BY hours DESC LIMIT 8"},
+            {"id": "pb_ts_dept", "type": "bar",
+             "title": "Hours by Department",
+             "labelKey": "department", "valueKeys": ["hours"],
+             "sql": tw + "SELECT COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') "
+                         "AS department, ROUND(SUM(hours), 0) AS hours FROM ts "
+                         "GROUP BY department ORDER BY hours DESC LIMIT 25"},
+            # Qlik "Detail Report" — one row per person per department per
+            # project, total hours.
+            {"id": "pb_ts_detail", "type": "table", "span": "full",
+             "title": "Detail Report",
+             "subtitle": "One row per employee, department and project.",
+             "labelKey": "employee", "valueKeys": ["total_hours"],
+             "maxRows": 1000, "tableHeight": 560, "summaryRowPrefix": "TOTALS",
+             "columnLabels": {"employee": "Emp Code and Name", "department": "Department",
+                              "project": "Project", "assigned_hours": "Assigned",
+                              "unassigned_hours": "Un-Assigned", "total_hours": "Total Hours"},
+             "sql": tw + "SELECT person AS employee, "
+                         "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS department, "
+                         "TICKET_PROJECT_LABEL AS project, "
+                         "ROUND(SUM(IF(FLAG = 'Assigned', hours, 0)), 1) AS assigned_hours, "
+                         "ROUND(SUM(IF(FLAG = 'Un-Assigned', hours, 0)), 1) AS unassigned_hours, "
+                         "ROUND(SUM(hours), 1) AS total_hours FROM ts "
+                         "GROUP BY employee, department, project "
+                         "ORDER BY total_hours DESC LIMIT 1000"},
+            # Qlik "Daily Report" — the same grain plus location, email,
+            # position and the day itself. Qlik renders it as a pivot the user
+            # expands; Satori has no pivot widget, so it ships flat and sorted
+            # newest-first, which is how people actually read a day register.
+            {"id": "pb_ts_daily", "type": "table", "span": "full",
+             "title": "Daily Report",
+             "subtitle": "Day-by-day log with the employee attributes Qlik's pivot exposes.",
+             "labelKey": "employee", "valueKeys": ["total_hours"],
+             "maxRows": 600, "tableHeight": 560,
+             "columnLabels": {"employee": "Emp Code and Name", "project": "Project Name",
+                              "department": "Department", "location": "Location",
+                              "email": "Email", "position": "Position",
+                              "log_date": "Date", "total_hours": "Total Hours"},
+             "sql": tw + "SELECT person AS employee, TICKET_PROJECT_LABEL AS project, "
+                         "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode), ''), 'Unspecified') AS department, "
+                         "COALESCE(NULLIF(TRIM(EmployeeLocation), ''), 'Unspecified') AS location, "
+                         "COALESCE(EmployeeEmail, '') AS email, "
+                         "COALESCE(NULLIF(TRIM(EmployeePosition), ''), 'Unspecified') AS position, "
+                         "CAST(d AS STRING) AS log_date, ROUND(SUM(hours), 1) AS total_hours "
+                         "FROM ts GROUP BY employee, project, department, location, email, "
+                         "position, log_date ORDER BY log_date DESC, total_hours DESC LIMIT 600"},
+        ],
+        # Qlik's sheet carries eight listboxes. Seven are reproduced here; the
+        # eighth, "Timesheet Exempt" (USER_ATTENDANCE_EXEMPT), has no column in
+        # Employee_Data and is blocked on the employee feed.
+        "filters": [{"field": "ts_year", "label": "Year"},
+                    {"field": "ts_month", "label": "Month"},
+                    {"field": "ts_week", "label": "Week"},
+                    {"field": "ts_date", "label": "Date"},
+                    {"field": "project", "label": "Project"},
+                    {"field": "resource_name", "label": "Resource"},
+                    {"field": "department", "label": "Department"},
+                    {"field": "ticket_closed_status", "label": "Ticket Status"},
+                    {"field": "assignment_type", "label": "Assignment"}],
+        # Say how far the logged hours actually reach. The Drive->BigQuery sync
+        # runs on its own cadence, so without this a partly-loaded month reads
+        # as a quiet month.
+        "periodSql": (tw + "SELECT CONCAT("
+                           "IF((SELECT ym FROM mo) IS NOT NULL, "
+                           "FORMAT_DATE('%B %Y', (SELECT d0 FROM per)), "
+                           "CAST((SELECT y FROM yr) AS STRING)), "
+                           "' · logged hours to ', "
+                           "COALESCE(FORMAT_DATE('%d %b', (SELECT MAX(d) FROM ts)), 'no data')) AS label, "
+                           "CAST((SELECT d0 FROM per) AS STRING) AS start_date, "
+                           "CAST((SELECT d1 FROM per) AS STRING) AS end_date"),
+    }
+
     defs = [
         {"key": "attendance", "config": dash_attendance},
         {"key": "workforce",  "config": dash_workforce},
         {"key": "delivery",   "config": dash_delivery},
+        {"key": "timesheet",  "config": dash_timesheet},
     ]
 
     if _user_can_see_sales(user):
