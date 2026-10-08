@@ -4845,7 +4845,44 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
             new_conv_id = body.conversation_id
         return {"reply": reply, "conversation_id": new_conv_id, "response_id": response_id}
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
+        raise HTTPException(status_code=502, detail=_ai_user_error(e))
+
+
+
+def _ai_user_error(e) -> str:
+    """Turn an upstream model-API failure into something a business user can act on.
+
+    The raw exception used to go straight to the browser. A VP asking the
+    assistant a question about resource allocation was shown:
+
+        Error (502): Gemini API error: 403 PERMISSION_DENIED. {'error':
+        {'code': 403, 'message': 'Spend cap breached for project:
+        projects/312515905498 for service: generativelanguage.googleapis.com',
+        'status': 'PERMISSION_DENIED'}}
+
+    which leaks the GCP project number and the service topology to everyone
+    with a login, screenshots into email threads, and tells the reader nothing
+    they can do. The full text still goes to the server log, where the people
+    who can fix it are actually looking.
+    """
+    raw = str(e)
+    low = raw.lower()
+    print(f"[ai] upstream failure: {raw}")          # full detail, server side only
+    if "spend cap" in low or "quota" in low or "billing" in low or "resource_exhausted" in low:
+        return ("The AI assistant has reached its usage limit for this billing period. "
+                "Dashboards and reports are unaffected and stay up to date \u2014 only "
+                "the chat assistant is paused. Satori support has been notified.")
+    if "429" in low or "rate limit" in low or "overloaded" in low or "unavailable" in low:
+        return ("The AI assistant is busy right now. Please try again in a moment \u2014 "
+                "dashboards and reports are unaffected.")
+    if "api key" in low or "permission_denied" in low or "403" in low or "unauthenticated" in low:
+        return ("The AI assistant can't reach its model service at the moment. "
+                "Dashboards and reports are unaffected. Satori support has been notified.")
+    if "timeout" in low or "deadline" in low:
+        return ("That question took too long to answer. Try narrowing it \u2014 a single "
+                "resource, or a shorter date range.")
+    return ("The AI assistant is temporarily unavailable. Dashboards and reports are "
+            "unaffected. Satori support has been notified.")
 
 
 @app.post("/api/chat/stream")
@@ -5105,7 +5142,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
 
             yield "data: [DONE]\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'error': _ai_user_error(e)})}\n\n"
 
     # Save query to history in background
     try:
@@ -8635,9 +8672,31 @@ def _dashboard_run_impl(body: dict, user: dict, emit=None):
     #  per-project concurrent-query limit, and the goal here is latency, not
     #  saturation.
     # ═══════════════════════════════════════════════════════════════════════
-    _kpi_defs    = (config.get("kpis") or [])[:8]
-    _chart_defs  = (config.get("charts") or [])[:8]
-    _filter_defs = (config.get("filters") or [])[:8]
+    # PANEL CAPS. These used to be a bare [:8] that dropped the rest in
+    # silence — a 12-panel config rendered 8 panels and reported nothing, so a
+    # consolidated dashboard would quietly lose a third of itself. That is the
+    # real obstacle to putting every table on one view, NOT query time:
+    # measured on the live Delivery board, 1 panel takes 3.1 s and 16 take
+    # 4.0 s, because the panels fan out and the wall clock is the slowest
+    # query, not the sum. The caps exist to bound BigQuery concurrency, so
+    # they stay — but they are now generous enough for a unified view, and
+    # anything they do cut is logged and reported back in the payload instead
+    # of vanishing.
+    _PANEL_CAP, _FILTER_CAP = 20, 12
+    _kpi_all     = config.get("kpis") or []
+    _chart_all   = config.get("charts") or []
+    _filter_all  = config.get("filters") or []
+    _kpi_defs    = _kpi_all[:_PANEL_CAP]
+    _chart_defs  = _chart_all[:_PANEL_CAP]
+    _filter_defs = _filter_all[:_FILTER_CAP]
+    _dropped = []
+    for _label, _all, _kept in (("KPIs", _kpi_all, _kpi_defs),
+                                ("charts", _chart_all, _chart_defs),
+                                ("filters", _filter_all, _filter_defs)):
+        if len(_all) > len(_kept):
+            _msg = f"{len(_all) - len(_kept)} of {len(_all)} {_label} exceeded the panel cap and were not run"
+            _dropped.append(_msg)
+            print(f"[dashboard] TRUNCATED: {_msg}")
 
     def _say(ev):
         """Publish a progress event, if anyone is listening."""
@@ -8679,7 +8738,13 @@ def _dashboard_run_impl(body: dict, user: dict, emit=None):
     # would fire all of its events in the same millisecond at the very end.
     # shutdown(wait=False) stops new submissions but lets the queued work run,
     # so each fut.result() below returns the moment that panel is ready.
-    _pool = ThreadPoolExecutor(max_workers=10, thread_name_prefix="dash")
+    # 16, raised from 10 alongside the panel caps above. The pool width is
+    # what decides whether a consolidated dashboard runs in one wave or two:
+    # with 10 workers a 16-panel board queued a second wave and roughly
+    # doubled the wait. BigQuery's default ceiling is 100 concurrent
+    # interactive queries per project, so 16 is still an order of magnitude
+    # inside the limit this cap exists to respect.
+    _pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="dash")
     try:
         for _i, _k in enumerate(_kpi_defs):
             _kid = _k.get("id") or f"kpi{_i}"
@@ -8863,8 +8928,14 @@ def _dashboard_run_impl(body: dict, user: dict, emit=None):
         period = None
     _say({"type": "period", "period": period})
 
-    return {"kpis": kpis_out, "charts": charts_out, "filterOptions": filter_options,
-            "period": period}
+    out = {"kpis": kpis_out, "charts": charts_out, "filterOptions": filter_options,
+           "period": period}
+    # A panel the cap refused is a missing table on someone's screen. Say so in
+    # the payload so the UI can show it, rather than letting the dashboard look
+    # complete when it isn't.
+    if _dropped:
+        out["truncated"] = _dropped
+    return out
 
 
 @app.get("/api/dashboards")
@@ -9575,7 +9646,12 @@ def _pb_dashboard_defs(user) -> list:
         "FROM days GROUP BY m), "
         f"emp AS (SELECT {_PB_NORM('e.Employee_Code')} AS nid, "
         # "E-599 Nauman Zia Qazi" -> "E-599 - Nauman Zia Qazi", matching Qlik.
-        "REGEXP_REPLACE(e.Resource_Name, r'^(\\S+)\\s+', r'\\1 - ') AS person, "
+        # Guarded, because a few master rows ALREADY carry the dash and
+        # reshaping those unconditionally produced "E-1230 - - Muhammad Usman
+        # Sabir" on this dashboard — which then sorts and reads as a different
+        # person from their own other rows.
+        "IF(REGEXP_CONTAINS(e.Resource_Name, r'^\\S+\\s+-\\s'), e.Resource_Name, "
+        "REGEXP_REPLACE(e.Resource_Name, r'^(\\S+)\\s+', r'\\1 - ')) AS person, "
         "e.Resource_Name AS Resource_Name, "
         "COALESCE(NULLIF(TRIM(e.EmployeeHierarchyNode), ''), 'Unspecified') AS EmployeeHierarchyNode, "
         # Seniority band and job title, so utilisation can be read by grade
@@ -9602,6 +9678,16 @@ def _pb_dashboard_defs(user) -> list:
         "e.EmployeeHierarchyNode AS dept, c.m, c.wdays, "
         "COALESCE(a.hours, 0) / 8 AS actual_days, "
         "COALESCE(am.frac, 0) * c.plandays AS planned_days, "
+        # The allocation BOOK for this month, elapsed or not. `planned_days`
+        # above multiplies by c.plandays, which is zero for any month already
+        # past, so it answers "what is still booked ahead" and deliberately
+        # says nothing about a month that has already happened. That is the
+        # right input to utilisation, but it is NOT the allocation, and the
+        # two were being conflated: a person allocated 100% all year with no
+        # timesheet showed a row of 0.0s, indistinguishable from someone idle.
+        # alloc_frac keeps the booking visible for every month.
+        "COALESCE(am.frac, 0) AS alloc_frac, "
+        "COALESCE(a.hours, 0) AS logged_hours, "
         "SAFE_DIVIDE(COALESCE(a.hours, 0) / 8 + COALESCE(am.frac, 0) * c.plandays, "
         "NULLIF(c.wdays, 0)) AS util "
         "FROM emp e CROSS JOIN mcap c "
@@ -9726,12 +9812,23 @@ def _pb_dashboard_defs(user) -> list:
     resource_expr = ("CONCAT(person, IF(emp_competency IS NULL, '', "
                      "CONCAT(' - ', emp_competency)))")
 
+    # Two columns in front of the monthly grid, because the grid alone cannot
+    # distinguish "idle" from "never files a timesheet". `allocated` is the
+    # average booking across the year and `logged_hrs` the hours actually
+    # marked; a row reading 1.00 / 0 is allocated staff who do not log time
+    # (all of KPO, SOC, Account Management, Finance, Admin, Management,
+    # Marketing and the BOD - 180 people, 17% of everyone allocated), while
+    # 0.00 / 0 is genuinely unbooked.
     monthly_pivot_sql = (
         dw + f", piv AS (SELECT {resource_expr} AS resource, "
+        "ROUND(AVG(alloc_frac), 2) AS allocated, "
+        "ROUND(SUM(logged_hours), 0) AS logged_hrs, "
         f"ROUND(SUM(util), 1) AS total, {piv_cols} FROM val GROUP BY resource) "
-        f"SELECT resource, total, {all_cols} FROM ("
-        f"SELECT 0 AS ord, 'TOTALS — all resources' AS resource, ROUND(SUM(total), 1) AS total, {tot_cols} FROM piv "
-        f"UNION ALL SELECT 1 AS ord, resource, total, {all_cols} FROM piv) "
+        f"SELECT resource, allocated, logged_hrs, total, {all_cols} FROM ("
+        "SELECT 0 AS ord, 'TOTALS — all resources' AS resource, "
+        "ROUND(AVG(allocated), 2) AS allocated, ROUND(SUM(logged_hrs), 0) AS logged_hrs, "
+        f"ROUND(SUM(total), 1) AS total, {tot_cols} FROM piv "
+        f"UNION ALL SELECT 1 AS ord, resource, allocated, logged_hrs, total, {all_cols} FROM piv) "
         "ORDER BY ord, total DESC LIMIT 1000"
     )
 
@@ -9778,6 +9875,17 @@ def _pb_dashboard_defs(user) -> list:
             {"id": "pb_dl_dq", "title": "Rows Failing the Hours Check", "format": "number",
              "icon": "AlertTriangle",
              "sql": dw + recon_cte + "SELECT COUNTIF(hours_logged > capacity_hours * 2) AS value FROM recon"},
+            # Allocated all year, never logged an hour. These people read 0.0
+            # across every elapsed month of the grid above, which looks like
+            # idle capacity and is not: they are booked, they simply do not
+            # file Project Flow timesheets. Whole departments sit here, so the
+            # count belongs on the face of the dashboard rather than being
+            # rediscovered one resource at a time.
+            {"id": "pb_dl_nots", "title": "Allocated, No Hours Logged", "format": "number",
+             "icon": "FileText",
+             "sql": dw + "SELECT COUNT(*) AS value FROM ("
+                         "SELECT nid FROM val GROUP BY nid "
+                         "HAVING SUM(alloc_frac) > 0 AND SUM(logged_hours) = 0)"},
         ],
         "charts": [
             {"id": "pb_dl_trend", "type": "bar", "span": "full",
@@ -9790,7 +9898,12 @@ def _pb_dashboard_defs(user) -> list:
                          "FROM val GROUP BY month, mno ORDER BY mno LIMIT 12"},
             {"id": "pb_dl_monthly", "type": "table", "span": "full",
              "title": "Monthly Utilisation by Resource",
-             "subtitle": "1.0 = fully utilised. Red is idle capacity, rose is booked past 150% — click a row for the month-by-month working.",
+             "subtitle": ("1.0 = fully utilised. Elapsed months count hours actually logged; "
+                          "months ahead count the allocation book \u2014 so a resource who is "
+                          "allocated but files no timesheet reads 0.0 for every past month. "
+                          "The Allocated and Hours Logged columns show which is which. "
+                          "Red is idle capacity, rose is booked past 150% \u2014 click a row "
+                          "for the month-by-month working."),
              "labelKey": "resource", "valueKeys": ["total"],
              "maxRows": 1000,
              "tableHeight": 620,
@@ -9799,7 +9912,8 @@ def _pb_dashboard_defs(user) -> list:
              "drillSql": person_month_drill,
              "drillTitle": "{label}",
              "columnLabels": dict(
-                 [("resource", "Resource"), ("total", "Totals"),
+                 [("resource", "Resource"), ("allocated", "Allocated"),
+                  ("logged_hrs", "Hours Logged"), ("total", "Totals"),
                   ("month_no", "#"), ("month", "Month"), ("working_days", "Working Days"),
                   ("capacity_hours", "Capacity (hrs)"), ("hours_logged", "Hours Logged"),
                   ("allocation_pct", "Allocation %"), ("utilisation", "Utilisation")]
@@ -14171,7 +14285,7 @@ def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user
         text = resp.text or "{}"
     except Exception as e:
         print(f"[/api/availability/find-best-fit] Gemini error: {e}")
-        raise HTTPException(status_code=502, detail=f"AI ranking failed: {e}")
+        raise HTTPException(status_code=502, detail=_ai_user_error(e))
 
     # 4) Parse Gemini's response. With response_mime_type=json the model
     #    *should* return raw JSON, but in practice it sometimes returns
