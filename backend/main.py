@@ -9878,7 +9878,26 @@ def _pb_dashboard_defs(user) -> list:
         "ROUND(AVG(allocated), 2) AS allocated, ROUND(SUM(logged_hrs), 0) AS logged_hrs, "
         f"ROUND(SUM(total), 1) AS total, {tot_cols} FROM piv "
         f"UNION ALL SELECT 1 AS ord, resource, allocated, logged_hrs, total, {all_cols} FROM piv) "
-        "ORDER BY ord, total DESC LIMIT 1000"
+        # ORDER BY follows the chosen view. total DESC is right for a
+        # utilisation ranking, but in the Variance view it buries the biggest
+        # shortfalls at the bottom, which is the opposite of what that view is
+        # for, and the row cap then cut them off entirely.
+        f"ORDER BY ord, CASE WHEN '{{f:basis}}' = '{BASIS_VAR}' THEN total "
+        "ELSE -total END, "
+        # Stable tiebreaker. Hundreds of resources share a total (every fully
+        # allocated person scores 12.0 in the Allocation view), and with no
+        # second sort key BigQuery is free to order ties differently on every
+        # run. Against the row cap that made membership of the table a
+        # coin toss: E-553 appeared in one load and was gone in the next, with
+        # the data unchanged. It also made the grid reshuffle on refresh,
+        # which reads as the numbers moving.
+        "resource "
+        # 2000, not 1000: there are 1,076 active employees, so the old cap
+        # silently dropped 76 of them and WHICH 76 depended on the sort. In
+        # the Actual view that meant every resource with no logged hours fell
+        # off the bottom — including E-553, the person this whole thread is
+        # about.
+        "LIMIT 2000"
     )
 
     # Row click -> that person's month-by-month working days, hours, booking and
@@ -9954,7 +9973,9 @@ def _pb_dashboard_defs(user) -> list:
                           "Red is idle capacity, rose is booked past 150% \u2014 click a row "
                           "for the month-by-month working."),
              "labelKey": "resource", "valueKeys": ["total"],
-             "maxRows": 1000,
+             # Must clear the 1,076 active headcount or the SQL LIMIT above is
+             # pointless: the runner would truncate what the query returned.
+             "maxRows": 2000,
              "tableHeight": 620,
              "summaryRowPrefix": "TOTALS",
              "sql": monthly_pivot_sql,
