@@ -8149,6 +8149,12 @@ _FILTER_REGISTRY = {
     # workflow state). Stored '0'/'1'/NULL; surfaced as words in both the
     # dropdown and the WHERE so the two always agree, and NULL reads as Open
     # rather than vanishing from the list.
+    # The Delivery board's "View" selector. Options-only (WHERE expression is
+    # None) because it does not filter rows — it switches which measure the
+    # monthly grid shows, through the {f:basis} placeholder. Its values are
+    # supplied statically by the dashboard config, so the table/expression
+    # here are never probed; they exist only to keep the registry shape valid.
+    "basis": ("Employee_Data", "Resource_Name", None),
     "ticket_closed_status": ("Timesheet_Data",
                              "IF(SAFE_CAST(TICKET_CLOSED_STATUS AS INT64) = 1, 'Closed', 'Open')",
                              "IF(SAFE_CAST(TICKET_CLOSED_STATUS AS INT64) = 1, 'Closed', 'Open')"),
@@ -8606,6 +8612,13 @@ def _dashboard_run_impl(body: dict, user: dict, emit=None):
         if (field.lower() in _FILTER_OPTIONS_ONLY
                 and f"{{f:{field.lower()}}}" not in _config_json_lower):
             return (field, [])
+        # A filter may ship its own fixed values instead of being probed from a
+        # column. Needed for selectors that choose a MEASURE rather than filter
+        # rows (the Delivery "View" switch) — there is no table to read
+        # "Allocation (booked)" out of.
+        static = f.get("options") if isinstance(f, dict) else None
+        if static:
+            return (field, [str(v) for v in static])
         vals = None
         reg = _FILTER_REGISTRY.get(field.lower())
         if reg:
@@ -9688,6 +9701,13 @@ def _pb_dashboard_defs(user) -> list:
         # alloc_frac keeps the booking visible for every month.
         "COALESCE(am.frac, 0) AS alloc_frac, "
         "COALESCE(a.hours, 0) AS logged_hours, "
+        # Logged hours over capacity, for every month. `util` below blends
+        # actual and forecast by switching basis at the current week, which is
+        # exactly what the business asked us to stop doing: "even for past
+        # months, allocations should not reflect actuals ... otherwise we will
+        # lose the ability to track the variance between the two."
+        # actual_util keeps the measured side separable from the booked side.
+        "SAFE_DIVIDE(COALESCE(a.hours, 0) / 8, NULLIF(c.wdays, 0)) AS actual_util, "
         "SAFE_DIVIDE(COALESCE(a.hours, 0) / 8 + COALESCE(am.frac, 0) * c.plandays, "
         "NULLIF(c.wdays, 0)) AS util "
         "FROM emp e CROSS JOIN mcap c "
@@ -9805,7 +9825,36 @@ def _pb_dashboard_defs(user) -> list:
         f"FROM pjt LEFT JOIN {PM} pm ON CAST(pm.Project_Code AS STRING) = pjt.pcode "
         "ORDER BY pjt.actual_hours DESC LIMIT 300"
     )
-    piv_cols = ", ".join(f"ROUND(SUM(IF(m = {i + 1}, util, 0)), 1) AS {mo}"
+    # ONE grid, four readings of it. Allocation and actuals now sit in the
+    # same dashboard and the same table, switched by the "View" dropdown
+    # rather than living on separate sheets. No selection falls through to
+    # ELSE, so the default is the utilisation figure the board always showed.
+    BASIS_UTIL  = "Utilisation (actual + forecast)"
+    BASIS_ACT   = "Actual (logged hours)"
+    BASIS_ALLOC = "Allocation (booked)"
+    BASIS_VAR   = "Variance (actual - allocation)"
+    # Variance is only a real number for a month that has FULLY happened.
+    # Computed blind it reads -1.0 for every future month for every resource,
+    # because no hours exist yet, which makes the whole company look like it
+    # is massively under-delivering. The current month is excluded for the
+    # same reason in miniature: `act` only counts hours up to last Monday, so
+    # part of a month measured against a whole month of allocation is not a
+    # variance, it is an artefact. A past year has no incomplete month, hence
+    # the year test rather than a bare `m < current month`, which would have
+    # wrongly blanked December on every historical year.
+    basis_expr = ("CASE '{f:basis}' "
+                  f"WHEN '{BASIS_ACT}' THEN actual_util "
+                  f"WHEN '{BASIS_ALLOC}' THEN alloc_frac "
+                  f"WHEN '{BASIS_VAR}' THEN IF("
+                  "(SELECT y FROM yr) < EXTRACT(YEAR FROM CURRENT_DATE()) "
+                  "OR m < EXTRACT(MONTH FROM CURRENT_DATE()), "
+                  "actual_util - alloc_frac, NULL) "
+                  "ELSE util END")
+    # NULL, not 0, for the months this column is not about: every resource has
+    # exactly one row per month (emp CROSS JOIN mcap), so SUM here passes the
+    # single value through, and a NULL variance survives as a blank cell
+    # rather than being flattened to a misleading 0.0.
+    piv_cols = ", ".join(f"ROUND(SUM(IF(m = {i + 1}, {basis_expr}, NULL)), 1) AS {mo}"
                          for i, mo in enumerate(MONTHS))
     tot_cols = ", ".join(f"ROUND(SUM({mo}), 1) AS {mo}" for mo in MONTHS)
     all_cols = ", ".join(MONTHS)
@@ -9823,7 +9872,7 @@ def _pb_dashboard_defs(user) -> list:
         dw + f", piv AS (SELECT {resource_expr} AS resource, "
         "ROUND(AVG(alloc_frac), 2) AS allocated, "
         "ROUND(SUM(logged_hours), 0) AS logged_hrs, "
-        f"ROUND(SUM(util), 1) AS total, {piv_cols} FROM val GROUP BY resource) "
+        f"ROUND(SUM({basis_expr}), 1) AS total, {piv_cols} FROM val GROUP BY resource) "
         f"SELECT resource, allocated, logged_hrs, total, {all_cols} FROM ("
         "SELECT 0 AS ord, 'TOTALS — all resources' AS resource, "
         "ROUND(AVG(allocated), 2) AS allocated, ROUND(SUM(logged_hrs), 0) AS logged_hrs, "
@@ -9982,7 +10031,13 @@ def _pb_dashboard_defs(user) -> list:
         # timesheet side (TICKET_PROJECT_LABEL) without narrowing the allocation
         # side (project_id is a code, not the same label), so every blended cell
         # would silently mix one project's actuals with every project's plan.
-        "filters": ([{"field": "year", "label": "Year"}]
+        # "View" is not a row filter. It chooses WHICH MEASURE the monthly grid
+        # renders, so allocation and actuals sit in one dashboard instead of
+        # one of them living on a separate sheet. Listed first because it
+        # changes how every number in the grid reads.
+        "filters": ([{"field": "basis", "label": "View",
+                      "options": [BASIS_UTIL, BASIS_ACT, BASIS_ALLOC, BASIS_VAR]},
+                     {"field": "year", "label": "Year"}]
                     + ([] if scoped else [{"field": "department", "label": "Department"}])
                     + [{"field": "resource_name", "label": "Resource"},
                        {"field": "competency", "label": "Competency"},
