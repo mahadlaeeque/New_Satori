@@ -9907,6 +9907,18 @@ def _pb_dashboard_defs(user) -> list:
         "MAX(c.wdays) AS working_days, MAX(c.wdays) * 8 AS capacity_hours, "
         "ROUND(SUM(COALESCE(a.hours, 0)), 1) AS hours_logged, "
         "ROUND(AVG(COALESCE(am.frac, 0)) * 100, 0) AS allocation_pct, "
+        # Both sides of the comparison, per month, in the drill-down too — not
+        # just the blended utilisation. Someone opening a row is asking "what
+        # was booked vs what was delivered", which is the whole point of the
+        # View selector on the grid above.
+        "ROUND(SUM(SAFE_DIVIDE(COALESCE(a.hours, 0) / 8, NULLIF(c.wdays, 0))), 2) AS actual_util, "
+        # Same guard as the grid: a month that has not finished has no variance,
+        # only missing hours. Showing -1.0 here while the grid shows a blank
+        # for the same month would just move the confusion rather than fix it.
+        "IF((SELECT y FROM yr) < EXTRACT(YEAR FROM CURRENT_DATE()) "
+        "OR c.m < EXTRACT(MONTH FROM CURRENT_DATE()), "
+        "ROUND(SUM(SAFE_DIVIDE(COALESCE(a.hours, 0) / 8, NULLIF(c.wdays, 0))) "
+        "- AVG(COALESCE(am.frac, 0)), 2), NULL) AS variance, "
         "ROUND(SUM(SAFE_DIVIDE(COALESCE(a.hours, 0) / 8 + COALESCE(am.frac, 0) * c.plandays, "
         "NULLIF(c.wdays, 0))), 2) AS utilisation "
         "FROM emp e CROSS JOIN mcap c "
@@ -9966,10 +9978,13 @@ def _pb_dashboard_defs(user) -> list:
                          "FROM val GROUP BY month, mno ORDER BY mno LIMIT 12"},
             {"id": "pb_dl_monthly", "type": "table", "span": "full",
              "title": "Monthly Utilisation by Resource",
-             "subtitle": ("1.0 = fully utilised. Elapsed months count hours actually logged; "
-                          "months ahead count the allocation book \u2014 so a resource who is "
-                          "allocated but files no timesheet reads 0.0 for every past month. "
-                          "The Allocated and Hours Logged columns show which is which. "
+             "subtitle": ("1.0 = fully utilised. Use the View selector above to read the "
+                          "grid as logged hours, as the allocation book, or as the variance "
+                          "between them; the default blends the two, counting logged hours "
+                          "for elapsed months and the allocation book for months ahead. "
+                          "Allocated and Hours Logged stay fixed whichever view is chosen, so "
+                          "someone who is booked but files no timesheet is visible rather than "
+                          "reading as idle. Variance is blank for any month not yet complete. "
                           "Red is idle capacity, rose is booked past 150% \u2014 click a row "
                           "for the month-by-month working."),
              "labelKey": "resource", "valueKeys": ["total"],
@@ -9986,7 +10001,8 @@ def _pb_dashboard_defs(user) -> list:
                   ("logged_hrs", "Hours Logged"), ("total", "Totals"),
                   ("month_no", "#"), ("month", "Month"), ("working_days", "Working Days"),
                   ("capacity_hours", "Capacity (hrs)"), ("hours_logged", "Hours Logged"),
-                  ("allocation_pct", "Allocation %"), ("utilisation", "Utilisation")]
+                  ("allocation_pct", "Allocation %"), ("actual_util", "Actual"),
+                  ("variance", "Variance"), ("utilisation", "Utilisation")]
                  + list(zip(MONTHS, MONTH_LABELS))),
              "columnRules": dict(
                  [(mo, {"kind": "ratio", "warn": 0.7, "good": 0.95, "over": 1.5}) for mo in MONTHS]
