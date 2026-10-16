@@ -7220,7 +7220,16 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
     // tooltip is the better answer. Horizontal bars have a whole row each,
     // so they tolerate roughly twice as many.
     const barCount = (chartData || []).length * Math.max(1, valueKeys.length);
-    const showBarValues = barCount <= (isHorizontal ? 60 : 26);
+    // Labels sit INSIDE the bar, rotated upright on vertical charts. Above
+    // the bar they collided with each other the moment two neighbours had
+    // similar heights — 30 competencies produced one illegible smear of
+    // numbers. Inside, each label is bounded by its own bar and cannot
+    // overlap the next one.
+    const showBarValues = barCount <= (isHorizontal ? 60 : 40);
+    // A bar has to be wide enough to carry ~10px upright text. Below that we
+    // keep the bar and drop the label rather than print something unreadable.
+    const vertBarSize = barCount > 24 ? 16 : barCount > 14 ? 24 : 34;
+    const canFitInside = isHorizontal || vertBarSize >= 16;
     // Short form on the bar (13.5K), full precision in the tooltip. A value
     // of 0 is left blank rather than printed — a column of zeroes above
     // empty bars is clutter, and the empty bar already says it.
@@ -7234,7 +7243,7 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
       <ChartCard key={idx} title={title}>
         <ResponsiveContainer width="100%" height={isHorizontal ? horizontalHeight : 300}>
           <BarChart data={plotData} layout={isHorizontal ? "vertical" : "horizontal"} margin={{ top: 8, right: 20, left: 8, bottom: 8 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--viz-grid)" />
             {isHorizontal ? (
               <>
                 <YAxis
@@ -7267,18 +7276,28 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
                 dataKey={vk}
                 name={seriesName(vk)}
                 fill={valueKeys.length === 1 ? COLORS.chartSingle : colors[vi % colors.length]}
+                barSize={isHorizontal ? undefined : vertBarSize}
                 radius={[4, 4, 0, 0]}
                 onClick={handleBarClick}
                 style={{ cursor: "pointer" }}
               >
-                {showBarValues && (
+                {showBarValues && canFitInside && (
                   <LabelList
                     dataKey={vk}
-                    position={isHorizontal ? "insideRight" : "top"}
+                    position={isHorizontal ? "insideRight" : "insideTop"}
+                    // Upright inside a vertical column: a horizontal number
+                    // cannot fit across a 16-34px bar, a rotated one always
+                    // fits however many bars there are.
+                    angle={isHorizontal ? 0 : -90}
+                    offset={isHorizontal ? 8 : 14}
                     formatter={barLabelFmt}
                     style={{
-                      fill: isHorizontal ? "#FFFFFF" : "var(--c-text-secondary)",
-                      fontSize: 10.5, fontWeight: 600, pointerEvents: "none",
+                      fill: "#FFFFFF", fontSize: 10, fontWeight: 700,
+                      pointerEvents: "none",
+                      // The white sits on the bar's own fill, which is mid-tone
+                      // green; the shadow keeps it readable on the lighter
+                      // slots too without needing a per-slot text colour.
+                      textShadow: "0 1px 2px rgba(0,0,0,0.45)",
                     }}
                   />
                 )}
@@ -12884,16 +12903,20 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
            that read COLORS.surface etc. resolve to var(--c-…) so they pick
            up the active theme automatically. */
         :root, html[data-satori-theme="light"] {
-          --c-primary:         #333333;
-          --c-primary-light:   #676767;
-          --c-primary-dark:    #1a1a1a;
+          /* KEEP IN SYNC with the tokens map in the theme effect below.
+             That map is what actually applies after login; this block only
+             covers the login page. They drifted once and every chart went
+             black, because --viz-* existed here and nowhere else. */
+          --c-primary:         #2F5A1E;
+          --c-primary-light:   #4C8C1F;
+          --c-primary-dark:    #1F3D14;
           --c-surface:         #FFFFFF;
-          --c-surface-alt:     #F8FAF5;
-          --c-border:          #E6E7E8;
+          --c-surface-alt:     #F1F4EC;
+          --c-border:          #DCE1D4;
           --c-text-primary:    #333333;
           --c-text-secondary:  #676767;
-          --c-text-muted:      #B3B2B3;
-          --c-page-bg:         #F7F9FA;
+          --c-text-muted:      #A8ADA2;
+          --c-page-bg:         #F4F6F0;
           --c-input-bg:        #FFFFFF;
           /* Semantic status tints — light pastels in light mode. JSX uses
              these via var(--sem-…) so dark mode swaps them for translucent
@@ -12910,9 +12933,9 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
              charcoal→green; in dark, --c-primary flips to near-white so that
              mix washes out — the dark overrides keep the sweep deep green so
              white text/icons on it always hold contrast. */
-          --g-brand:      linear-gradient(135deg, #333333, #8AC441);
-          --g-brand-deep: linear-gradient(135deg, #333333, #68933F);
-          --c-disabled:   #E2E8F0;
+          --g-brand:      linear-gradient(135deg, #2F5A1E, #8AC441);
+          --g-brand-deep: linear-gradient(135deg, #1F3D14, #5E9E28);
+          --c-disabled:   #E3E7DC;
           /* Vector basemap (WorldMap.jsx). Muted on purpose — the punch points
              carry the meaning, the continents are only there for orientation. */
           --map-ocean: #EDF2EA;  --map-land: #DCE7DA;  --map-coast: #AFC3B6;  --map-grid: #D4DECB;
@@ -12928,7 +12951,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           --viz-1: #4C8C1F;  --viz-2: #2A78D6;  --viz-3: #EB6834;
           --viz-4: #6250D6;  --viz-5: #E34948;
           /* Single-series bars use one brand colour, never one hue per bar. */
-          --viz-single: #4C8C1F;
+          --viz-single: #4C8C1F;  --viz-grid: #E2E7DA;
         }
         html[data-satori-theme="dark"] {
           /* Dark mode was navy. The logo has no blue in it anywhere, so the
@@ -12955,8 +12978,8 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           --sem-rose-bg:     rgba(244,63,94,0.17);   --sem-rose-fg:    #FDA4AF;  --sem-rose-border: rgba(244,63,94,0.45);
           --sem-amber2-bg:   rgba(245,158,11,0.30);  --sem-amber2-fg:  #FDE68A;
           --sem-amber3-bg:   rgba(245,158,11,0.10);  --sem-amber3-fg:  #FCD34D;
-          --g-brand:      linear-gradient(135deg, #5E8B33, #8AC441);
-          --g-brand-deep: linear-gradient(135deg, #46682A, #74A93A);
+          --g-brand:      linear-gradient(135deg, #4C8C1F, #8AC441);
+          --g-brand-deep: linear-gradient(135deg, #2F5A1E, #6FB32C);
           --c-disabled:   #2A2E26;
           --map-ocean: #121510;  --map-land: #262B20;  --map-coast: #434B38;  --map-grid: #1E2219;
           /* Chart series, dark. The same five hues re-stepped for the dark
@@ -12964,7 +12987,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
              as its own set. */
           --viz-1: #5FA831;  --viz-2: #3987E5;  --viz-3: #D95926;
           --viz-4: #9085E9;  --viz-5: #E66767;
-          --viz-single: #5FA831;
+          --viz-single: #5FA831;  --viz-grid: rgba(190,200,175,0.14);
         }
         html[data-satori-theme="dark"] body { background: var(--c-page-bg); color: var(--c-text-primary); }
 
@@ -13915,17 +13938,17 @@ export default function App() {
     // any element using it silently loses its styling post-login (that's how
     // the weekly-allocation bars and status pills once vanished).
     const tokens = darkMode ? {
-      "--c-primary":         "#F1F5F9",
-      "--c-primary-light":   "#CBD5E1",
+      "--c-primary":         "#EFF2E9",
+      "--c-primary-light":   "#CBD0C2",
       "--c-primary-dark":    "#FFFFFF",
-      "--c-surface":         "#151C2C",
-      "--c-surface-alt":     "#0E1422",
-      "--c-border":          "rgba(148,163,184,0.16)",
-      "--c-text-primary":    "#F2F6FC",
-      "--c-text-secondary":  "#C5D0E2",
-      "--c-text-muted":      "#93A1B8",
-      "--c-page-bg":         "#0A0F1B",
-      "--c-input-bg":        "#101727",
+      "--c-surface":         "#1A1D18",
+      "--c-surface-alt":     "#141711",
+      "--c-border":          "rgba(190,200,175,0.16)",
+      "--c-text-primary":    "#F2F4EE",
+      "--c-text-secondary":  "#CBD0C2",
+      "--c-text-muted":      "#9DA396",
+      "--c-page-bg":         "#0F110D",
+      "--c-input-bg":        "#171A15",
       "--sem-danger-bg":     "rgba(239,68,68,0.16)",  "--sem-danger-fg": "#FCA5A5",
       "--sem-warn-bg":       "rgba(245,158,11,0.15)", "--sem-warn-fg":   "#FCD34D", "--sem-warn-border": "rgba(245,158,11,0.45)",
       "--sem-ok-bg":         "rgba(34,197,94,0.15)",  "--sem-ok-fg":     "#6EE7A0", "--sem-ok-border":   "rgba(34,197,94,0.45)",
@@ -13934,20 +13957,31 @@ export default function App() {
       "--sem-rose-bg":       "rgba(244,63,94,0.17)",  "--sem-rose-fg":   "#FDA4AF", "--sem-rose-border": "rgba(244,63,94,0.45)",
       "--sem-amber2-bg":     "rgba(245,158,11,0.30)", "--sem-amber2-fg": "#FDE68A",
       "--sem-amber3-bg":     "rgba(245,158,11,0.10)", "--sem-amber3-fg": "#FCD34D",
-      "--g-brand":           "linear-gradient(135deg, #5E8B33, #8AC441)",
-      "--g-brand-deep":      "linear-gradient(135deg, #46682A, #74A93A)",
-      "--c-disabled":        "#243049",
+      "--g-brand":           "linear-gradient(135deg, #4C8C1F, #8AC441)",
+      "--g-brand-deep":      "linear-gradient(135deg, #2F5A1E, #6FB32C)",
+      "--c-disabled":        "#2A2E26",
+      // Chart series, dark. Re-stepped for the dark ground, validated as
+      // their own set rather than reused from light.
+      "--viz-1": "#5FA831", "--viz-2": "#3987E5", "--viz-3": "#D95926",
+      "--viz-4": "#9085E9", "--viz-5": "#E66767", "--viz-single": "#5FA831",
+      "--viz-grid": "rgba(190,200,175,0.14)",
     } : {
-      "--c-primary":         "#333333",
-      "--c-primary-light":   "#676767",
-      "--c-primary-dark":    "#1a1a1a",
+      // Primary is the logo's dark green, not charcoal. It paints the
+      // primary button and the active nav item, so this is where "more dark
+      // green" actually shows. Body text stays grey for readability.
+      "--c-primary":         "#2F5A1E",
+      "--c-primary-light":   "#4C8C1F",
+      "--c-primary-dark":    "#1F3D14",
       "--c-surface":         "#FFFFFF",
-      "--c-surface-alt":     "#F8FAF5",
-      "--c-border":          "#E6E7E8",
+      // The page ground and panel alt are a light grey-green rather than a
+      // blue-grey, picking up the pale blades of the mark. #F7F9FA read as
+      // cold blue next to the green chrome.
+      "--c-surface-alt":     "#F1F4EC",
+      "--c-border":          "#DCE1D4",
       "--c-text-primary":    "#333333",
       "--c-text-secondary":  "#676767",
-      "--c-text-muted":      "#B3B2B3",
-      "--c-page-bg":         "#F7F9FA",
+      "--c-text-muted":      "#A8ADA2",
+      "--c-page-bg":         "#F4F6F0",
       "--c-input-bg":        "#FFFFFF",
       "--sem-danger-bg":     "#FEE2E2", "--sem-danger-fg": "#B91C1C",
       "--sem-warn-bg":       "#FEF3C7", "--sem-warn-fg":   "#B45309", "--sem-warn-border": "#FCD34D",
@@ -13957,15 +13991,21 @@ export default function App() {
       "--sem-rose-bg":       "#FFE4E6", "--sem-rose-fg":   "#9F1239", "--sem-rose-border": "#FDA4AF",
       "--sem-amber2-bg":     "#FDE68A", "--sem-amber2-fg": "#92400E",
       "--sem-amber3-bg":     "#FEF9C3", "--sem-amber3-fg": "#854D0E",
-      "--g-brand":           "linear-gradient(135deg, #333333, #8AC441)",
-      "--g-brand-deep":      "linear-gradient(135deg, #333333, #68933F)",
-      "--c-disabled":        "#E2E8F0",
+      // Dark green into the bright blade green — the mark's own sweep.
+      "--g-brand":           "linear-gradient(135deg, #2F5A1E, #8AC441)",
+      "--g-brand-deep":      "linear-gradient(135deg, #1F3D14, #5E9E28)",
+      "--c-disabled":        "#E3E7DC",
+      // Chart series, light. Validated as a set: lightness band, chroma
+      // floor, colour-blind and normal-vision separation, 3:1 contrast.
+      "--viz-1": "#4C8C1F", "--viz-2": "#2A78D6", "--viz-3": "#EB6834",
+      "--viz-4": "#6250D6", "--viz-5": "#E34948", "--viz-single": "#4C8C1F",
+      "--viz-grid": "#E2E7DA",
     };
     for (const [k, v] of Object.entries(tokens)) root.style.setProperty(k, v);
     // Final fallback: directly mutate the body background + color so the
     // page never gets stuck on white when dark mode is on.
-    document.body.style.background = darkMode ? "#0A0F1B" : "";
-    document.body.style.color      = darkMode ? "#F2F6FC" : "";
+    document.body.style.background = darkMode ? "#0F110D" : "";
+    document.body.style.color      = darkMode ? "#F2F4EE" : "";
   }, [darkMode]);
   // Shown on the login page when redirected due to token expiry
   const [sessionExpiredMsg, setSessionExpiredMsg] = useState("");

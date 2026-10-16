@@ -2691,14 +2691,47 @@ def _get_user_dept_scope(user_id: int):
         return None
 
 
+_genai_client = None
+_genai_lock = threading.Lock()
+
+
 def get_genai_client():
-    """Get a genai client. Prefers AI Studio (API key) since we already have one
-    in Secret Manager and Vertex AI would require an extra IAM role on the runtime SA."""
-    if GEMINI_API_KEY:
-        return genai.Client(api_key=GEMINI_API_KEY)
-    if USE_VERTEX and VERTEX_PROJECT:
-        return genai.Client(vertexai=True, project=VERTEX_PROJECT, location=VERTEX_LOCATION)
-    raise HTTPException(status_code=500, detail="No AI backend configured. Set GEMINI_API_KEY or USE_VERTEX_AI=1 + VERTEX_PROJECT.")
+    """One shared genai client for the whole process.
+
+    This used to build a NEW genai.Client on every call, at 15 call sites.
+    Each one wraps an httpx transport, and when a discarded instance is
+    garbage-collected it closes that transport — which the surviving clients
+    are still holding. The next request then fails with
+
+        Cannot send a request, as the client has been closed.
+
+    which is exactly what the AI Insights panel was showing. It is the same
+    discarded-client problem already fixed for BigQuery in
+    bigquery_client.get_bq_client, and the comment there names this module as
+    where it still bites. Double-checked locking, same as that one: the
+    dashboard endpoint fans out across a thread pool, so two threads can
+    arrive here together and one client would be thrown away — recreating
+    the bug the singleton exists to prevent.
+
+    Prefers AI Studio (API key) since we already have one in Secret Manager
+    and Vertex AI would require an extra IAM role on the runtime SA.
+    """
+    global _genai_client
+    if _genai_client is not None:
+        return _genai_client
+    with _genai_lock:
+        if _genai_client is not None:
+            return _genai_client
+        if GEMINI_API_KEY:
+            _genai_client = genai.Client(api_key=GEMINI_API_KEY)
+        elif USE_VERTEX and VERTEX_PROJECT:
+            _genai_client = genai.Client(vertexai=True, project=VERTEX_PROJECT,
+                                         location=VERTEX_LOCATION)
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="No AI backend configured. Set GEMINI_API_KEY or USE_VERTEX_AI=1 + VERTEX_PROJECT.")
+        return _genai_client
 
 
 def _build_date_context():
@@ -9260,8 +9293,11 @@ def _pb_dashboard_defs(user) -> list:
     def _punch_source(col: str) -> str:
         return (f"INITCAP(REPLACE(COALESCE(NULLIF(TRIM({col}), ''), 'Unspecified'), '_', ' '))")
 
-    punch_in_src  = _punch_source("a.checkin_remarks")
-    punch_out_src = _punch_source("a.checkout_remarks")
+    # Check-in only. The check-out remark carries the same three categories
+    # and is blank on 62.5% of rows — including every row of the current day,
+    # because nobody has checked out yet — so a second column earned nothing
+    # but width on an already wide register.
+    punch_in_src = _punch_source("a.checkin_remarks")
     # Office vs an approved remote day. Blank means neither was requested,
     # which is the ordinary on-site case.
     work_mode_expr = ("IF(COALESCE(TRIM(a.remote_type_name), '') = '', 'Office', "
@@ -9339,11 +9375,11 @@ def _pb_dashboard_defs(user) -> list:
         f"{_pb_avg_duration_sql()} AS duration, "
         "a.attendance_status_text AS attendance_status, "
         f"{punch_in_expr} AS punch_in_location, {punch_out_expr} AS punch_out_location, "
-        f"{punch_in_src} AS check_in_source, {work_mode_expr} AS work_mode, "
+        f"{punch_in_src} AS check_in_method, {work_mode_expr} AS work_mode, "
         f"{checkin_geo} AS check_in_coordinates "
         f"FROM {A} a {aj} WHERE {ab} AND {aw} AND a.employee_name = '{{label}}' {{where}} "
         "GROUP BY date, check_in_time, check_out_time, attendance_status, "
-        "punch_in_location, punch_out_location, check_in_source, work_mode, "
+        "punch_in_location, punch_out_location, check_in_method, work_mode, "
         "check_in_coordinates ORDER BY date DESC LIMIT 200"
     )
 
@@ -9517,8 +9553,7 @@ def _pb_dashboard_defs(user) -> list:
                     f"COALESCE(NULLIF(TRIM(a.leave_type_name), ''), '') AS leave_type, "
                     f"{punch_in_expr} AS punch_in_location, "
                     f"{punch_out_expr} AS punch_out_location, "
-                    f"{punch_in_src} AS check_in_source, "
-                    f"{punch_out_src} AS check_out_source, "
+                    f"{punch_in_src} AS check_in_method, "
                     f"{work_mode_expr} AS work_mode, "
                     f"{checkin_geo} AS check_in_coordinates, "
                     f"{checkout_geo} AS check_out_coordinates "
@@ -9533,8 +9568,7 @@ def _pb_dashboard_defs(user) -> list:
                               "leave_type": "Leave Type",
                               "punch_in_location": "Punch-In Location",
                               "punch_out_location": "Punch-Out Location", "duration": "Duration",
-                              "check_in_source": "Check-In Source",
-                              "check_out_source": "Check-Out Source",
+                              "check_in_method": "Check-In Method",
                               "work_mode": "Work Mode",
                               "check_in_coordinates": "Check-In Coordinates",
                               "check_out_coordinates": "Check-Out Coordinates"},
