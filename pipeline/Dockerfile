@@ -3,5 +3,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY drive_to_bq.py .
+COPY geocode_cells.py .
 # Cloud Run Job entrypoint
 ENTRYPOINT ["python", "drive_to_bq.py"]

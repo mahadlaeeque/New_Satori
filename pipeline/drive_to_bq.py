@@ -31,6 +31,8 @@ from google.cloud import bigquery
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
+import geocode_cells
+
 PROJECT = os.environ.get("VERTEX_PROJECT", "capability-agent-prod")
 DATASET = os.environ.get("VERTEX_DATASET", "Satori_Project")
 FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "12emVFtakumridd2QSjNm6W4Vd9hIFJ0K")
@@ -331,6 +333,14 @@ def main():
         except Exception as e:
             errors.append("Allocation_Data view")
             _log(f"ERROR rebuilding Allocation_Data view: {e}\n{traceback.format_exc()}")
+
+    # Area names for the punch map / registers. Runs every sync, resolves
+    # only cells Geo_Cells does not have yet, and is never fatal: the
+    # dashboards fall back to coordinates alone while a cell is pending.
+    try:
+        geocode_cells.resolve_new_cells(bq, PROJECT, DATASET)
+    except Exception as e:
+        _log(f"WARNING: geocode step failed (dashboards keep coordinates only): {e}\n{traceback.format_exc()}")
 
     if errors:
         _log(f"FAILED for: {errors}")
