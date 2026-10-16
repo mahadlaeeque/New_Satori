@@ -9248,6 +9248,37 @@ def _pb_dashboard_defs(user) -> list:
     punch_in_expr = _pb_permitted_sql("a.checkin_is_permitted_location")
     punch_out_expr = _pb_permitted_sql("a.checkout_is_permitted_location")
 
+    # ── How the punch was captured, and where ──────────────────────────────
+    # Attendance_Data carries NO device brand, device login type or IP
+    # address column, so those three FR-A13 fields still cannot be shown
+    # without a change to the attendance export. What the feed does carry is
+    # the capture remark, which is the nearest honest answer to "how did this
+    # person log in": the distinct values are Office check-in, Check-In,
+    # check in attendance, Auto check-in by system and
+    # missing_attendance_approved. It is passed through tidied rather than
+    # mapped onto invented device names.
+    def _punch_source(col: str) -> str:
+        return (f"INITCAP(REPLACE(COALESCE(NULLIF(TRIM({col}), ''), 'Unspecified'), '_', ' '))")
+
+    punch_in_src  = _punch_source("a.checkin_remarks")
+    punch_out_src = _punch_source("a.checkout_remarks")
+    # Office vs an approved remote day. Blank means neither was requested,
+    # which is the ordinary on-site case.
+    work_mode_expr = ("IF(COALESCE(TRIM(a.remote_type_name), '') = '', 'Office', "
+                      "TRIM(a.remote_type_name))")
+
+    # Coordinates, so "Not Permitted" can be checked rather than just trusted.
+    # 42% of rows carry a real fix (212,758 of 510,514); the rest punch
+    # without location and read blank instead of as 0, 0 off West Africa.
+    def _coords(latc: str, lonc: str) -> str:
+        return (f"IF(SAFE_CAST({latc} AS FLOAT64) IS NULL "
+                f"OR SAFE_CAST({latc} AS FLOAT64) = 0, '', "
+                f"CONCAT(CAST(ROUND(SAFE_CAST({latc} AS FLOAT64), 4) AS STRING), ', ', "
+                f"CAST(ROUND(SAFE_CAST({lonc} AS FLOAT64), 4) AS STRING)))")
+
+    checkin_geo  = _coords("a.checkin_latitude", "a.checkin_longitude")
+    checkout_geo = _coords("a.checkout_latitude", "a.checkout_longitude")
+
     def _geo_layer(kind: str, latc: str, lonc: str, permc: str) -> str:
         """One point layer for the map — punches rolled up to a ~1 km cell.
 
@@ -9307,10 +9338,13 @@ def _pb_dashboard_defs(user) -> list:
         f"FORMAT_TIME('%I:%M %p', {_PB_COUT}) AS check_out_time, "
         f"{_pb_avg_duration_sql()} AS duration, "
         "a.attendance_status_text AS attendance_status, "
-        f"{punch_in_expr} AS punch_in_location, {punch_out_expr} AS punch_out_location "
+        f"{punch_in_expr} AS punch_in_location, {punch_out_expr} AS punch_out_location, "
+        f"{punch_in_src} AS check_in_source, {work_mode_expr} AS work_mode, "
+        f"{checkin_geo} AS check_in_coordinates "
         f"FROM {A} a {aj} WHERE {ab} AND {aw} AND a.employee_name = '{{label}}' {{where}} "
         "GROUP BY date, check_in_time, check_out_time, attendance_status, "
-        "punch_in_location, punch_out_location ORDER BY date DESC LIMIT 200"
+        "punch_in_location, punch_out_location, check_in_source, work_mode, "
+        "check_in_coordinates ORDER BY date DESC LIMIT 200"
     )
 
     # ── FR-A16: Department Report ───────────────────────────────────────
@@ -9482,7 +9516,12 @@ def _pb_dashboard_defs(user) -> list:
                     f"a.attendance_status_text AS attendance_status, "
                     f"COALESCE(NULLIF(TRIM(a.leave_type_name), ''), '') AS leave_type, "
                     f"{punch_in_expr} AS punch_in_location, "
-                    f"{punch_out_expr} AS punch_out_location "
+                    f"{punch_out_expr} AS punch_out_location, "
+                    f"{punch_in_src} AS check_in_source, "
+                    f"{punch_out_src} AS check_out_source, "
+                    f"{work_mode_expr} AS work_mode, "
+                    f"{checkin_geo} AS check_in_coordinates, "
+                    f"{checkout_geo} AS check_out_coordinates "
                     f"FROM {A} a {aj} WHERE {ab} AND {aw} {{where}} "
                     f"ORDER BY a.attendance_date DESC, resource_name LIMIT 400",
              "drillSql": person_drill_sql,
@@ -9493,7 +9532,12 @@ def _pb_dashboard_defs(user) -> list:
                               "check_out_time": "Check Out Time", "attendance_status": "AttendanceStatus",
                               "leave_type": "Leave Type",
                               "punch_in_location": "Punch-In Location",
-                              "punch_out_location": "Punch-Out Location", "duration": "Duration"},
+                              "punch_out_location": "Punch-Out Location", "duration": "Duration",
+                              "check_in_source": "Check-In Source",
+                              "check_out_source": "Check-Out Source",
+                              "work_mode": "Work Mode",
+                              "check_in_coordinates": "Check-In Coordinates",
+                              "check_out_coordinates": "Check-Out Coordinates"},
              "columnRules": {"check_in_time": {"kind": "clockEarly", "good": "09:00", "warn": "09:30"},
                              "check_out_time": {"kind": "clockLate", "good": "18:00", "warn": "17:30"},
                              "attendance_status": {"kind": "status"},
