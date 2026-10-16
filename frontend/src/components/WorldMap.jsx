@@ -464,6 +464,13 @@ export default function WorldMap({
               <span style={{ width: 8, height: 8, borderRadius: "50%", background: colorOf(hover.point.layer) }} />
               <span style={{ fontSize: 12, fontWeight: 700, color: C.textPrimary }}>{hover.point.layer}</span>
             </div>
+            {/* Area name from Geo_Cells, when the sync job has resolved this
+                cell; the coordinates stay underneath either way. */}
+            {hover.point.row?.area ? (
+              <div style={{ fontSize: 12, fontWeight: 600, color: C.textPrimary, marginBottom: 2 }}>
+                {hover.point.row.area}
+              </div>
+            ) : null}
             <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 6 }}>
               {hover.point.lat.toFixed(2)}°, {hover.point.lon.toFixed(2)}°
             </div>

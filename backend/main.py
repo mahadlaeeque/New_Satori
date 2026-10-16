@@ -9182,6 +9182,30 @@ def _pb_scope(user):
     return dept_scope, clause, label
 
 
+_GEO_CELLS_STATE = {"ok": None, "at": 0.0}
+
+
+def _pb_geo_cells_available() -> bool:
+    """True once the sync job has created Satori_Project.Geo_Cells (the
+    reverse-geocoded ~1 km punch cells — see pipeline/geocode_cells.py).
+    Until then the attendance panels print coordinates alone, exactly as
+    before, rather than failing on a missing table. Re-checked every ten
+    minutes so the names appear without a restart once the job has run."""
+    import time as _tm
+    now = _tm.time()
+    st = _GEO_CELLS_STATE
+    if st["ok"] is not None and now - st["at"] < 600:
+        return st["ok"]
+    try:
+        from bigquery_client import get_bq_client
+        get_bq_client().get_table(f"{BQ_FULL}.Geo_Cells")
+        ok = True
+    except Exception:
+        ok = False
+    st["ok"], st["at"] = ok, now
+    return ok
+
+
 def _pb_dashboard_defs(user) -> list:
     """Build the prebuilt dashboard configs for this user. Cheap (string
     building only) — no BQ or LLM calls happen here."""
@@ -9315,7 +9339,40 @@ def _pb_dashboard_defs(user) -> list:
     checkin_geo  = _coords("a.checkin_latitude", "a.checkin_longitude")
     checkout_geo = _coords("a.checkout_latitude", "a.checkout_longitude")
 
-    def _geo_layer(kind: str, latc: str, lonc: str, permc: str) -> str:
+    # ── Area names next to the coordinates ───────────────────────────────
+    # Geo_Cells is the sync job's reverse-geocoded lookup of every ~1 km
+    # cell seen in this table (pipeline/geocode_cells.py): 31.52, 74.44 ->
+    # "Paragon City, Lahore". Joined on the same 2-decimal rounding the map
+    # uses, deduped first so a cell can never fan a punch row out. A cell
+    # the job has not reached yet reads "Area pending"; before the table
+    # exists at all every join and expression below collapses to today's
+    # coordinates-only output.
+    geo_ok = _pb_geo_cells_available()
+    if geo_ok:
+        geo_cte = ("geo AS (SELECT lat2, lon2, ANY_VALUE(label) AS label "
+                   f"FROM `{BQ_FULL}.Geo_Cells` GROUP BY lat2, lon2)")
+        W = f"WITH {per_cte}, {cal_cte}, {att_emp_cte}, {geo_cte} "
+        gj_in = ("LEFT JOIN geo gi ON gi.lat2 = ROUND(SAFE_CAST(a.checkin_latitude AS FLOAT64), 2) "
+                 "AND gi.lon2 = ROUND(SAFE_CAST(a.checkin_longitude AS FLOAT64), 2)")
+        gj_out = ("LEFT JOIN geo go ON go.lat2 = ROUND(SAFE_CAST(a.checkout_latitude AS FLOAT64), 2) "
+                  "AND go.lon2 = ROUND(SAFE_CAST(a.checkout_longitude AS FLOAT64), 2)")
+        aj_geo = f"{aj} {gj_in} {gj_out}"
+
+        def _place(geo_expr: str, galias: str) -> str:
+            # "Paragon City, Lahore (31.5021, 74.4381)"; blank stays blank.
+            return (f"IF({geo_expr} = '', '', CONCAT(COALESCE({galias}.label, 'Area pending'), "
+                    f"' (', {geo_expr}, ')'))")
+        checkin_place = _place(checkin_geo, "gi")
+        checkout_place = _place(checkout_geo, "go")
+        area_in_expr, area_out_expr = "ANY_VALUE(gi.label)", "ANY_VALUE(go.label)"
+        coord_label_in, coord_label_out = "Check-In Area (Coordinates)", "Check-Out Area (Coordinates)"
+    else:
+        aj_geo = aj
+        checkin_place, checkout_place = checkin_geo, checkout_geo
+        area_in_expr = area_out_expr = "CAST(NULL AS STRING)"
+        coord_label_in, coord_label_out = "Check-In Coordinates", "Check-Out Coordinates"
+
+    def _geo_layer(kind: str, latc: str, lonc: str, permc: str, area_expr: str) -> str:
         """One point layer for the map — punches rolled up to a ~1 km cell.
 
         2 decimals, not 1: at ~11 km every site in a city merged into a single
@@ -9332,12 +9389,12 @@ def _pb_dashboard_defs(user) -> list:
             # exact expression, so a click maps back to its rows with no
             # guesswork (and no LLM round-trip).
             f"FORMAT('{kind} @ %.2f, %.2f', {lat}, {lon}) AS zone, "
-            f"{lat} AS lat, {lon} AS lon, COUNT(*) AS punches, "
+            f"{lat} AS lat, {lon} AS lon, {area_expr} AS area, COUNT(*) AS punches, "
             "COUNT(DISTINCT a.employee_name) AS people, "
             f"ROUND(100.0 * COUNTIF(SAFE_CAST(a.{permc} AS INT64) = 1) / COUNT(*), 0) AS permitted_pct "
             # Same worked-day filter as every other panel — a map whose punch
             # counts include weekends wouldn't tie back to the KPIs above it.
-            f"FROM {A} a {aj} WHERE {ab} AND {aw} "
+            f"FROM {A} a {aj_geo} WHERE {ab} AND {aw} "
             f"AND SAFE_CAST(a.{latc} AS FLOAT64) BETWEEN -85 AND 85 "
             f"AND SAFE_CAST(a.{lonc} AS FLOAT64) BETWEEN -180 AND 180 "
             f"AND NOT (SAFE_CAST(a.{latc} AS FLOAT64) = 0 AND SAFE_CAST(a.{lonc} AS FLOAT64) = 0) "
@@ -9345,9 +9402,9 @@ def _pb_dashboard_defs(user) -> list:
         )
 
     map_sql = (W + "SELECT * FROM ("
-               + _geo_layer("Check-in", "checkin_latitude", "checkin_longitude", "checkin_is_permitted_location")
+               + _geo_layer("Check-in", "checkin_latitude", "checkin_longitude", "checkin_is_permitted_location", area_in_expr)
                + " UNION ALL "
-               + _geo_layer("Check-out", "checkout_latitude", "checkout_longitude", "checkout_is_permitted_location")
+               + _geo_layer("Check-out", "checkout_latitude", "checkout_longitude", "checkout_is_permitted_location", area_out_expr)
                + ") ORDER BY punches DESC LIMIT 2000")
 
     map_drill_sql = (
@@ -9376,8 +9433,8 @@ def _pb_dashboard_defs(user) -> list:
         "a.attendance_status_text AS attendance_status, "
         f"{punch_in_expr} AS punch_in_location, {punch_out_expr} AS punch_out_location, "
         f"{punch_in_src} AS check_in_method, {work_mode_expr} AS work_mode, "
-        f"{checkin_geo} AS check_in_coordinates "
-        f"FROM {A} a {aj} WHERE {ab} AND {aw} AND a.employee_name = '{{label}}' {{where}} "
+        f"{checkin_place} AS check_in_coordinates "
+        f"FROM {A} a {aj_geo} WHERE {ab} AND {aw} AND a.employee_name = '{{label}}' {{where}} "
         "GROUP BY date, check_in_time, check_out_time, attendance_status, "
         "punch_in_location, punch_out_location, check_in_method, work_mode, "
         "check_in_coordinates ORDER BY date DESC LIMIT 200"
@@ -9555,9 +9612,9 @@ def _pb_dashboard_defs(user) -> list:
                     f"{punch_out_expr} AS punch_out_location, "
                     f"{punch_in_src} AS check_in_method, "
                     f"{work_mode_expr} AS work_mode, "
-                    f"{checkin_geo} AS check_in_coordinates, "
-                    f"{checkout_geo} AS check_out_coordinates "
-                    f"FROM {A} a {aj} WHERE {ab} AND {aw} {{where}} "
+                    f"{checkin_place} AS check_in_coordinates, "
+                    f"{checkout_place} AS check_out_coordinates "
+                    f"FROM {A} a {aj_geo} WHERE {ab} AND {aw} {{where}} "
                     f"ORDER BY a.attendance_date DESC, resource_name LIMIT 400",
              "drillSql": person_drill_sql,
              "drillTitle": "{label} — punch history",
@@ -9570,8 +9627,8 @@ def _pb_dashboard_defs(user) -> list:
                               "punch_out_location": "Punch-Out Location", "duration": "Duration",
                               "check_in_method": "Check-In Method",
                               "work_mode": "Work Mode",
-                              "check_in_coordinates": "Check-In Coordinates",
-                              "check_out_coordinates": "Check-Out Coordinates"},
+                              "check_in_coordinates": coord_label_in,
+                              "check_out_coordinates": coord_label_out},
              "columnRules": {"check_in_time": {"kind": "clockEarly", "good": "09:00", "warn": "09:30"},
                              "check_out_time": {"kind": "clockLate", "good": "18:00", "warn": "17:30"},
                              "attendance_status": {"kind": "status"},

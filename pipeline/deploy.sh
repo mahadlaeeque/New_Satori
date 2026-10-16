@@ -31,10 +31,16 @@ echo ">>> (or set the folder to 'Anyone with the link -> Viewer')"
 gcloud builds submit pipeline --tag "$IMAGE" --project="$PROJECT"
 
 # 4) Cloud Run Job
+#    Reverse geocoding of punch cells (geocode_cells.py) runs inside this job.
+#    Default provider is OpenStreetMap Nominatim (no key, throttled to 1 req/s,
+#    GEOCODE_CONTACT is the address shown in its User-Agent as its policy asks).
+#    To use Google instead add GEOCODE_PROVIDER=google,MAPS_API_KEY=<key> to the
+#    env list above (Geocoding API enabled on the project; results re-resolve
+#    every 30 days per Google's caching terms).
 gcloud run jobs deploy "$SA_NAME" \
   --image "$IMAGE" --region "$REGION" --project "$PROJECT" \
   --service-account "$SA" \
-  --set-env-vars "VERTEX_PROJECT=${PROJECT},VERTEX_DATASET=Satori_Project,DRIVE_FOLDER_ID=${FOLDER_ID}" \
+  --set-env-vars "VERTEX_PROJECT=${PROJECT},VERTEX_DATASET=Satori_Project,DRIVE_FOLDER_ID=${FOLDER_ID},GEOCODE_CONTACT=${GEOCODE_CONTACT:-satori@tmcltd.com}" \
   --max-retries 1 --task-timeout 1800s --memory 1Gi
 
 # 5) Let the SA trigger the job, then schedule it every 30 minutes
