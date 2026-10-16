@@ -27,6 +27,7 @@ const AttendancePage = lazy(() => import("./Attendance.jsx"));
 // it only loads for the dashboards that actually contain a map panel.
 const WorldMap = lazy(() => import("./components/WorldMap.jsx"));
 import DataTablePanel from "./components/DataTable.jsx";
+import { humanLabel } from "./lib/labels.js";
 import PieDonutPanel from "./components/PieDonutPanel.jsx";
 import SatoriAvatar from "./components/SatoriAvatar.jsx";
 import { DialogHost, confirmDialog, alertDialog } from "./components/Dialogs.jsx";
@@ -43,8 +44,14 @@ const COLORS = {
   accent:         "#8AC441",
   accentLight:    "#9DD35A",
   accentDark:     "#68933F",
-  purple:         "#353085",
-  teal:           "#0A5F89",
+  // Was purple #353085 and blue #0A5F89. Neither colour appears anywhere in
+  // the TMC mark, yet between them they painted the primary button, the AI
+  // panels and most decorative gradients. They are now the two tones the
+  // logo actually has: the dark green of the centre blade and the graphite
+  // of the outer ones. Renamed as well as recoloured, so a token called
+  // "purple" never again holds a green.
+  brandDeep:      "#2F5A1E",
+  brandMid:       "#58595B",
   warning:        "#F59E0B",
   danger:         "#EF4444",
   success:        "#8AC441",
@@ -56,7 +63,15 @@ const COLORS = {
   textPrimary:    "var(--c-text-primary)",
   textSecondary:  "var(--c-text-secondary)",
   textMuted:      "var(--c-text-muted)",
-  chartColors:    ["#8AC441", "#353085", "#0A5F89", "#94A3B8", "#68933F", "#F59E0B", "#EF4444", "#9DD35A"],
+  // Five slots, read from the theme so dark mode gets its own steps rather
+  // than the light ones on a dark ground. The old list opened with the brand
+  // green and then went to #353085 purple and #0A5F89 teal, neither of which
+  // is anywhere in the TMC mark.
+  chartColors:    ["var(--viz-1)", "var(--viz-2)", "var(--viz-3)", "var(--viz-4)", "var(--viz-5)"],
+  // One colour for a single series. Colouring each bar differently makes the
+  // hue track the bar's RANK, which changes the moment a filter reorders the
+  // chart, so the colour means nothing and the result reads as a rainbow.
+  chartSingle:    "var(--viz-single)",
   gradientStart:  "var(--c-primary)",
   gradientEnd:    "#8AC441",
 };
@@ -1580,7 +1595,7 @@ const FabButtons = ({ pageLabel } = {}) => {
 
   const fabStyle = {
     width: 56, height: 56, borderRadius: "50%", border: "none", cursor: "pointer",
-    background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.teal})`,
+    background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.brandMid})`,
     color: "#fff", boxShadow: "0 10px 28px rgba(15,23,42,0.25)",
     display: "flex", alignItems: "center", justifyContent: "center",
     transition: "transform 0.15s",
@@ -1620,7 +1635,7 @@ const FabButtons = ({ pageLabel } = {}) => {
         }}>
           <div style={{
             padding: "12px 16px", color: "#fff",
-            background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.teal})`,
+            background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.brandMid})`,
             display: "flex", alignItems: "center", justifyContent: "space-between",
           }}>
             <div style={{ fontSize: 13, fontWeight: 600 }}>Need a hand?</div>
@@ -2533,7 +2548,7 @@ const BriefingPlayer = ({ onClose }) => {
         {/* Gradient hero header */}
         <div style={{
           position: "relative", padding: "26px 22px 18px", textAlign: "center",
-          background: `linear-gradient(165deg, ${COLORS.accent}26 0%, ${COLORS.purple}1f 55%, transparent 100%)`,
+          background: `linear-gradient(165deg, ${COLORS.accent}26 0%, ${COLORS.brandDeep}1f 55%, transparent 100%)`,
         }}>
           <div style={{
             position: "absolute", top: 16, left: 18, display: "inline-flex", alignItems: "center", gap: 6,
@@ -2646,7 +2661,7 @@ const BriefingCard = () => {
           width: "100%", textAlign: "left", cursor: "pointer", border: "none",
           borderRadius: 16, padding: 16, position: "relative", overflow: "hidden",
           display: "flex", alignItems: "center", gap: 14,
-          background: `linear-gradient(135deg, ${COLORS.accent} 0%, ${COLORS.accentDark} 58%, ${COLORS.purple} 150%)`,
+          background: `linear-gradient(135deg, ${COLORS.accent} 0%, ${COLORS.accentDark} 58%, ${COLORS.brandDeep} 150%)`,
           boxShadow: hover ? `0 14px 32px ${COLORS.accent}55` : `0 8px 22px ${COLORS.accent}38`,
           transform: hover ? "translateY(-1px)" : "none", transition: "all 0.18s ease",
         }}
@@ -3806,7 +3821,7 @@ const ReportChatPanel = ({
           display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Sparkles size={15} color={COLORS.purple} />
+            <Sparkles size={15} color={COLORS.brandDeep} />
             <span style={{ fontSize: 13, fontWeight: 600, color: COLORS.textPrimary }}>
               {existingId ? "Edit with AI" : "Build with AI"}
             </span>
@@ -3823,7 +3838,7 @@ const ReportChatPanel = ({
           <div style={{ textAlign: "center", paddingTop: 16 }}>
             <div style={{
               width: 56, height: 56, borderRadius: 18,
-              background: `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})`,
+              background: `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})`,
               display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px"
             }}>
               <FileText size={26} color="#fff" />
@@ -3841,7 +3856,7 @@ const ReportChatPanel = ({
                   cursor: "pointer", textAlign: "left", fontSize: 12.5, fontWeight: 500, color: COLORS.textPrimary,
                   transition: "all 0.15s"
                 }}
-                onMouseEnter={(e) => { e.currentTarget.style.borderColor = COLORS.purple; e.currentTarget.style.boxShadow = "0 2px 8px rgba(53,48,133,0.12)"; }}
+                onMouseEnter={(e) => { e.currentTarget.style.borderColor = COLORS.brandDeep; e.currentTarget.style.boxShadow = "0 2px 8px rgba(47,90,30,0.12)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.borderColor = COLORS.border; e.currentTarget.style.boxShadow = "none"; }}
                 >
                   {p}
@@ -3887,10 +3902,10 @@ const ReportChatPanel = ({
                 <div style={{ display: "flex", gap: 10, marginTop: 8, alignItems: "center" }}>
                   <button onClick={() => handleSend("generate")} style={{
                     padding: "9px 18px", borderRadius: 9, border: "none",
-                    background: `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})`,
+                    background: `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})`,
                     color: "#fff", fontSize: 12.5, fontWeight: 600, cursor: "pointer",
                     display: "flex", alignItems: "center", gap: 6,
-                    boxShadow: "0 4px 12px rgba(53,48,133,0.25)",
+                    boxShadow: "0 4px 12px rgba(47,90,30,0.25)",
                   }}>
                     <Sparkles size={13} /> Generate
                   </button>
@@ -4836,8 +4851,8 @@ const ReportsPage = () => {
             )}
             {activeIsShared && (
               <span style={{
-                fontSize: 11, fontWeight: 600, color: COLORS.purple,
-                background: `${COLORS.purple}1a`, padding: "3px 10px", borderRadius: 20,
+                fontSize: 11, fontWeight: 600, color: COLORS.brandDeep,
+                background: `${COLORS.brandDeep}1a`, padding: "3px 10px", borderRadius: 20,
                 display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0,
               }}>
                 <Share2 size={11} /> Shared with you
@@ -4858,10 +4873,10 @@ const ReportsPage = () => {
             {activePrebuilt && (
               <button onClick={handleSaveCopy} title="Save an editable copy into your own list" style={{
                 padding: "8px 14px", borderRadius: 8, border: "none",
-                background: `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})`,
+                background: `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})`,
                 color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
                 display: "flex", alignItems: "center", gap: 6,
-                boxShadow: "0 4px 12px rgba(53,48,133,0.25)",
+                boxShadow: "0 4px 12px rgba(47,90,30,0.25)",
               }}>
                 <Copy size={14} /> Save my copy
               </button>
@@ -4900,11 +4915,11 @@ const ReportsPage = () => {
                   style={{
                     padding: "8px 14px", borderRadius: 8,
                     border: chatOpen ? "none" : `1px solid ${COLORS.border}`,
-                    background: chatOpen ? `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})` : "#fff",
+                    background: chatOpen ? `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})` : "#fff",
                     color: chatOpen ? "#fff" : COLORS.textPrimary,
                     fontSize: 13, fontWeight: 600, cursor: "pointer",
                     display: "flex", alignItems: "center", gap: 6,
-                    boxShadow: chatOpen ? "0 4px 12px rgba(53,48,133,0.25)" : "none",
+                    boxShadow: chatOpen ? "0 4px 12px rgba(47,90,30,0.25)" : "none",
                     transition: "all 0.15s ease",
                   }}
                 >
@@ -4920,7 +4935,7 @@ const ReportsPage = () => {
                 style={{
                   padding: "8px 14px", borderRadius: 8,
                   border: chatOpen ? "none" : `1px solid ${COLORS.border}`,
-                  background: chatOpen ? `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})` : "#fff",
+                  background: chatOpen ? `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})` : "#fff",
                   color: chatOpen ? "#fff" : COLORS.textPrimary,
                   fontSize: 13, fontWeight: 600, cursor: "pointer",
                   display: "flex", alignItems: "center", gap: 6,
@@ -5024,10 +5039,10 @@ const ReportsPage = () => {
         {reports.length > 0 && (
           <button onClick={startCreating} style={{
             padding: "10px 18px", borderRadius: 10, border: "none",
-            background: `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})`,
+            background: `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})`,
             color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
             display: "flex", alignItems: "center", gap: 8,
-            boxShadow: "0 4px 12px rgba(53,48,133,0.25)"
+            boxShadow: "0 4px 12px rgba(47,90,30,0.25)"
           }}>
             <Plus size={16} /> New Report
           </button>
@@ -5099,10 +5114,10 @@ const ReportsPage = () => {
           </div>
           <button onClick={startCreating} style={{
             padding: "11px 22px", borderRadius: 10, border: "none",
-            background: `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})`,
+            background: `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})`,
             color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
             display: "inline-flex", alignItems: "center", gap: 8,
-            boxShadow: "0 4px 12px rgba(53,48,133,0.25)"
+            boxShadow: "0 4px 12px rgba(47,90,30,0.25)"
           }}>
             <Sparkles size={14} /> Build your first report
           </button>
@@ -5146,12 +5161,12 @@ const ReportCard = ({ report, onOpen, onDelete, onDuplicate, onRemoveFromList })
       display: "flex", flexDirection: "column", transition: "all 0.18s",
       position: "relative", minHeight: 160
     }}
-    onMouseEnter={(e) => { e.currentTarget.style.boxShadow = "0 6px 16px rgba(0,0,0,0.1)"; e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.borderColor = COLORS.purple; }}
+    onMouseEnter={(e) => { e.currentTarget.style.boxShadow = "0 6px 16px rgba(0,0,0,0.1)"; e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.borderColor = COLORS.brandDeep; }}
     onMouseLeave={(e) => { e.currentTarget.style.boxShadow = "0 1px 3px rgba(0,0,0,0.06)"; e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.borderColor = COLORS.border; }}
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, marginBottom: 12 }}>
-        <div style={{ width: 36, height: 36, borderRadius: 10, background: `${COLORS.purple}1a`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <FileText size={17} color={COLORS.purple} />
+        <div style={{ width: 36, height: 36, borderRadius: 10, background: `${COLORS.brandDeep}1a`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <FileText size={17} color={COLORS.brandDeep} />
         </div>
         <div ref={ref} style={{ position: "relative" }} onClick={(e) => e.stopPropagation()}>
           <button onClick={() => setMenuOpen((v) => !v)} style={{
@@ -5194,8 +5209,8 @@ const ReportCard = ({ report, onOpen, onDelete, onDuplicate, onRemoveFromList })
       {isShared && (
         <div style={{
           alignSelf: "flex-start", marginBottom: 8,
-          fontSize: 11, fontWeight: 600, color: COLORS.purple,
-          background: `${COLORS.purple}1a`, padding: "3px 10px", borderRadius: 20,
+          fontSize: 11, fontWeight: 600, color: COLORS.brandDeep,
+          background: `${COLORS.brandDeep}1a`, padding: "3px 10px", borderRadius: 20,
           display: "inline-flex", alignItems: "center", gap: 4,
         }}>
           <Share2 size={11} /> Shared by {report.shared_by_name || "someone"}
@@ -5240,7 +5255,7 @@ const RULES_TEMPLATES = [
   { id: "rt1", title: "High Receivables Alert", category: "Finance", description: "Alert when outstanding receivables exceed threshold", metric: "Receivables Balance", operator: "gt", value: "500000", unit: "$", channels: ["email", "whatsapp"], schedule: "hourly", icon: DollarSign, color: "#F59E0B" },
   { id: "rt2", title: "Low Inventory Warning", category: "Supply Chain", description: "Notify when stock drops below minimum level", metric: "Inventory Level", operator: "lt", value: "100", unit: "units", channels: ["email", "slack"], schedule: "realtime", icon: Package, color: "var(--sem-info-fg)" },
   { id: "rt3", title: "Quality Defect Spike", category: "Manufacturing", description: "Alert on sudden increase in defect rate", metric: "Defect Rate", operator: "gt", value: "2", unit: "%", channels: ["email", "sms"], schedule: "realtime", icon: Shield, color: "#EF4444" },
-  { id: "rt4", title: "Pipeline Drop Alert", category: "Sales", description: "Notify when pipeline value drops significantly", metric: "Pipeline Value", operator: "chg", value: "-15", unit: "%", channels: ["slack"], schedule: "daily", icon: TrendingDown, color: "#353085" },
+  { id: "rt4", title: "Pipeline Drop Alert", category: "Sales", description: "Notify when pipeline value drops significantly", metric: "Pipeline Value", operator: "chg", value: "-15", unit: "%", channels: ["slack"], schedule: "daily", icon: TrendingDown, color: "#2F5A1E" },
   { id: "rt5", title: "Cash Flow Warning", category: "Finance", description: "Critical alert for low cash flow situations", metric: "Cash Flow", operator: "lt", value: "200000", unit: "$", channels: ["email", "whatsapp", "sms"], schedule: "daily", icon: AlertTriangle, color: "#D97706" },
   { id: "rt6", title: "Delivery Delay Alert", category: "Supply Chain", description: "Alert when lead times exceed SLA", metric: "Lead Time", operator: "gt", value: "5", unit: "days", channels: ["email"], schedule: "hourly", icon: Truck, color: "var(--sem-info-fg)" },
   { id: "rt7", title: "High Turnover Alert", category: "HR", description: "Notify HR when turnover rate exceeds target", metric: "Turnover Rate", operator: "gt", value: "8", unit: "%", channels: ["email", "slack"], schedule: "weekly", icon: Users, color: "#8B5CF6" },
@@ -6177,8 +6192,8 @@ const ProductOrdersDashboard = () => {
         <KPICard title="Total Products" value={fmtQty(s.totalProducts)} icon={Package} color={COLORS.primary} />
         <KPICard title="Total Quantity" value={fmtQty(s.totalQty)} icon={Layers} color={COLORS.info} />
         <KPICard title="Total Orders" value={fmtQty(s.totalOrders)} icon={FileText} color={COLORS.accent} />
-        <KPICard title="Unique Dealers" value={fmtQty(s.uniqueDealers)} icon={Users} color={COLORS.purple} />
-        <KPICard title="Unique Plants" value={fmtQty(s.uniquePlants)} icon={Globe} color={COLORS.teal} />
+        <KPICard title="Unique Dealers" value={fmtQty(s.uniqueDealers)} icon={Users} color={COLORS.brandDeep} />
+        <KPICard title="Unique Plants" value={fmtQty(s.uniquePlants)} icon={Globe} color={COLORS.brandMid} />
       </div>
 
       {/* Charts Row */}
@@ -6348,7 +6363,7 @@ const InventoryStockDashboard = () => {
         <KPICard title="Total Materials" value={fmtQty(s.totalMaterials)} icon={Package} color={COLORS.accent} />
         <KPICard title="Active Plants" value={fmtQty(s.activePlants)} icon={Factory} color={COLORS.info} />
         <KPICard title="Storage Locations" value={fmtQty(s.storageLocations)} icon={Warehouse} color={COLORS.danger} />
-        <KPICard title="Avg Stock per Material" value={fmtQty(s.avgStockPerMaterial)} icon={TrendingUp} color={COLORS.purple} />
+        <KPICard title="Avg Stock per Material" value={fmtQty(s.avgStockPerMaterial)} icon={TrendingUp} color={COLORS.brandDeep} />
       </div>
 
       {/* Materials by Stock Volume Chart */}
@@ -6859,6 +6874,10 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
   const renderChart = (chart, idx) => {
     const { title, data: chartData, type, labelKey = "label", valueKeys = ["value"], variant, error } = chart;
     const colors = COLORS.chartColors;
+    // Legends and tooltips were printing the raw warehouse column
+    // ("avg_utilisation_pct"). A panel can still name a series explicitly via
+    // columnLabels; otherwise the shared dictionary expands it into words.
+    const seriesName = (vk) => (chart.columnLabels && chart.columnLabels[vk]) || humanLabel(vk);
 
     if (error || !chartData || chartData.length === 0) {
       return (
@@ -7012,7 +7031,7 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
               <Tooltip formatter={valTooltipFmt} />
               <Legend />
               {valueKeys.map((vk, vi) => (
-                <Line key={vk} type="monotone" dataKey={vk} stroke={colors[vi % colors.length]} strokeWidth={2} dot={{ r: 3 }} activeDot={{ r: 6, cursor: "pointer" }} />
+                <Line key={vk} type="monotone" dataKey={vk} name={seriesName(vk)} stroke={colors[vi % colors.length]} strokeWidth={2} dot={{ r: 3 }} activeDot={{ r: 6, cursor: "pointer" }} />
               ))}
             </LineChart>
           </ResponsiveContainer>
@@ -7045,7 +7064,7 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
               <Tooltip formatter={valTooltipFmt} />
               <Legend />
               {valueKeys.map((vk, vi) => (
-                <Area key={vk} type="monotone" dataKey={vk} stroke={colors[vi % colors.length]} strokeWidth={2} fill={`url(#area-${idx}-${vi})`} activeDot={{ r: 6, cursor: "pointer" }} />
+                <Area key={vk} type="monotone" dataKey={vk} name={seriesName(vk)} stroke={colors[vi % colors.length]} strokeWidth={2} fill={`url(#area-${idx}-${vi})`} activeDot={{ r: 6, cursor: "pointer" }} />
               ))}
             </AreaChart>
           </ResponsiveContainer>
@@ -7194,6 +7213,23 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
       ? (chartData || []).reduce((m, r) => Math.max(m, String(r?.[labelKey] ?? "").length), 0)
       : 0;
     const yAxisWidth = isHorizontal ? Math.min(220, Math.max(120, longestLabel * 6.5)) : 56;
+    // Values printed on the bars, not hidden behind a hover. Hover still
+    // works and still carries full precision; this is the at-a-glance read.
+    // The cap is the one honest limit: past ~26 bars a vertical column is a
+    // few pixels wide and the numbers collide into noise, so beyond that the
+    // tooltip is the better answer. Horizontal bars have a whole row each,
+    // so they tolerate roughly twice as many.
+    const barCount = (chartData || []).length * Math.max(1, valueKeys.length);
+    const showBarValues = barCount <= (isHorizontal ? 60 : 26);
+    // Short form on the bar (13.5K), full precision in the tooltip. A value
+    // of 0 is left blank rather than printed — a column of zeroes above
+    // empty bars is clutter, and the empty bar already says it.
+    const barLabelFmt = (v) => {
+      if (v === null || v === undefined || v === "") return "";
+      const n = Number(v);
+      if (!Number.isFinite(n) || n === 0) return "";
+      return allTime ? hoursToClock(n) : fmtAxisShort(n);
+    };
     return (
       <ChartCard key={idx} title={title}>
         <ResponsiveContainer width="100%" height={isHorizontal ? horizontalHeight : 300}>
@@ -7220,22 +7256,32 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
             <Tooltip formatter={valTooltipFmt} />
             <Legend />
             {valueKeys.map((vk, vi) => (
-              // When there's only one value series, color each bar
-              // individually from the palette so two adjacent single-series
-              // bar charts don't end up looking identical (all-green vs
-              // all-green). With multiple series we keep one color per
-              // series so the legend stays meaningful.
+              // A single series gets ONE colour. It used to get a different
+              // palette hue per bar, which looked like a rainbow and, worse,
+              // tied the colour to the bar's position in the ranking — so
+              // changing a filter repainted every surviving bar and the
+              // colour carried no meaning. Multiple series keep one colour
+              // each, which is what makes the legend mean something.
               <Bar
                 key={vk}
                 dataKey={vk}
-                fill={colors[vi % colors.length]}
+                name={seriesName(vk)}
+                fill={valueKeys.length === 1 ? COLORS.chartSingle : colors[vi % colors.length]}
                 radius={[4, 4, 0, 0]}
                 onClick={handleBarClick}
                 style={{ cursor: "pointer" }}
               >
-                {valueKeys.length === 1 && (chartData || []).map((_, i) => (
-                  <Cell key={`c-${i}`} fill={colors[i % colors.length]} cursor="pointer" />
-                ))}
+                {showBarValues && (
+                  <LabelList
+                    dataKey={vk}
+                    position={isHorizontal ? "insideRight" : "top"}
+                    formatter={barLabelFmt}
+                    style={{
+                      fill: isHorizontal ? "#FFFFFF" : "var(--c-text-secondary)",
+                      fontSize: 10.5, fontWeight: 600, pointerEvents: "none",
+                    }}
+                  />
+                )}
               </Bar>
             ))}
           </BarChart>
@@ -7742,7 +7788,7 @@ const DashboardChatPanel = ({
           display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Sparkles size={15} color={COLORS.purple} />
+            <Sparkles size={15} color={COLORS.brandDeep} />
             <span style={{ fontSize: 13, fontWeight: 600, color: COLORS.textPrimary }}>
               {existingId ? "Edit with AI" : "Build with AI"}
             </span>
@@ -7759,7 +7805,7 @@ const DashboardChatPanel = ({
           <div style={{ textAlign: "center", paddingTop: 16 }}>
             <div style={{
               width: 56, height: 56, borderRadius: 18,
-              background: `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})`,
+              background: `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})`,
               display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px"
             }}>
               <LayoutDashboard size={26} color="#fff" />
@@ -7777,7 +7823,7 @@ const DashboardChatPanel = ({
                   cursor: "pointer", textAlign: "left", fontSize: 12.5, fontWeight: 500, color: COLORS.textPrimary,
                   transition: "all 0.15s"
                 }}
-                onMouseEnter={(e) => { e.currentTarget.style.borderColor = COLORS.purple; e.currentTarget.style.boxShadow = "0 2px 8px rgba(53,48,133,0.12)"; }}
+                onMouseEnter={(e) => { e.currentTarget.style.borderColor = COLORS.brandDeep; e.currentTarget.style.boxShadow = "0 2px 8px rgba(47,90,30,0.12)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.borderColor = COLORS.border; e.currentTarget.style.boxShadow = "none"; }}
                 >
                   {p}
@@ -7823,10 +7869,10 @@ const DashboardChatPanel = ({
                 <div style={{ display: "flex", gap: 10, marginTop: 8, alignItems: "center" }}>
                   <button onClick={() => handleSend("generate")} style={{
                     padding: "9px 18px", borderRadius: 9, border: "none",
-                    background: `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})`,
+                    background: `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})`,
                     color: "#fff", fontSize: 12.5, fontWeight: 600, cursor: "pointer",
                     display: "flex", alignItems: "center", gap: 6,
-                    boxShadow: "0 4px 12px rgba(53,48,133,0.25)",
+                    boxShadow: "0 4px 12px rgba(47,90,30,0.25)",
                   }}>
                     <Sparkles size={13} /> Generate
                   </button>
@@ -8189,10 +8235,10 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
             <div style={{
-              width: 36, height: 36, borderRadius: 10, background: `${COLORS.purple}1a`,
+              width: 36, height: 36, borderRadius: 10, background: `${COLORS.brandDeep}1a`,
               display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0
             }}>
-              <Share2 size={17} color={COLORS.purple} />
+              <Share2 size={17} color={COLORS.brandDeep} />
             </div>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.textPrimary }}>
@@ -8224,7 +8270,7 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
                 border: `1px solid ${COLORS.border}`, fontSize: 13, outline: "none",
                 background: COLORS.surfaceAlt, transition: "all 0.15s", boxSizing: "border-box",
               }}
-              onFocus={(e) => { e.target.style.borderColor = COLORS.purple; e.target.style.background = COLORS.surface; }}
+              onFocus={(e) => { e.target.style.borderColor = COLORS.brandDeep; e.target.style.background = COLORS.surface; }}
               onBlur={(e) => { e.target.style.borderColor = COLORS.border; e.target.style.background = COLORS.surfaceAlt; }}
             />
           </div>
@@ -8239,7 +8285,7 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
               ].map((o) => (
                 <button key={o.id} onClick={() => setRole(o.id)} style={{
                   padding: "6px 14px", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600,
-                  background: role === o.id ? COLORS.purple : COLORS.surface,
+                  background: role === o.id ? COLORS.brandDeep : COLORS.surface,
                   color: role === o.id ? "#fff" : COLORS.textSecondary,
                 }}>{o.label}</button>
               ))}
@@ -8288,7 +8334,7 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
                     ) : (
                       <button onClick={() => handleAdd(u)} disabled={adding === u.id} style={{
                         padding: "6px 12px", borderRadius: 8, border: "none", cursor: "pointer",
-                        background: COLORS.purple, color: "#fff", fontSize: 12, fontWeight: 600,
+                        background: COLORS.brandDeep, color: "#fff", fontSize: 12, fontWeight: 600,
                         display: "flex", alignItems: "center", gap: 4, opacity: adding === u.id ? 0.6 : 1,
                       }}>
                         <UserPlus size={12} /> {adding === u.id ? "Adding…" : "Share"}
@@ -8323,7 +8369,7 @@ const ShareModal = ({ kind, itemId, itemName, onClose }) => {
               <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
                 <div style={{
                   width: 32, height: 32, borderRadius: 8,
-                  background: `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})`,
+                  background: `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})`,
                   color: "#fff", fontSize: 12, fontWeight: 700,
                   display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
                 }}>
@@ -8458,8 +8504,8 @@ const DashboardCard = ({ dashboard, onOpen, onDelete, onDuplicate, onRemoveFromL
       {isShared && (
         <div style={{
           alignSelf: "flex-start", marginBottom: 8,
-          fontSize: 11, fontWeight: 600, color: COLORS.purple,
-          background: `${COLORS.purple}1a`, padding: "3px 10px", borderRadius: 20,
+          fontSize: 11, fontWeight: 600, color: COLORS.brandDeep,
+          background: `${COLORS.brandDeep}1a`, padding: "3px 10px", borderRadius: 20,
           display: "inline-flex", alignItems: "center", gap: 4,
         }}>
           <Share2 size={11} /> Shared by {dashboard.shared_by_name || "someone"}
@@ -8827,8 +8873,8 @@ const DashboardsPage = () => {
             )}
             {activeIsShared && (
               <span style={{
-                fontSize: 11, fontWeight: 600, color: COLORS.purple,
-                background: `${COLORS.purple}1a`, padding: "3px 10px", borderRadius: 20,
+                fontSize: 11, fontWeight: 600, color: COLORS.brandDeep,
+                background: `${COLORS.brandDeep}1a`, padding: "3px 10px", borderRadius: 20,
                 display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0,
               }}>
                 <Share2 size={11} /> Shared with you
@@ -8849,10 +8895,10 @@ const DashboardsPage = () => {
             {activePrebuilt && (
               <button onClick={handleSaveCopy} title="Save an editable copy into your own list" style={{
                 padding: "8px 14px", borderRadius: 8, border: "none",
-                background: `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})`,
+                background: `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})`,
                 color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
                 display: "flex", alignItems: "center", gap: 6,
-                boxShadow: "0 4px 12px rgba(53,48,133,0.25)",
+                boxShadow: "0 4px 12px rgba(47,90,30,0.25)",
               }}>
                 <Copy size={14} /> Save my copy
               </button>
@@ -8891,11 +8937,11 @@ const DashboardsPage = () => {
                   style={{
                     padding: "8px 14px", borderRadius: 8,
                     border: chatOpen ? "none" : `1px solid ${COLORS.border}`,
-                    background: chatOpen ? `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})` : "#fff",
+                    background: chatOpen ? `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})` : "#fff",
                     color: chatOpen ? "#fff" : COLORS.textPrimary,
                     fontSize: 13, fontWeight: 600, cursor: "pointer",
                     display: "flex", alignItems: "center", gap: 6,
-                    boxShadow: chatOpen ? "0 4px 12px rgba(53,48,133,0.25)" : "none",
+                    boxShadow: chatOpen ? "0 4px 12px rgba(47,90,30,0.25)" : "none",
                     transition: "all 0.15s ease",
                   }}
                 >
@@ -8911,7 +8957,7 @@ const DashboardsPage = () => {
                 style={{
                   padding: "8px 14px", borderRadius: 8,
                   border: chatOpen ? "none" : `1px solid ${COLORS.border}`,
-                  background: chatOpen ? `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})` : "#fff",
+                  background: chatOpen ? `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})` : "#fff",
                   color: chatOpen ? "#fff" : COLORS.textPrimary,
                   fontSize: 13, fontWeight: 600, cursor: "pointer",
                   display: "flex", alignItems: "center", gap: 6,
@@ -9008,10 +9054,10 @@ const DashboardsPage = () => {
         {dashboards.length > 0 && (
           <button onClick={startCreating} style={{
             padding: "10px 18px", borderRadius: 10, border: "none",
-            background: `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})`,
+            background: `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})`,
             color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
             display: "flex", alignItems: "center", gap: 8,
-            boxShadow: "0 4px 12px rgba(53,48,133,0.25)"
+            boxShadow: "0 4px 12px rgba(47,90,30,0.25)"
           }}>
             <Plus size={16} /> New Dashboard
           </button>
@@ -9083,10 +9129,10 @@ const DashboardsPage = () => {
           </div>
           <button onClick={startCreating} style={{
             padding: "11px 22px", borderRadius: 10, border: "none",
-            background: `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})`,
+            background: `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})`,
             color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
             display: "inline-flex", alignItems: "center", gap: 8,
-            boxShadow: "0 4px 12px rgba(53,48,133,0.25)"
+            boxShadow: "0 4px 12px rgba(47,90,30,0.25)"
           }}>
             <Sparkles size={14} /> Build your first dashboard
           </button>
@@ -9344,8 +9390,8 @@ const UserManagementPage = ({ currentUserId, onPermissionsChanged }) => {
               <div>
                 <span style={{
                   fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20,
-                  color: isAdmin ? COLORS.purple : COLORS.textSecondary,
-                  background: isAdmin ? `${COLORS.purple}15` : COLORS.surfaceAlt,
+                  color: isAdmin ? COLORS.brandDeep : COLORS.textSecondary,
+                  background: isAdmin ? `${COLORS.brandDeep}15` : COLORS.surfaceAlt,
                 }}>
                   {isAdmin ? "Admin" : "User"}
                 </span>
@@ -10413,11 +10459,11 @@ const AuditLogPage = () => {
   const fmtTime = (ts) => ts ? new Date(ts).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" }) : "—";
   const actionColor = (a) => {
     if (!a) return COLORS.textMuted;
-    if (a.startsWith("share.")) return COLORS.purple;
+    if (a.startsWith("share.")) return COLORS.brandDeep;
     if (a.startsWith("report.download")) return COLORS.danger;
     if (a.startsWith("totp.")) return COLORS.warning;
     if (a.startsWith("ai.feedback.flagged")) return COLORS.danger;
-    if (a.startsWith("ai.")) return COLORS.teal;
+    if (a.startsWith("ai.")) return COLORS.brandMid;
     if (a.startsWith("user.")) return COLORS.danger;
     return COLORS.accentDark;
   };
@@ -10462,7 +10508,7 @@ const AuditLogPage = () => {
             <button key={f.val} onClick={() => setFilter(f.val)} style={{
               padding: "6px 12px", borderRadius: 8,
               border: filter === f.val ? "none" : `1px solid ${COLORS.border}`,
-              background: filter === f.val ? `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})` : "#fff",
+              background: filter === f.val ? `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})` : "#fff",
               color: filter === f.val ? "#fff" : COLORS.textPrimary,
               fontSize: 12, fontWeight: 600, cursor: "pointer",
             }}>{f.label}</button>
@@ -10585,7 +10631,7 @@ const SupportTicketsPage = () => {
             <button key={f.val} onClick={() => setFilter(f.val)} style={{
               padding: "6px 12px", borderRadius: 8,
               border: filter === f.val ? "none" : `1px solid ${COLORS.border}`,
-              background: filter === f.val ? `linear-gradient(135deg, ${COLORS.purple}, ${COLORS.teal})` : "#fff",
+              background: filter === f.val ? `linear-gradient(135deg, ${COLORS.brandDeep}, ${COLORS.brandMid})` : "#fff",
               color: filter === f.val ? "#fff" : COLORS.textPrimary,
               fontSize: 12, fontWeight: 600, cursor: "pointer",
             }}>{f.label}</button>
@@ -11230,7 +11276,7 @@ const UsageAnalyticsPage = () => {
             <Tooltip />
             <Legend wrapperStyle={{ fontSize: 11 }} />
             <Line type="monotone" dataKey="users" name="Active users" stroke={COLORS.accent} strokeWidth={2} dot={false} />
-            <Line type="monotone" dataKey="questions" name="AI questions" stroke="#0A5F89" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="questions" name="AI questions" stroke="var(--viz-2)" strokeWidth={2} dot={false} />
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -12869,20 +12915,36 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           --c-disabled:   #E2E8F0;
           /* Vector basemap (WorldMap.jsx). Muted on purpose — the punch points
              carry the meaning, the continents are only there for orientation. */
-          --map-ocean: #EAF2F7;  --map-land: #DCE7DA;  --map-coast: #AFC3B6;  --map-grid: #CDDAE3;
+          --map-ocean: #EDF2EA;  --map-land: #DCE7DA;  --map-coast: #AFC3B6;  --map-grid: #D4DECB;
+          /* ── Chart series, light ──────────────────────────────────────
+             Led by the TMC green so the brand reads first on every chart.
+             The rest are hues chosen for separation, not decoration: a
+             green-and-grey-only set cannot work categorically, because grey
+             has no chroma to tell slots apart and two greens cannot be
+             distinguished by anyone. Validated as a set against this
+             surface: lightness band, chroma floor, colour-blind separation,
+             normal-vision separation and 3:1 contrast all pass. Slots are
+             assigned in order and never cycled. */
+          --viz-1: #4C8C1F;  --viz-2: #2A78D6;  --viz-3: #EB6834;
+          --viz-4: #6250D6;  --viz-5: #E34948;
+          /* Single-series bars use one brand colour, never one hue per bar. */
+          --viz-single: #4C8C1F;
         }
         html[data-satori-theme="dark"] {
-          --c-primary:         #F1F5F9;
-          --c-primary-light:   #CBD5E1;
+          /* Dark mode was navy. The logo has no blue in it anywhere, so the
+             surfaces are now warm charcoal with a faint green cast, which is
+             what the mark's greys actually are. */
+          --c-primary:         #F2F4EE;
+          --c-primary-light:   #CBD0C2;
           --c-primary-dark:    #FFFFFF;
-          --c-surface:         #151C2C;
-          --c-surface-alt:     #0E1422;
-          --c-border:          rgba(148,163,184,0.16);
-          --c-text-primary:    #F2F6FC;
-          --c-text-secondary:  #C5D0E2;
-          --c-text-muted:      #93A1B8;
-          --c-page-bg:         #0A0F1B;
-          --c-input-bg:        #101727;
+          --c-surface:         #1A1D18;
+          --c-surface-alt:     #141711;
+          --c-border:          rgba(190,200,175,0.16);
+          --c-text-primary:    #F2F4EE;
+          --c-text-secondary:  #CBD0C2;
+          --c-text-muted:      #9DA396;
+          --c-page-bg:         #0F110D;
+          --c-input-bg:        #171A15;
           /* Dark semantic tints: low-alpha color washes + bright readable
              foregrounds — chips glow softly instead of flash-banging. */
           --sem-danger-bg:   rgba(239,68,68,0.16);   --sem-danger-fg:  #FCA5A5;
@@ -12895,8 +12957,14 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           --sem-amber3-bg:   rgba(245,158,11,0.10);  --sem-amber3-fg:  #FCD34D;
           --g-brand:      linear-gradient(135deg, #5E8B33, #8AC441);
           --g-brand-deep: linear-gradient(135deg, #46682A, #74A93A);
-          --c-disabled:   #243049;
-          --map-ocean: #0C1421;  --map-land: #1E2A3D;  --map-coast: #33455F;  --map-grid: #1A2536;
+          --c-disabled:   #2A2E26;
+          --map-ocean: #121510;  --map-land: #262B20;  --map-coast: #434B38;  --map-grid: #1E2219;
+          /* Chart series, dark. The same five hues re-stepped for the dark
+             surface rather than reused from light, and validated against it
+             as its own set. */
+          --viz-1: #5FA831;  --viz-2: #3987E5;  --viz-3: #D95926;
+          --viz-4: #9085E9;  --viz-5: #E66767;
+          --viz-single: #5FA831;
         }
         html[data-satori-theme="dark"] body { background: var(--c-page-bg); color: var(--c-text-primary); }
 

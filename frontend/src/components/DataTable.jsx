@@ -10,6 +10,7 @@
 
 import { useState, useMemo, useCallback } from "react";
 import { Search, Download } from "lucide-react";
+import { humanLabel } from "../lib/labels.js";
 
 const COLORS = {
   accent:        "#8AC441",
@@ -95,9 +96,10 @@ const cellTone = (value, rule) => {
 };
 
 /** snake_case column → "Snake Case", unless the panel supplied a nicer label. */
-const prettyHeader = (col, labels) =>
-  (labels && labels[col]) ||
-  String(col || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+// An explicit label always wins; otherwise fall through to the shared
+// dictionary, which expands abbreviations instead of only title-casing them
+// ("avg_utilisation_pct" was rendering as "Avg Utilisation Pct").
+const prettyHeader = (col, labels) => (labels && labels[col]) || humanLabel(col);
 
 const csvEscape = (v) => {
   const s = v == null ? "" : String(v);

@@ -65,7 +65,11 @@ const initials = (name) =>
   (name || "?").trim().split(/\s+/).slice(0, 2).map((p) => p[0]).join("").toUpperCase() || "?";
 
 const avatarTint = (name) => {
-  const palette = ["#8AC441", "#0A5F89", "#353085", "#F59E0B", "#9333EA", "#0EA5E9", "#10B981", "#EF4444"];
+  // The same five validated, logo-led slots the dashboards use, read from the
+  // theme so dark mode gets its own steps. The old eight were an ad-hoc mix
+  // (indigo, violet, sky, emerald) with nothing to do with the TMC mark, and
+  // being eight they cycled, which repaints a series when the count changes.
+  const palette = ["var(--viz-1)", "var(--viz-2)", "var(--viz-3)", "var(--viz-4)", "var(--viz-5)"];
   let h = 0;
   for (let i = 0; i < (name || "").length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
   return palette[h % palette.length];
