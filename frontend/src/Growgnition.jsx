@@ -7219,17 +7219,6 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
     // few pixels wide and the numbers collide into noise, so beyond that the
     // tooltip is the better answer. Horizontal bars have a whole row each,
     // so they tolerate roughly twice as many.
-    const barCount = (chartData || []).length * Math.max(1, valueKeys.length);
-    // Labels sit INSIDE the bar, rotated upright on vertical charts. Above
-    // the bar they collided with each other the moment two neighbours had
-    // similar heights — 30 competencies produced one illegible smear of
-    // numbers. Inside, each label is bounded by its own bar and cannot
-    // overlap the next one.
-    const showBarValues = barCount <= (isHorizontal ? 60 : 40);
-    // A bar has to be wide enough to carry ~10px upright text. Below that we
-    // keep the bar and drop the label rather than print something unreadable.
-    const vertBarSize = barCount > 24 ? 16 : barCount > 14 ? 24 : 34;
-    const canFitInside = isHorizontal || vertBarSize >= 16;
     // Short form on the bar (13.5K), full precision in the tooltip. A value
     // of 0 is left blank rather than printed — a column of zeroes above
     // empty bars is clutter, and the empty bar already says it.
@@ -7239,10 +7228,61 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
       if (!Number.isFinite(n) || n === 0) return "";
       return allTime ? hoursToClock(n) : fmtAxisShort(n);
     };
+    // Every bar carries its figure, written HORIZONTALLY so it reads at a
+    // glance. A horizontal number needs a bar at least as wide as itself,
+    // so the bar width is derived from the longest label this chart will
+    // print, and the chart grows past the card (scrolling sideways) rather
+    // than squeezing fifty bars into 6px slivers that cannot carry a label.
+    // Rotated labels were tried first; a column of upright numbers is not
+    // something anyone reads.
+    const longestValueLabel = isHorizontal ? 0 : (chartData || []).reduce((m, r) =>
+      valueKeys.reduce((mm, vk) => Math.max(mm, barLabelFmt(r?.[vk]).length), m), 0);
+    const vertBarSize = Math.max(36, Math.ceil(longestValueLabel * 7) + 12);
+    const seriesN = Math.max(1, valueKeys.length);
+    // One category band: its bars side by side, 4px between bars (barGap),
+    // 14px between bands (barCategoryGap).
+    const bandWidth = seriesN * vertBarSize + 4 * (seriesN - 1) + 14;
+    const scrollWidth = isHorizontal ? null : (chartData || []).length * bandWidth + 56 + 28;
+    // Label inside the bar when the bar can hold it, just above (or beside)
+    // it when it cannot — a 3px bar with white text inside it shows nothing.
+    // Recharts 3 hands the label its bar's box both as flat x/y/width/
+    // height and as viewBox; read whichever is present.
+    const BarValueLabel = (p) => {
+      const vb = p.viewBox || {};
+      const x = p.x ?? vb.x, y = p.y ?? vb.y;
+      const width = p.width ?? vb.width ?? 0, height = p.height ?? vb.height ?? 0;
+      const value = p.value;
+      const txt = barLabelFmt(value);
+      if (!txt || x == null || y == null) return null;
+      const textW = txt.length * 6.6;
+      const base = { fontSize: 11, fontWeight: 700, style: { pointerEvents: "none" } };
+      const insideFill = "#FFFFFF";
+      const outsideFill = "var(--c-text-primary)";
+      if (isHorizontal) {
+        const fits = width >= textW + 10;
+        return (
+          <text {...base} x={fits ? x + width - 6 : x + width + 6} y={y + height / 2} dy={4}
+            textAnchor={fits ? "end" : "start"} fill={fits ? insideFill : outsideFill}>{txt}</text>
+        );
+      }
+      const neg = Number(value) < 0;
+      const fits = Math.abs(height) >= 18;
+      const ty = neg
+        ? (fits ? y + height - 6 : y + height + 12)
+        : (fits ? y + 14 : y - 5);
+      return (
+        <text {...base} x={x + width / 2} y={ty} textAnchor="middle"
+          fill={fits ? insideFill : outsideFill}>{txt}</text>
+      );
+    };
     return (
       <ChartCard key={idx} title={title}>
+        <div style={{ overflowX: isHorizontal ? "visible" : "auto", overflowY: "hidden" }}>
+        <div style={{ width: scrollWidth ? `${scrollWidth}px` : "100%", minWidth: "100%" }}>
         <ResponsiveContainer width="100%" height={isHorizontal ? horizontalHeight : 300}>
-          <BarChart data={plotData} layout={isHorizontal ? "vertical" : "horizontal"} margin={{ top: 8, right: 20, left: 8, bottom: 8 }}>
+          <BarChart data={plotData} layout={isHorizontal ? "vertical" : "horizontal"}
+            barGap={4} barCategoryGap={isHorizontal ? "10%" : 14}
+            margin={{ top: 18, right: 20, left: 8, bottom: 8 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--viz-grid)" />
             {isHorizontal ? (
               <>
@@ -7263,7 +7303,9 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
               </>
             )}
             <Tooltip formatter={valTooltipFmt} />
-            <Legend />
+            {/* A centred legend on a 2,000px-wide scrolling chart sits off
+                screen; pin it to the left edge so it is visible unscrolled. */}
+            <Legend align={scrollWidth ? "left" : "center"} />
             {valueKeys.map((vk, vi) => (
               // A single series gets ONE colour. It used to get a different
               // palette hue per bar, which looked like a rainbow and, worse,
@@ -7281,30 +7323,13 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
                 onClick={handleBarClick}
                 style={{ cursor: "pointer" }}
               >
-                {showBarValues && canFitInside && (
-                  <LabelList
-                    dataKey={vk}
-                    position={isHorizontal ? "insideRight" : "insideTop"}
-                    // Upright inside a vertical column: a horizontal number
-                    // cannot fit across a 16-34px bar, a rotated one always
-                    // fits however many bars there are.
-                    angle={isHorizontal ? 0 : -90}
-                    offset={isHorizontal ? 8 : 14}
-                    formatter={barLabelFmt}
-                    style={{
-                      fill: "#FFFFFF", fontSize: 10, fontWeight: 700,
-                      pointerEvents: "none",
-                      // The white sits on the bar's own fill, which is mid-tone
-                      // green; the shadow keeps it readable on the lighter
-                      // slots too without needing a per-slot text colour.
-                      textShadow: "0 1px 2px rgba(0,0,0,0.45)",
-                    }}
-                  />
-                )}
+                <LabelList dataKey={vk} content={BarValueLabel} />
               </Bar>
             ))}
           </BarChart>
         </ResponsiveContainer>
+        </div>
+        </div>
         {drillHint}
       </ChartCard>
     );
