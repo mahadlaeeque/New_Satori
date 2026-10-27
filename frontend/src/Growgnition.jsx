@@ -7256,7 +7256,7 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
       if (!txt || x == null || y == null) return null;
       const textW = txt.length * 6.6;
       const base = { fontSize: 11, fontWeight: 700, style: { pointerEvents: "none" } };
-      const insideFill = "#FFFFFF";
+      const insideFill = "var(--viz-label)";
       const outsideFill = "var(--c-text-primary)";
       if (isHorizontal) {
         const fits = width >= textW + 10;
@@ -7284,6 +7284,24 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
             barGap={4} barCategoryGap={isHorizontal ? "10%" : 14}
             margin={{ top: 18, right: 20, left: 8, bottom: 8 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--viz-grid)" />
+            {/* One gradient per series, scaled to each bar's own box. A single
+                series wears the brand gradient (lime base, dark-green tip); a
+                multi-series chart keeps one hue per series, fading toward the
+                base, so the legend still means something. The tip end is
+                where the in-bar figure sits, so it is the darker end. */}
+            <defs>
+              {valueKeys.map((vk, vi) => {
+                const single = valueKeys.length === 1;
+                const hue = colors[vi % colors.length];
+                return (
+                  <linearGradient key={vk} id={`bar-grad-${idx}-${vi}`}
+                    x1="0" y1={isHorizontal ? "0" : "1"} x2={isHorizontal ? "1" : "0"} y2="0">
+                    <stop offset="0%" style={{ stopColor: single ? "var(--viz-grad-base)" : hue, stopOpacity: single ? 1 : 0.55 }} />
+                    <stop offset="100%" style={{ stopColor: single ? "var(--viz-grad-tip)" : hue, stopOpacity: 1 }} />
+                  </linearGradient>
+                );
+             })}
+            </defs>
             {isHorizontal ? (
               <>
                 <YAxis
@@ -7317,7 +7335,7 @@ const DashboardRenderer = ({ spec, dashboardId, onBack }) => {
                 key={vk}
                 dataKey={vk}
                 name={seriesName(vk)}
-                fill={valueKeys.length === 1 ? COLORS.chartSingle : colors[vi % colors.length]}
+                fill={`url(#bar-grad-${idx}-${vi})`}
                 barSize={isHorizontal ? undefined : vertBarSize}
                 radius={[4, 4, 0, 0]}
                 onClick={handleBarClick}
@@ -12977,6 +12995,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           --viz-4: #6250D6;  --viz-5: #E34948;
           /* Single-series bars use one brand colour, never one hue per bar. */
           --viz-single: #4C8C1F;  --viz-grid: #E2E7DA;
+          --viz-grad-tip: #2F5A1E;  --viz-grad-base: #8AC441;  --viz-label: #FFFFFF;
         }
         html[data-satori-theme="dark"] {
           /* Dark mode was navy. The logo has no blue in it anywhere, so the
@@ -13013,6 +13032,7 @@ const LoginPage = ({ onLogin, expiredMsg }) => {
           --viz-1: #5FA831;  --viz-2: #3987E5;  --viz-3: #D95926;
           --viz-4: #9085E9;  --viz-5: #E66767;
           --viz-single: #5FA831;  --viz-grid: rgba(190,200,175,0.14);
+          --viz-grad-tip: #5FA831;  --viz-grad-base: #A5DD5A;  --viz-label: #0F110D;
         }
         html[data-satori-theme="dark"] body { background: var(--c-page-bg); color: var(--c-text-primary); }
 
@@ -13990,6 +14010,10 @@ export default function App() {
       "--viz-1": "#5FA831", "--viz-2": "#3987E5", "--viz-3": "#D95926",
       "--viz-4": "#9085E9", "--viz-5": "#E66767", "--viz-single": "#5FA831",
       "--viz-grid": "rgba(190,200,175,0.14)",
+      // Bar gradient: base (bottom / left) to tip (top / right). Dark mode
+      // keeps the tip mid-green so it reads against the charcoal ground,
+      // and the in-bar figure flips to near-black for contrast on it.
+      "--viz-grad-tip": "#5FA831", "--viz-grad-base": "#A5DD5A", "--viz-label": "#0F110D",
     } : {
       // Primary is the logo's dark green, not charcoal. It paints the
       // primary button and the active nav item, so this is where "more dark
@@ -14025,6 +14049,9 @@ export default function App() {
       "--viz-1": "#4C8C1F", "--viz-2": "#2A78D6", "--viz-3": "#EB6834",
       "--viz-4": "#6250D6", "--viz-5": "#E34948", "--viz-single": "#4C8C1F",
       "--viz-grid": "#E2E7DA",
+      // The TMC brand gradient on every bar: lime at the base, dark green
+      // at the tip, where the white figure sits.
+      "--viz-grad-tip": "#2F5A1E", "--viz-grad-base": "#8AC441", "--viz-label": "#FFFFFF",
     };
     for (const [k, v] of Object.entries(tokens)) root.style.setProperty(k, v);
     // Final fallback: directly mutate the body background + color so the
