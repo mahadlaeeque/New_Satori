@@ -2722,11 +2722,14 @@ def get_genai_client():
     with _genai_lock:
         if _genai_client is not None:
             return _genai_client
-        if GEMINI_API_KEY:
-            _genai_client = genai.Client(api_key=GEMINI_API_KEY)
-        elif USE_VERTEX and VERTEX_PROJECT:
+        # Vertex first when opted in, even if an AI Studio key is still mounted:
+        # the key carries its own spend cap (the 'usage limit' outages) and
+        # flipping USE_VERTEX_AI=1 must be enough to leave it behind.
+        if USE_VERTEX and VERTEX_PROJECT:
             _genai_client = genai.Client(vertexai=True, project=VERTEX_PROJECT,
                                          location=VERTEX_LOCATION)
+        elif GEMINI_API_KEY:
+            _genai_client = genai.Client(api_key=GEMINI_API_KEY)
         else:
             raise HTTPException(
                 status_code=500,
