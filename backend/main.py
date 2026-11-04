@@ -805,7 +805,7 @@ def ai_insights(body: InsightsRequest, request: Request, user: dict = Depends(ge
         if no_think:
             cfg["thinking_config"] = genai.types.ThinkingConfig(thinking_budget=0)
         return get_genai_client().models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model=GEMINI_MODEL,
             contents=(f"{noun.upper()} TITLE: {body.title or '(untitled)'}\n\n"
                       f"DATA:\n{data_text}\n\nWrite the insights now."),
             config=genai.types.GenerateContentConfig(**cfg),
@@ -2503,6 +2503,12 @@ def admin_set_scope_dimension(body: AdminDimensionToggle, admin: dict = Depends(
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 VERTEX_PROJECT = os.environ.get("VERTEX_PROJECT", "")
 VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
+# One model name for every text call (chat, SQL heal, insights, summaries).
+# Env-driven so a model that is renamed, retired, or not served in the Vertex
+# region (gemini-3.5-flash-lite 404ed in us-central1 on 27 Oct 2026) can be
+# swapped with `gcloud run services update --update-env-vars GEMINI_MODEL=...`
+# instead of a rebuild. Live/TTS models stay separate: they are modality-specific.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
 GOOGLE_SA_KEY = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
 
 # Set credentials env var if service account key path is provided
@@ -4402,7 +4408,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
         # Voice mode stays simple (no tools) — the voice WS has its own tool path
         if body.voice_mode:
             response = client.models.generate_content(
-                model="gemini-3.5-flash-lite",
+                model=GEMINI_MODEL,
                 contents=contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
@@ -4469,7 +4475,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
         MAX_ROUNDS = 5
         for round_num in range(MAX_ROUNDS):
             response = client.models.generate_content(
-                model="gemini-3.5-flash-lite",
+                model=GEMINI_MODEL,
                 contents=contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
@@ -4522,7 +4528,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                     try:
                         _user_first = (user.get("name") or user.get("full_name") or "there").split()[0]
                         emergency_resp = client.models.generate_content(
-                            model="gemini-3.5-flash-lite",
+                            model=GEMINI_MODEL,
                             contents=[genai.types.Content(
                                 role="user",
                                 parts=[genai.types.Part(text=(
@@ -4748,7 +4754,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
             ))],
         ))
         response = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model=GEMINI_MODEL,
             contents=contents,
             config=genai.types.GenerateContentConfig(
                 system_instruction=system_prompt_final,
@@ -4770,7 +4776,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
             try:
                 _user_first = (user.get("name") or user.get("full_name") or "there").split()[0]
                 emergency_resp = client.models.generate_content(
-                    model="gemini-3.5-flash-lite",
+                    model=GEMINI_MODEL,
                     contents=[genai.types.Content(
                         role="user",
                         parts=[genai.types.Part(text=(
@@ -4858,7 +4864,7 @@ def _chat_impl(body: ChatRequest, request: Request, user: dict):
                 parts=[genai.types.Part(text=f"User asked: {body.message}\n\nI ran this SQL and got these results:\n{result_text}\n\nGive a direct, concise answer to the user's question using these numbers. Do NOT mention SQL or announce anything.")],
             )]
             summary_response = client.models.generate_content(
-                model="gemini-3.5-flash-lite",
+                model=GEMINI_MODEL,
                 contents=summary_contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
@@ -5020,7 +5026,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
             tool_resolved = False
             for round_num in range(MAX_ROUNDS):
                 resp = client.models.generate_content(
-                    model="gemini-3.5-flash-lite",
+                    model=GEMINI_MODEL,
                     contents=local_contents,
                     config=genai.types.GenerateContentConfig(
                         system_instruction=system_prompt_final,
@@ -5141,7 +5147,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
             # truncate the visible answer mid-sentence.
             streamed_any_text = False
             for chunk in client.models.generate_content_stream(
-                model="gemini-3.5-flash-lite",
+                model=GEMINI_MODEL,
                 contents=local_contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=system_prompt_final,
@@ -5160,7 +5166,7 @@ def chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
             if not streamed_any_text:
                 print("[CHAT-STREAM] streaming yielded no text — running non-streaming fallback (thinking_budget=0)")
                 fallback_resp = client.models.generate_content(
-                    model="gemini-3.5-flash-lite",
+                    model=GEMINI_MODEL,
                     contents=local_contents,
                     config=genai.types.GenerateContentConfig(
                         system_instruction=system_prompt_final,
@@ -6346,7 +6352,7 @@ def refine_dashboard(user_message: str, history: list, existing_config=None, sco
 
     try:
         response = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model=GEMINI_MODEL,
             contents=contents,
             config=genai.types.GenerateContentConfig(
                 system_instruction=system,
@@ -6598,7 +6604,7 @@ def satori_help(body: dict):
     try:
         client = get_genai_client()
         resp = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model=GEMINI_MODEL,
             contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=question)])],
             config=genai.types.GenerateContentConfig(
                 system_instruction=_SATORI_HELP_PROMPT,
@@ -7652,7 +7658,7 @@ def _generate_drilldown_sql(parent_sql: str, parent_title: str, parent_type: str
             f"Generate the row-level drill-down SQL. Output ONLY the complete SQL."
         )
         resp = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model=GEMINI_MODEL,
             contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
             config=genai.types.GenerateContentConfig(
                 system_instruction=_DRILLDOWN_PROMPT.format(BQ_FULL=BQ_FULL),
@@ -7807,7 +7813,7 @@ def _repair_widget_sql(failed_sql: str, error_msg: str, widget_meta: dict) -> st
             + "Return ONLY the fixed SQL."
         )
         resp = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model=GEMINI_MODEL,
             contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
             config=genai.types.GenerateContentConfig(
                 system_instruction=_REPAIR_PROMPT.format(BQ_FULL=BQ_FULL),
@@ -7889,7 +7895,7 @@ def _record_sql_lesson(surface: str, failure_kind: str, bad_sql: str, fixed_sql:
                 "functions) — never about this specific person/date/project>\"}"
             )
             resp = client.models.generate_content(
-                model="gemini-3.5-flash-lite",
+                model=GEMINI_MODEL,
                 contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
                 config=genai.types.GenerateContentConfig(temperature=0.1, max_output_tokens=300),
             )
@@ -7958,7 +7964,7 @@ def _llm_heal_json(system: str, user_msg: str, tag: str, max_tokens: int = 4096)
     try:
         client = get_genai_client()
         resp = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model=GEMINI_MODEL,
             contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
             config=genai.types.GenerateContentConfig(
                 system_instruction=system, temperature=0.15, max_output_tokens=max_tokens,
@@ -8110,6 +8116,19 @@ def _heal_empty_widget(template_sql: str, run_template, widget_meta: dict,
 _PB_CANON_NAME = (r"TRIM(REGEXP_REPLACE(REGEXP_REPLACE(Resource_Name, r'\s+-\s+', ' '), "
                   r"r'\s+', ' '))")
 
+# Work-package resource label. The feed writes the same person two ways —
+# "E-293 Rai Sohaib Amjad" and "E-1187 - Hashim Shoukat" — and the literal
+# 'NA' for nobody. One shape ("E-293 - Rai Sohaib Amjad") so a person is one
+# bar, one dropdown entry and one filter match; shared by the registry probe
+# and the governance CTE so the two can never drift.
+_PB_WP_RESOURCE = (
+    "IF(COALESCE(TRIM(WP_RESOURCE_ASSIGNED), '') IN ('', 'NA'), 'Not Assigned', "
+    "IF(REGEXP_CONTAINS(TRIM(WP_RESOURCE_ASSIGNED), r'^\\S+\\s+-\\s'), "
+    "REGEXP_REPLACE(TRIM(WP_RESOURCE_ASSIGNED), r'\\s+', ' '), "
+    "REGEXP_REPLACE(REGEXP_REPLACE(TRIM(WP_RESOURCE_ASSIGNED), r'\\s+', ' '), r'^(\\S+)\\s+', r'\\1 - ')))"
+)
+
+
 _FILTER_REGISTRY = {
     "department":             ("Employee_Data", "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified')", "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified')"),
     "employeehierarchynode":  ("Employee_Data", "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified')", "COALESCE(NULLIF(TRIM(EmployeeHierarchyNode),''),'Unspecified')"),
@@ -8208,6 +8227,24 @@ _FILTER_REGISTRY = {
     # instead of ANDing themselves onto it.
     "ts_month": ("Timesheet_Data", "FORMAT_DATE('%Y-%m', DATE_KEY)", None),
     "ts_year":  ("Timesheet_Data", "CAST(EXTRACT(YEAR FROM DATE_KEY) AS STRING)", None),
+    # ── Governance (work packages) — WP_Report, exposed by the dashboard's
+    #    `src`/`wrows` CTEs under these exact column names. Options are
+    #    probed on the raw table with the same normalisation the CTE applies,
+    #    so a dropdown value always matches a CTE row. ──
+    "wp_project":          ("WP_Report", "COALESCE(NULLIF(TRIM(PROJECT_NAME),''),'Unspecified')", "PROJECT_NAME"),
+    "wp_build":            ("WP_Report", "COALESCE(NULLIF(TRIM(BUILD),''),'Unspecified')", "BUILD"),
+    "wp_deliverable_type": ("WP_Report", "COALESCE(NULLIF(TRIM(DELIVERABLE_TYPE),''),'Unspecified')", "DELIVERABLE_TYPE"),
+    "wp_owner":            ("WP_Report", "COALESCE(NULLIF(TRIM(WP_OWNER_NAME),''),'Unassigned')", "WP_OWNER_NAME"),
+    "wp_resource":         ("WP_Report", _PB_WP_RESOURCE, "WP_RESOURCE_ASSIGNED"),
+    # Assigned = at least one named resource on the WP. The CTE computes it
+    # per WP (window over all its rows); the probe only needs the two values.
+    "wp_assignment":       ("WP_Report", "IF(COALESCE(TRIM(WP_RESOURCE_ASSIGNED),'') IN ('','NA'),'Not Assigned','Assigned')", "WP_ASSIGNMENT"),
+    "wp_progress":         ("WP_Report", "COALESCE(NULLIF(TRIM(Progress_Status),''),'Unspecified')", "Progress_Status"),
+    "wp_performance":      ("WP_Report", "COALESCE(NULLIF(TRIM(Performance_Status),''),'NA')", "Performance_Status"),
+    "wp_portal":           ("WP_Report", "COALESCE(NULLIF(TRIM(WP_PORTAL_STATUS),''),'Unspecified')", "WP_PORTAL_STATUS"),
+    "wp_system":           ("WP_Report", "COALESCE(NULLIF(TRIM(System_Flag),''),'Unspecified')", "System_Flag"),
+    "wp_year":             ("WP_Report", "CAST(EXTRACT(YEAR FROM WP_BASELINE_START_DATE) AS STRING)", "CAST(EXTRACT(YEAR FROM WP_BASELINE_START_DATE) AS STRING)"),
+    "wp_month":            ("WP_Report", "FORMAT_DATE('%Y-%m', WP_BASELINE_START_DATE)", "FORMAT_DATE('%Y-%m', WP_BASELINE_START_DATE)"),
     # allocation
     "competency":             ("Allocation_Data", "emp_competency", "emp_competency"),
     "emp_competency":         ("Allocation_Data", "emp_competency", "emp_competency"),
@@ -8470,6 +8507,13 @@ def _dashboard_run_impl(body: dict, user: dict, emit=None):
     """
     config = body.get("config") or {}
     user_filters = body.get("filters") or {}
+    # Prebuilt dashboards are hand-written, deterministic SQL. An empty panel
+    # under a user's filter is the honest answer, not a bug to heal away: the
+    # zero-rows self-heal asks Gemini to rewrite the query, and on 4 Nov 2026
+    # it rewrote an empty "By Resource" chart into the UNFILTERED chart and
+    # returned it flagged recovered. Error repair still runs; empty does not.
+    deterministic = (str(body.get("dashboard_id") or "").startswith("pb-")
+                     or bool(config.get("prebuilt")))
     # Sales data is admin-only — block a non-admin from running any dashboard
     # whose SQL touches a Sales_* table.
     if not _user_can_see_sales(user) and _sql_touches_sales(json.dumps(config)):
@@ -8572,7 +8616,7 @@ def _dashboard_run_impl(body: dict, user: dict, emit=None):
         # diagnose→repair→re-run loop, learn the lesson, and as a last resort
         # deliver a broadened on-topic view or a concrete diagnosis. The user
         # must always get SOMETHING.
-        if "error" not in r and _is_empty_result(r, kind):
+        if "error" not in r and _is_empty_result(r, kind) and not deterministic:
             print(f"[dashboard]   {tag} EMPTY — starting zero-rows self-heal")
             healed = _heal_empty_widget(sql_template, _run_template, widget_meta,
                                         run_lessons, surface="dashboard",
@@ -10452,11 +10496,308 @@ def _pb_dashboard_defs(user) -> list:
                            "CAST((SELECT d1 FROM per) AS STRING) AS end_date"),
     }
 
+    # ═══════════════════════════════════════════════════════════════════════
+    #  GOVERNANCE  —  the PF work-package dashboard (Qlik "Governance
+    #  Dashboard - PF", app cae76136). Qlik keeps one flattened fact with a
+    #  level FLAG: Level-C = work package, Level-D = task, Level-E = sub-task.
+    #  Here Level-C is WP_Report and Level-D/E is Tasks_Subtasks_Report.
+    #
+    #  Grain matters: WP_Report is ~490k rows for ~10k work packages. A row
+    #  is one (WP, assigned resource) pair, but the export also repeats rows
+    #  outright — one WP arrives 49,000 times — so every count here is a
+    #  COUNT(DISTINCT WP_CODE) and the register is one row per WP with its
+    #  resources rolled up. Status, dates and PLAN are constant within a WP
+    #  (verified: 0 WPs carry two values), so ANY_VALUE is exact, not a guess.
+    #
+    #  ACTUAL is the string '?' on every row of the feed and is never shown.
+    #  "Assigned" is Qlik's IS_USER_ASSIGNED: a WP with at least one resource
+    #  row that is not the literal 'NA'.
+    # ═══════════════════════════════════════════════════════════════════════
+    WPR = f"`{BQ_FULL}.WP_Report`"
+    TSR = f"`{BQ_FULL}.Tasks_Subtasks_Report`"
+    # Resource strings read "E-1187 - Hashim Shoukat"; the code is the digits
+    # after the E. Scoped users (practice heads) see the work packages their
+    # own people are assigned to — the same inner-join rule the timesheet
+    # dashboard applies to logged hours.
+    wp_res_code = "LTRIM(REGEXP_EXTRACT(WP_RESOURCE_ASSIGNED, r'E-?\\s*0*([0-9]+)'), '0')"
+    wp_scope_join = (f"JOIN emp ON {wp_res_code} = emp.nid" if scoped else "")
+    gw = (
+        f"WITH emp AS (SELECT DISTINCT {_PB_NORM('e.Employee_Code')} AS nid "
+        f"FROM {E} e WHERE {_PB_ACTIVE}{scope('e')}), "
+        # Row grain, duplicates removed. Every column a filter can target is
+        # exposed here under the registry's name, so {where} resolves on the
+        # rows and the WP roll-up below inherits the selection.
+        "src AS (SELECT DISTINCT WP_CODE, "
+        "COALESCE(NULLIF(TRIM(PROJECT_NAME), ''), 'Unspecified') AS PROJECT_NAME, "
+        "COALESCE(NULLIF(TRIM(BUILD), ''), 'Unspecified') AS BUILD, "
+        "COALESCE(NULLIF(TRIM(Deliverables), ''), '') AS Deliverables, "
+        "COALESCE(NULLIF(TRIM(DELIVERABLE_TYPE), ''), 'Unspecified') AS DELIVERABLE_TYPE, "
+        "COALESCE(NULLIF(TRIM(WP_DESCRIPTION), ''), '') AS WP_DESCRIPTION, "
+        "COALESCE(NULLIF(TRIM(WP_OWNER_NAME), ''), 'Unassigned') AS WP_OWNER_NAME, "
+        f"{_PB_WP_RESOURCE} AS WP_RESOURCE_ASSIGNED, "
+        "COALESCE(NULLIF(TRIM(WP_PORTAL_STATUS), ''), 'Unspecified') AS WP_PORTAL_STATUS, "
+        "COALESCE(NULLIF(TRIM(Progress_Status), ''), 'Unspecified') AS Progress_Status, "
+        "COALESCE(NULLIF(TRIM(Performance_Status), ''), 'NA') AS Performance_Status, "
+        "COALESCE(NULLIF(TRIM(System_Flag), ''), 'Unspecified') AS System_Flag, "
+        "WP_BASELINE_START_DATE, WP_BASELINE_END_DATE, WP_START_DATE, WP_END_DATE, "
+        "WP_RELEASE_DATE, WP_COMPLETION_DATE, WP_LAST_STATUS_DATE, PLAN, "
+        "IF(COUNTIF(COALESCE(TRIM(WP_RESOURCE_ASSIGNED), '') NOT IN ('', 'NA')) "
+        "OVER (PARTITION BY WP_CODE) > 0, 'Assigned', 'Not Assigned') AS WP_ASSIGNMENT "
+        f"FROM {WPR} {wp_scope_join} WHERE WP_CODE IS NOT NULL), "
+        "wrows AS (SELECT * FROM src WHERE TRUE {where}), "
+        # One row per work package.
+        "wps AS (SELECT WP_CODE, ANY_VALUE(PROJECT_NAME) AS project, ANY_VALUE(BUILD) AS build, "
+        "ANY_VALUE(Deliverables) AS deliverable, ANY_VALUE(DELIVERABLE_TYPE) AS deliverable_type, "
+        "ANY_VALUE(WP_DESCRIPTION) AS description, ANY_VALUE(WP_OWNER_NAME) AS owner, "
+        "STRING_AGG(DISTINCT IF(WP_RESOURCE_ASSIGNED = 'Not Assigned', NULL, WP_RESOURCE_ASSIGNED), ', ' "
+        "ORDER BY IF(WP_RESOURCE_ASSIGNED = 'Not Assigned', NULL, WP_RESOURCE_ASSIGNED)) AS resources, "
+        "ANY_VALUE(WP_ASSIGNMENT) AS assignment, ANY_VALUE(WP_PORTAL_STATUS) AS portal_status, "
+        "ANY_VALUE(Progress_Status) AS progress, ANY_VALUE(Performance_Status) AS performance, "
+        "ANY_VALUE(System_Flag) AS source_system, "
+        "ANY_VALUE(WP_BASELINE_START_DATE) AS bl_start, ANY_VALUE(WP_BASELINE_END_DATE) AS bl_end, "
+        "ANY_VALUE(WP_START_DATE) AS start_date, ANY_VALUE(WP_END_DATE) AS end_date, "
+        "ANY_VALUE(WP_RELEASE_DATE) AS release_date, ANY_VALUE(WP_COMPLETION_DATE) AS completion_date, "
+        "ANY_VALUE(WP_LAST_STATUS_DATE) AS last_status_date, ANY_VALUE(PLAN) AS plan_pct "
+        "FROM wrows GROUP BY WP_CODE) "
+    )
+    # Tasks and sub-tasks under the SELECTED work packages. The task report is
+    # ~10M exploded rows, so it is read only where a panel needs it and always
+    # through the WP selection, never scanned on its own.
+    gt = (gw + ", tasks AS (SELECT DISTINCT t.T_ST_FLAG AS kind, t.TASK_SUBTASK_ID AS task_id, "
+          "t.WP_CODE AS WP_CODE, COALESCE(NULLIF(TRIM(t.Progress_Status), ''), 'Unspecified') AS progress, "
+          "COALESCE(NULLIF(TRIM(t.Performance_Status), ''), 'NA') AS performance "
+          f"FROM {TSR} t JOIN wps w ON UPPER(TRIM(t.WP_CODE)) = UPPER(TRIM(w.WP_CODE)) "
+          "WHERE t.TASK_SUBTASK_ID IS NOT NULL) ")
+    wp_date = lambda c: f"IF({c} IS NULL, '', FORMAT_DATE('%d %b %Y', {c}))"
+    wp_register_cols = (
+        "WP_CODE AS wp_code, project, build, deliverable, deliverable_type, description, owner, "
+        "COALESCE(resources, 'Not Assigned') AS resources, progress, performance, portal_status, "
+        "plan_pct, "
+        f"{wp_date('bl_start')} AS bl_start, {wp_date('bl_end')} AS bl_end, "
+        f"{wp_date('start_date')} AS start_date, {wp_date('end_date')} AS end_date, "
+        f"{wp_date('release_date')} AS release_date, {wp_date('completion_date')} AS completion_date, "
+        f"{wp_date('last_status_date')} AS last_status_date, source_system"
+    )
+    wp_register_labels = {
+        "wp_code": "WP Code", "project": "Project", "build": "Build", "deliverable": "Deliverable",
+        "deliverable_type": "Deliverable Type", "description": "Description", "owner": "WP Owner",
+        "resources": "Resources Assigned", "progress": "Progress Status",
+        "performance": "Performance Status", "portal_status": "Portal Status",
+        "plan_pct": "Plan %", "bl_start": "Baseline Start", "bl_end": "Baseline Finish",
+        "start_date": "Current Start", "end_date": "Current Finish", "release_date": "Release Date",
+        "completion_date": "Last Workdone", "last_status_date": "Last Status Date",
+        "source_system": "Source",
+    }
+    # Row click on a register → that work package's tasks and sub-tasks.
+    wp_task_drill_sql = (
+        "SELECT * FROM (SELECT DISTINCT t.T_ST_FLAG AS kind, "
+        "COALESCE(NULLIF(TRIM(t.Task_Sub_Task_Code), ''), '') AS code, "
+        "COALESCE(NULLIF(TRIM(t.TASK_LABEL), ''), '') AS task, "
+        "COALESCE(NULLIF(TRIM(t.SUBTASK_LABEL), ''), '') AS sub_task, "
+        "COALESCE(NULLIF(TRIM(t.TASK_USER_ASSIGN), ''), 'Not Assigned') AS assigned_to, "
+        "COALESCE(NULLIF(TRIM(t.Progress_Status), ''), 'Unspecified') AS progress, "
+        "COALESCE(NULLIF(TRIM(t.Performance_Status), ''), 'NA') AS performance, "
+        "COALESCE(NULLIF(TRIM(t.TASK_PORTAL_STATUS), ''), '') AS portal_status, "
+        "SAFE_CAST(t.PLAN AS INT64) AS plan_pct, "
+        "COALESCE(t.START_DATE, '') AS start_date, COALESCE(t.END_DATE, '') AS end_date, "
+        "COALESCE(t.LAST_WORKDONE_DATE, '') AS last_workdone, "
+        "COALESCE(t.TASK_LAST_STATUS_DATE, '') AS last_status_date, "
+        "t.TASK_SUBTASK_ID AS task_id "
+        f"FROM {TSR} t WHERE UPPER(TRIM(t.WP_CODE)) = UPPER(TRIM('{{label}}')) "
+        "AND t.TASK_SUBTASK_ID IS NOT NULL) "
+        "ORDER BY kind DESC, code, task, sub_task LIMIT 500"
+    )
+    wp_task_drill_labels = {
+        "kind": "Type", "code": "Code", "task": "Task", "sub_task": "Sub-Task",
+        "assigned_to": "Assigned To", "progress": "Progress Status",
+        "performance": "Performance Status", "portal_status": "Portal Status",
+        "plan_pct": "Plan %", "start_date": "Start", "end_date": "Finish",
+        "last_workdone": "Last Workdone", "last_status_date": "Last Status Date",
+        "task_id": "Task Id",
+    }
+    # Bar click on a project / owner / resource chart → its work packages.
+    def _wp_drill_by(col: str) -> str:
+        return (gw + f"SELECT {wp_register_cols} FROM wps WHERE {col} = '{{label}}' "
+                "ORDER BY progress, project, WP_CODE LIMIT 500")
+    wp_kpi = lambda pred: gw + f"SELECT COUNT(*) AS value FROM wps WHERE {pred}"
+
+    dash_governance = {
+        "title": "Governance (Work Packages)",
+        "description": (f"Project Flow work packages for {label} — assignment, progress and "
+                        f"performance by project, owner and resource, with the task and sub-task "
+                        f"breakdown behind every row. Mirrors the Qlik Governance Dashboard - PF."),
+        "kpis": [
+            {"id": "pb_gv_total", "title": "Total Work Packages", "format": "number", "icon": "Layers",
+             "sql": gw + "SELECT COUNT(*) AS value FROM wps"},
+            {"id": "pb_gv_assigned", "title": "Assigned", "format": "number", "icon": "UserCheck",
+             "sql": wp_kpi("assignment = 'Assigned' AND progress != 'Others'")},
+            {"id": "pb_gv_unassigned", "title": "Not Assigned", "format": "number", "icon": "AlertTriangle",
+             "sql": wp_kpi("assignment = 'Not Assigned' AND progress != 'Others'")},
+            # Qlik's four "not started" tiles folded into one: Backlog,
+            # Initiation Pending, Upcoming and Future Task.
+            {"id": "pb_gv_notstarted", "title": "Not Started", "format": "number", "icon": "Clock",
+             "sql": wp_kpi("progress IN ('Backlog', 'Initiation Pending', 'Upcoming', 'Future Task')")},
+            {"id": "pb_gv_inprog", "title": "In-Progress", "format": "number", "icon": "Activity",
+             "sql": wp_kpi("progress = 'In-Progress'")},
+            {"id": "pb_gv_ontrack", "title": "In-Progress · On-Track", "format": "number", "icon": "TrendingUp",
+             "sql": wp_kpi("progress = 'In-Progress' AND performance = 'On-Track'")},
+            {"id": "pb_gv_behind", "title": "In-Progress · Behind", "format": "number", "icon": "AlertTriangle",
+             "sql": wp_kpi("progress = 'In-Progress' AND performance = 'Behind'")},
+            {"id": "pb_gv_completed", "title": "Completed", "format": "number", "icon": "CheckCircle",
+             "sql": wp_kpi("progress = 'Completed'")},
+            {"id": "pb_gv_ontime", "title": "Completed · On-Time", "format": "number", "icon": "CheckCircle",
+             "sql": wp_kpi("progress = 'Completed' AND performance = 'On-Time'")},
+            {"id": "pb_gv_delayed", "title": "Completed · Delayed", "format": "number", "icon": "AlertTriangle",
+             "sql": wp_kpi("progress = 'Completed' AND performance = 'Delayed'")},
+            {"id": "pb_gv_tasks", "title": "Tasks", "format": "number", "icon": "Layers",
+             "sql": gt + "SELECT COUNT(DISTINCT task_id) AS value FROM tasks WHERE kind = 'Task'"},
+            {"id": "pb_gv_subtasks", "title": "Sub-Tasks", "format": "number", "icon": "Layers",
+             "sql": gt + "SELECT COUNT(DISTINCT task_id) AS value FROM tasks WHERE kind = 'Sub Task'"},
+        ],
+        "charts": [
+            {"id": "pb_gv_progress", "type": "donut",
+             "title": "Progress Status",
+             "subtitle": "Work packages by progress status.",
+             "labelKey": "status", "valueKeys": ["work_packages"],
+             "sql": gw + "SELECT progress AS status, COUNT(*) AS work_packages FROM wps "
+                         "GROUP BY status ORDER BY work_packages DESC LIMIT 10"},
+            {"id": "pb_gv_perf", "type": "bar",
+             "title": "Performance Analysis",
+             "subtitle": "Work packages by performance status (NA excluded, as in Qlik).",
+             "labelKey": "status", "valueKeys": ["work_packages"],
+             "sql": gw + "SELECT performance AS status, COUNT(*) AS work_packages FROM wps "
+                         "WHERE performance != 'NA' GROUP BY status ORDER BY work_packages DESC LIMIT 12"},
+            {"id": "pb_gv_portal", "type": "donut",
+             "title": "Portal Status",
+             "subtitle": "Where each work package sits in the PF portal workflow.",
+             "labelKey": "status", "valueKeys": ["work_packages"],
+             "sql": gw + "SELECT portal_status AS status, COUNT(*) AS work_packages FROM wps "
+                         "GROUP BY status ORDER BY work_packages DESC LIMIT 10"},
+            {"id": "pb_gv_taskprog", "type": "donut",
+             "title": "Task Progress Analysis",
+             "subtitle": "Tasks and sub-tasks under the selected work packages, by progress status.",
+             "labelKey": "status", "valueKeys": ["tasks"],
+             "sql": gt + "SELECT progress AS status, COUNT(DISTINCT task_id) AS tasks FROM tasks "
+                         "GROUP BY status ORDER BY tasks DESC LIMIT 10"},
+            {"id": "pb_gv_timeline", "type": "bar", "span": "full",
+             "title": "Baseline Timeline",
+             "subtitle": "Work packages by baseline start month and progress status — trailing 12 months "
+                         "and the next 6 unless a baseline year is selected.",
+             "labelKey": "month", "valueKeys": ["backlog", "upcoming", "future_task",
+                                                "initiation_pending", "in_progress", "completed"],
+             "sql": gw + "SELECT FORMAT_DATE('%b %Y', DATE_TRUNC(bl_start, MONTH)) AS month, "
+                         "DATE_TRUNC(bl_start, MONTH) AS m, "
+                         "COUNTIF(progress = 'Backlog') AS backlog, "
+                         "COUNTIF(progress = 'Upcoming') AS upcoming, "
+                         "COUNTIF(progress = 'Future Task') AS future_task, "
+                         "COUNTIF(progress = 'Initiation Pending') AS initiation_pending, "
+                         "COUNTIF(progress = 'In-Progress') AS in_progress, "
+                         "COUNTIF(progress = 'Completed') AS completed "
+                         "FROM wps WHERE bl_start IS NOT NULL AND ('{f:wp_year}' != '' OR bl_start BETWEEN "
+                         "DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 12 MONTH) AND "
+                         "DATE_ADD(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 6 MONTH)) "
+                         "GROUP BY month, m ORDER BY m LIMIT 60"},
+            {"id": "pb_gv_project", "type": "bar", "variant": "horizontal",
+             "title": "Project Analysis",
+             "subtitle": "Top 25 projects by work-package count. Click a bar for its work packages.",
+             "labelKey": "project", "valueKeys": ["work_packages"],
+             "sql": gw + "SELECT project, COUNT(*) AS work_packages FROM wps "
+                         "GROUP BY project ORDER BY work_packages DESC LIMIT 25",
+             "drillSql": _wp_drill_by("project"),
+             "drillTitle": "Work packages — {label}",
+             "columnLabels": wp_register_labels,
+             "columnRules": {"progress": {"kind": "status"}, "performance": {"kind": "status"}}},
+            {"id": "pb_gv_resource", "type": "bar", "variant": "horizontal",
+             "title": "By Resource",
+             "subtitle": "Top 25 assigned resources by work-package count.",
+             "labelKey": "resource", "valueKeys": ["work_packages"],
+             "sql": gw + "SELECT WP_RESOURCE_ASSIGNED AS resource, COUNT(DISTINCT WP_CODE) AS work_packages "
+                         "FROM wrows WHERE WP_RESOURCE_ASSIGNED != 'Not Assigned' "
+                         "GROUP BY resource ORDER BY work_packages DESC LIMIT 25",
+             "drillSql": (gw + f"SELECT {wp_register_cols} FROM wps WHERE WP_CODE IN "
+                          "(SELECT WP_CODE FROM wrows WHERE WP_RESOURCE_ASSIGNED = '{label}') "
+                          "ORDER BY progress, project, WP_CODE LIMIT 500"),
+             "drillTitle": "Work packages — {label}",
+             "columnLabels": wp_register_labels,
+             "columnRules": {"progress": {"kind": "status"}, "performance": {"kind": "status"}}},
+            {"id": "pb_gv_owner", "type": "bar",
+             "title": "By Owner",
+             "subtitle": "Top 15 work-package owners.",
+             "labelKey": "owner", "valueKeys": ["work_packages"],
+             "sql": gw + "SELECT owner, COUNT(*) AS work_packages FROM wps "
+                         "WHERE owner != 'Unassigned' GROUP BY owner ORDER BY work_packages DESC LIMIT 15",
+             "drillSql": _wp_drill_by("owner"),
+             "drillTitle": "Work packages — {label}",
+             "columnLabels": wp_register_labels,
+             "columnRules": {"progress": {"kind": "status"}, "performance": {"kind": "status"}}},
+            {"id": "pb_gv_assign", "type": "bar",
+             "title": "Assignment Status",
+             "subtitle": "Assigned = at least one named resource on the work package.",
+             "labelKey": "assignment", "valueKeys": ["work_packages"],
+             "sql": gw + "SELECT assignment, COUNT(*) AS work_packages FROM wps "
+                         "GROUP BY assignment ORDER BY work_packages DESC"},
+            # Qlik "Exception Report": work packages that should have moved
+            # and have not — Initiation Pending and Backlog — plus the
+            # orphans Qlik files under Others (resource removed, no baseline).
+            {"id": "pb_gv_exception", "type": "table", "span": "full",
+             "title": "Exception Report",
+             "subtitle": "Work packages in Initiation Pending, Backlog or Others. Click a row for its tasks.",
+             "labelKey": "wp_code", "valueKeys": ["plan_pct"],
+             "maxRows": 1000, "tableHeight": 480,
+             "columnLabels": wp_register_labels,
+             "columnRules": {"progress": {"kind": "status"}, "performance": {"kind": "status"}},
+             "sql": gw + f"SELECT {wp_register_cols} FROM wps "
+                         "WHERE progress IN ('Initiation Pending', 'Backlog', 'Others') "
+                         "ORDER BY progress, bl_start, project, WP_CODE LIMIT 1000",
+             "drillSql": wp_task_drill_sql,
+             "drillTitle": "{label} — tasks and sub-tasks"},
+            {"id": "pb_gv_detail", "type": "table", "span": "full",
+             "title": "WP Detail Report",
+             "subtitle": "One row per work package with its resources rolled up. Click a row for its tasks.",
+             "labelKey": "wp_code", "valueKeys": ["plan_pct"],
+             "maxRows": 2000, "tableHeight": 560,
+             "columnLabels": wp_register_labels,
+             "columnRules": {"progress": {"kind": "status"}, "performance": {"kind": "status"}},
+             "sql": gw + f"SELECT {wp_register_cols} FROM wps "
+                         "ORDER BY project, build, WP_CODE LIMIT 2000",
+             "drillSql": wp_task_drill_sql,
+             "drillTitle": "{label} — tasks and sub-tasks"},
+        ],
+        # Qlik's filter pane carries Status (assignment), Project, Line of
+        # Business, System Label, Build, Phase and Deliverable. Line of
+        # Business and Phase have no column in WP_Report (Phase exists only on
+        # the task report), so they are replaced with the status and date
+        # fields the sheet otherwise reaches through selections.
+        "filters": [{"field": "wp_project", "label": "Project"},
+                    {"field": "wp_build", "label": "Build"},
+                    {"field": "wp_deliverable_type", "label": "Deliverable Type"},
+                    {"field": "wp_assignment", "label": "Assignment"},
+                    {"field": "wp_resource", "label": "Resource"},
+                    {"field": "wp_owner", "label": "WP Owner"},
+                    {"field": "wp_progress", "label": "Progress Status"},
+                    {"field": "wp_performance", "label": "Performance Status"},
+                    {"field": "wp_portal", "label": "Portal Status"},
+                    {"field": "wp_system", "label": "Source System"},
+                    {"field": "wp_year", "label": "Baseline Year"},
+                    {"field": "wp_month", "label": "Baseline Month"}],
+        # The feed's own freshness, because this one has gone stale before:
+        # on 4 Nov 2026 the newest status date in WP_Report was 11 Jun 2026
+        # while the Qlik app reloaded that morning.
+        "periodSql": (gw + "SELECT CONCAT('baselines ', "
+                           "COALESCE(FORMAT_DATE('%b %Y', MIN(bl_start)), '?'), ' – ', "
+                           "COALESCE(FORMAT_DATE('%b %Y', MAX(bl_start)), '?'), "
+                           "' · feed last updated ', "
+                           "COALESCE(FORMAT_DATE('%d %b %Y', MAX(last_status_date)), 'unknown')) AS label, "
+                           "CAST(MIN(bl_start) AS STRING) AS start_date, "
+                           "CAST(MAX(bl_start) AS STRING) AS end_date FROM wps"),
+    }
+
     defs = [
         {"key": "attendance", "config": dash_attendance},
         {"key": "workforce",  "config": dash_workforce},
         {"key": "delivery",   "config": dash_delivery},
         {"key": "timesheet",  "config": dash_timesheet},
+        {"key": "governance", "config": dash_governance},
     ]
 
     if _user_can_see_sales(user):
@@ -10627,7 +10968,9 @@ def get_prebuilt_dashboard(key: str, user: dict = Depends(get_current_user)):
         if d["key"] == key:
             return {"id": f"pb-{key}", "key": key, "name": d["config"]["title"],
                     "description": d["config"].get("description") or "",
-                    "config": d["config"], "is_prebuilt": True}
+                    # The flag rides inside the config so the runner can tell a
+                    # prebuilt apart even when the client omits dashboard_id.
+                    "config": {**d["config"], "prebuilt": True}, "is_prebuilt": True}
     raise HTTPException(status_code=404, detail="Prebuilt dashboard not found")
 
 
@@ -13072,7 +13415,7 @@ def availability_suggest_work(body: SuggestWorkBody, user: dict = Depends(get_cu
                f"Tagged skills: {', '.join(skills) if skills else 'NONE tagged'}\n"
                f"Current / ending projects: {', '.join(cur_proj) if cur_proj else 'unknown'}")
         resp = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model=GEMINI_MODEL,
             contents=ctx,
             config=genai.types.GenerateContentConfig(
                 system_instruction=(
@@ -14009,7 +14352,7 @@ def get_briefing(user: dict = Depends(get_current_user)):
     try:
         client = get_genai_client()
         resp = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model=GEMINI_MODEL,
             contents=(f"Listener's first name: {first_name}. Today is {today_label}.\n"
                       f"FINDINGS (already verified — use ONLY these, do not invent numbers or names):\n{findings}"),
             config=genai.types.GenerateContentConfig(
@@ -14503,7 +14846,7 @@ def availability_find_best_fit(body: dict, user: dict = Depends(get_current_user
     )
     try:
         resp = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model=GEMINI_MODEL,
             contents=[genai.types.Content(role="user", parts=[genai.types.Part(text=user_msg)])],
             config=genai.types.GenerateContentConfig(
                 system_instruction=system_instruction,
@@ -15105,7 +15448,7 @@ def report_refine(body: dict, user: dict = Depends(get_current_user)):
     _lessons = _sql_lessons_block()
     try:
         resp = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model=GEMINI_MODEL,
             contents=contents,
             config=genai.types.GenerateContentConfig(
                 system_instruction=(
